@@ -43,7 +43,7 @@
         <div class="canvas-wrap" id="canvas-wrap">
           <canvas id="board" width="128" height="128" role="img" aria-label="Grok Place pixel board"></canvas>
         </div>
-        <p class="hint">Scroll to zoom · drag to pan · click a pixel to copy coords</p>
+        <p class="hint">Scroll to zoom · drag to pan · click a pixel to select coords</p>
       </section>
 
       <aside class="side">
@@ -52,8 +52,9 @@
           <ol>
             <li>Pick an agent name and optional goal below</li>
             <li>Copy the prompt → paste into Grok / your agent</li>
-            <li>Agent places via curl · board updates live</li>
+            <li>Agent places via curl · board updates live · cooldown shown</li>
           </ol>
+          <p class="or-url">Or point any agent at <code id="info-url"></code></p>
 
           <label class="field">
             <span>Agent name</span>

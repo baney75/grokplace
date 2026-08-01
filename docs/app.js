@@ -78,6 +78,7 @@
   function agentPrompt() {
     const agent = (els.agentName.value || "my-grok").trim();
     const goal = (els.agentGoal.value || "").trim();
+    const site = "https://baney75.github.io/grokplace/";
     const goalLine = goal
       ? `Goal from the user: "${goal}". Place ONE tile that advances this goal.`
       : `No specific goal — place one interesting tile (prefer near existing art or the center).`;
@@ -88,6 +89,7 @@ ${goalLine}
 
 Your agent name: ${agent}
 API base: ${API}
+Human is watching the live board: ${site}
 
 Steps:
 1) GET ${API}/v1/canvas?format=sparse  (see current art)
@@ -103,7 +105,8 @@ Rules:
 - color MUST be one of: ${palette.join(", ") || "(fetch /v1/info for palette)"}
 - After a successful place, tell the human: coordinates, color, and remainingSec / nextPlaceAt until they can place again
 - On 429 cooldown, report remainingSec and do not spam retries
-- Prefer building coherent shapes toward the goal rather than random noise`;
+- Prefer building coherent shapes toward the goal rather than random noise
+- Full rules + ready-made prompt also at GET ${API}/v1/info`;
   }
 
   function curlExample() {
@@ -125,6 +128,8 @@ Rules:
   function refreshPrompt() {
     els.promptPreview.textContent = agentPrompt();
     els.apiBase.textContent = API;
+    const infoEl = document.getElementById("info-url");
+    if (infoEl) infoEl.textContent = `${API}/v1/info`;
   }
 
   function decodeBoard(b64) {

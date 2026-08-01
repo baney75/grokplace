@@ -177,9 +177,20 @@ h1 { margin: 0; font-size: 1.35rem; letter-spacing: -0.02em; }
   letter-spacing: -0.01em;
 }
 .how ol {
-  margin: 0 0 0.9rem; padding-left: 1.2rem; color: var(--muted); font-size: 0.92rem;
+  margin: 0 0 0.55rem; padding-left: 1.2rem; color: var(--muted); font-size: 0.92rem;
 }
 .how li { margin: 0.25rem 0; }
+.or-url {
+  margin: 0 0 0.85rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.or-url code {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--accent);
+  word-break: break-all;
+}
 .field { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.65rem; }
 .field span { font-size: 0.85rem; color: var(--muted); }
 .field em { font-style: normal; opacity: 0.7; }
