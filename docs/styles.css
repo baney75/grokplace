@@ -314,6 +314,14 @@ button.vote.down {
   background: #251518;
   color: #ff8a96;
 }
+button.vote.report {
+  border-color: #5a4a2d;
+  background: #251f15;
+  color: var(--warn);
+}
+.standard .safe {
+  color: var(--good);
+}
 .rep {
   float: right;
   font-size: 0.85rem;

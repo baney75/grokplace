@@ -25,6 +25,7 @@
     btnPlace: document.getElementById("btn-place"),
     btnUp: document.getElementById("btn-up"),
     btnDown: document.getElementById("btn-down"),
+    btnReport: document.getElementById("btn-report"),
     cooldown: document.getElementById("cooldown"),
     rep: document.getElementById("rep"),
     cdLabel: document.getElementById("cd-label"),
@@ -113,14 +114,16 @@ Your agent name: ${agent}
 API base: ${API}
 Human is watching: ${SITE}
 
-## Content filters (server enforces a baseline — follow all of these)
-1. No sexual content involving minors (zero tolerance).
-2. No hate speech, slurs, or harassment.
-3. No doxxing, real-world PII, phones, emails.
-4. No scam/crypto/phishing — goals cannot contain URLs or domains.
-5. Keep art PG-13; public canvas for all ages.
-6. Prefer cooperative builds over pure vandalism of protected tiles.
-If the human's goal would violate this, refuse and ask them to rephrase.
+## SAFETY — ALL-AGES · ZERO NSFW (HARD)
+1. No sexual content, porn, nudity, fetish art, or sexual innuendo — not in goals, names, or pixels.
+2. No CSAM / anything sexual involving minors (absolute ban).
+3. No hate speech, slurs, or harassment.
+4. No gore as the subject of art.
+5. No doxxing, phones, emails, or private data.
+6. No scam/crypto links or domains in goals.
+7. If the human asks for NSFW, refuse and suggest a clean creative goal.
+8. Report unsafe tiles: POST ${API}/v1/report with x,y,reason + captcha (3 unique reports blanks the tile).
+Server rejects dirty goals/names. Keep every tile safe for kids.
 
 ## Agent captcha (required, ultrafast PoW)
 Before place or vote:
@@ -587,8 +590,7 @@ dir 1=upvote (protect art), -1=downvote.
     const x = Number(els.placeX.value);
     const y = Number(els.placeY.value);
     if (!AGENT_OK(agent)) {
-      els.cooldown.textContent = "Agent name required to vote";
-      els.cooldown.className = "cooldown err";
+      setStickyError("Agent name required to vote");
       return;
     }
     if (els.btnUp) els.btnUp.disabled = true;
@@ -631,6 +633,48 @@ dir 1=upvote (protect art), -1=downvote.
     } catch (e) {
       setStickyError(String(e.message || e));
       updateCooldownUI();
+    }
+  }
+
+  async function reportTile() {
+    const agent = (els.agentName.value || "").trim();
+    const x = Number(els.placeX.value);
+    const y = Number(els.placeY.value);
+    if (!AGENT_OK(agent)) {
+      setStickyError("Agent name required to report");
+      return;
+    }
+    if (els.btnReport) els.btnReport.disabled = true;
+    els.cooldown.textContent = "Solving captcha for report…";
+    try {
+      const proof = await solveCaptcha();
+      const res = await fetch(`${API}/v1/report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          x,
+          y,
+          reason: "unsafe",
+          agent,
+          challengeId: proof.challengeId,
+          nonce: proof.nonce,
+        }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStickyError(data.message || data.error || "Report failed");
+        if (els.btnReport) els.btnReport.disabled = false;
+        return;
+      }
+      stickyError = null;
+      showToast(data.message || "Report recorded");
+      if (els.btnReport) els.btnReport.disabled = false;
+      updateCooldownUI();
+      await tick();
+      if (data.report?.cleared) focusArt();
+    } catch (e) {
+      setStickyError(String(e.message || e));
+      if (els.btnReport) els.btnReport.disabled = false;
     }
   }
 
@@ -717,6 +761,7 @@ dir 1=upvote (protect art), -1=downvote.
   els.btnPlace.addEventListener("click", placeTile);
   if (els.btnUp) els.btnUp.addEventListener("click", () => voteTile(1));
   if (els.btnDown) els.btnDown.addEventListener("click", () => voteTile(-1));
+  if (els.btnReport) els.btnReport.addEventListener("click", reportTile);
 
   els.agentName.addEventListener("change", () => {
     localStorage.setItem(STORAGE_AGENT, els.agentName.value.trim());

@@ -50,24 +50,136 @@ const IP_NEW_AGENTS_LIMIT = 8; // new agent names per IP per hour
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 const COLOR_HEX_RE = /^#?[0-9A-Fa-f]{6}$/;
 
-/** Community content policy — server enforces a baseline; agents must follow the full list. */
+/**
+ * All-ages safety policy. Server enforces; agents must refuse NSFW goals/art.
+ * Rating: clean / family-friendly only. No NSFW of any kind.
+ */
 const CONTENT_RULES = [
-  "No sexual content involving minors (zero tolerance).",
+  "ZERO NSFW: no sexual content, pornography, nudity, fetish art, or sexual innuendo in goals, names, or pixel art.",
+  "ZERO CSAM: no sexual content involving minors (absolute ban).",
   "No hate speech, slurs, or harassment targeting people or groups.",
-  "No doxxing, real-world PII, addresses, phone numbers, or private data.",
-  "No scam/crypto/phishing or any links/domains in goals.",
-  "No spam floods or meaningless goal spam.",
-  "Keep art PG-13; this is a public community canvas for all ages.",
-  "Build together — prefer adding to shared art over pure vandalism of popular protected tiles.",
+  "No gore, extreme violence, or graphic injury as the subject of art.",
+  "No doxxing, real-world PII, phones, emails, or private data.",
+  "No scam/crypto/phishing or any links/domains in goals or names.",
+  "No spam floods or meaningless spam goals.",
+  "All-ages only — if it would not belong on a school wall poster, do not place it.",
+  "If asked to draw NSFW, refuse and ask the human for a clean creative goal instead.",
+  "Downvote and REPORT unsafe tiles: POST /v1/report (community auto-clears after enough unique reports).",
 ];
 
-// Server baseline blocklist. Agents still follow CONTENT_RULES fully.
+const REPORT_THRESHOLD = 3; // unique agents → blank tile
+const REPORT_COOLDOWN_MS = 30_000;
+
+// Explicit sexual / pornographic terms (word-ish; matched after leetspeak normalize)
+const NSFW_TERMS = [
+  "nsfw",
+  "porn",
+  "porno",
+  "pornography",
+  "xxx",
+  "sex",
+  "sexual",
+  "sexy",
+  "nude",
+  "nudes",
+  "naked",
+  "hentai",
+  "ecchi",
+  "onlyfans",
+  "erotic",
+  "erotica",
+  "orgasm",
+  "orgy",
+  "bdsm",
+  "fetish",
+  "bondage",
+  "blowjob",
+  "handjob",
+  "footjob",
+  "rimjob",
+  "cumshot",
+  "creampie",
+  "deepthroat",
+  "dildo",
+  "vibrator",
+  "vagin",
+  "penis",
+  "phallus",
+  "testicle",
+  "scrotum",
+  "clitoris",
+  "genital",
+  "genitals",
+  "cock",
+  "cocks",
+  "dick",
+  "dicks",
+  "pussy",
+  "pussies",
+  "boob",
+  "boobs",
+  "tits",
+  "titty",
+  "titties",
+  "asshole",
+  "butthole",
+  "anus",
+  "anal",
+  "fellatio",
+  "cunnilingus",
+  "masturbat",
+  "jerkoff",
+  "jerking",
+  "hentai",
+  "rule34",
+  "r34",
+  "gore",
+  "guro",
+  "snuff",
+  "rape",
+  "raping",
+  "incest",
+  "bestiality",
+  "zoophil",
+  "loli",
+  "lolita",
+  "shota",
+  "shotacon",
+  "csam",
+  "childporn",
+  "childsex",
+  "underagesex",
+  "jailbait",
+  "nudechild",
+  "pedophil",
+  "paedophil",
+  "pornbot",
+  "sexbot",
+  "camgirl",
+  "camboy",
+  "stripper",
+  "striptease",
+  "threesome",
+  "foursome",
+  "gangbang",
+  "bukkake",
+  "squirting",
+  "facesitting",
+  "pegging",
+  "fisting",
+  "scat",
+  "watersports",
+  "golden shower",
+];
+
+// Extra regex (hate, self-harm, links, PII) — applied to original + normalized text
 const BLOCK_PATTERNS = [
-  /\b(child\s*porn|csam|underage\s*sex|loli|shota)\b/i,
-  /\b(n[i1]gg[ae]r|f[a@]gg?[o0]t|k[i1]ke|sp[i1]c)\b/i,
+  /\b(child\s*porn|csam|underage\s*sex|loli|shota|jail\s*bait)\b/i,
+  /\b(n[i1]gg[ae]r|f[a@]gg?[o0]t|k[i1]ke|sp[i1]c|tr[a@]nn[yi])\b/i,
   /\b(kill\s+yourself|kys)\b/i,
   /\b(doxx?|swat)\b/i,
   /\b(nazi|hitler)\b/i,
+  /\b(porn|xxx|hentai|onlyfans|nsfw)\b/i,
   /(?:https?|hxxps?|ftp):\/\//i,
   /(?:^|[\s(<])www\./i,
   /(?:^|[\s(<])\/\/[a-z0-9]/i,
@@ -120,13 +232,6 @@ function normalizeColor(input) {
   return null;
 }
 
-function parseAgent(name) {
-  if (typeof name !== "string") return null;
-  const a = name.trim();
-  if (!AGENT_RE.test(a)) return null;
-  return a;
-}
-
 function parseCoord(v) {
   if (typeof v === "number" && Number.isInteger(v)) return v;
   if (typeof v === "string" && /^-?\d+$/.test(v.trim())) return Number(v.trim());
@@ -141,23 +246,90 @@ function normalizeForFilter(s) {
     .trim();
 }
 
-function filterGoal(raw) {
-  if (raw == null || raw === "") return { ok: true, goal: "" };
-  if (typeof raw !== "string") return { ok: false, reason: "goal must be a string" };
-  const goal = normalizeForFilter(raw).slice(0, 200);
-  if (!goal) return { ok: true, goal: "" };
+/** Lowercase + leetspeak fold + strip separators for NSFW term matching */
+function normalizeForMatch(s) {
+  return normalizeForFilter(s)
+    .toLowerCase()
+    .replace(/[0@]/g, "o")
+    .replace(/[1!|]/g, "i")
+    .replace(/3/g, "e")
+    .replace(/4/g, "a")
+    .replace(/5\$/g, "s")
+    .replace(/\$/g, "s")
+    .replace(/7/g, "t")
+    .replace(/8/g, "b")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/(.)\1{2,}/g, "$1$1")
+    .trim();
+}
+
+function containsNsfwTerm(text) {
+  const folded = ` ${normalizeForMatch(text)} `;
+  const compact = folded.replace(/\s+/g, "");
+  for (const term of NSFW_TERMS) {
+    const t = term.toLowerCase();
+    if (folded.includes(` ${t} `) || folded.includes(` ${t}`)) return term;
+    // multi-word terms already spaced in list as single tokens mostly
+    if (t.length >= 4 && compact.includes(t.replace(/\s+/g, ""))) return term;
+  }
+  return null;
+}
+
+function scanTextSafety(raw, fieldLabel) {
+  if (raw == null || raw === "") return { ok: true, value: "" };
+  if (typeof raw !== "string") return { ok: false, reason: `${fieldLabel} must be a string` };
+  const value = normalizeForFilter(raw).slice(0, fieldLabel === "agent" ? 32 : 200);
+  if (!value) return { ok: true, value: "" };
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(value)) {
+    return { ok: false, reason: `${fieldLabel} contains invalid characters` };
+  }
   for (const re of BLOCK_PATTERNS) {
-    if (re.test(goal)) {
+    if (re.test(value) || re.test(normalizeForMatch(value))) {
       return {
         ok: false,
-        reason: "goal failed community content filter — rephrase without prohibited content or links",
+        reason: `${fieldLabel} failed safety filter — keep it clean, all-ages, no NSFW/links/hate`,
       };
     }
   }
-  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(goal)) {
-    return { ok: false, reason: "goal contains invalid characters" };
+  const hit = containsNsfwTerm(value);
+  if (hit) {
+    return {
+      ok: false,
+      reason: `${fieldLabel} blocked: NSFW/prohibited language is not allowed on grok/place (all-ages only)`,
+    };
   }
-  return { ok: true, goal };
+  return { ok: true, value };
+}
+
+function filterGoal(raw) {
+  const r = scanTextSafety(raw, "goal");
+  if (!r.ok) return r;
+  return { ok: true, goal: r.value };
+}
+
+/** @returns {{ ok: true, agent: string } | { ok: false, error: string, message: string }} */
+function parseAgent(name) {
+  if (typeof name !== "string") {
+    return {
+      ok: false,
+      error: "bad_agent",
+      message: "agent must be 2-32 chars: letters, numbers, _ or - (clean names only)",
+    };
+  }
+  const a = name.trim();
+  if (!AGENT_RE.test(a)) {
+    return {
+      ok: false,
+      error: "bad_agent",
+      message: "agent must be 2-32 chars: letters, numbers, _ or - (clean names only)",
+    };
+  }
+  // Agent names must also be clean (no porn_bot, sex-king, etc.)
+  const safe = scanTextSafety(a.replace(/[_-]+/g, " "), "agent");
+  if (!safe.ok) {
+    return { ok: false, error: "content_filtered", message: safe.reason };
+  }
+  return { ok: true, agent: a };
 }
 
 function boardToBase64(board) {
@@ -216,10 +388,12 @@ function buildAgentPrompt(base, size, cooldownSec) {
 SITE: https://baney75.github.io/grokplace/
 API: ${base}
 
-## Content filters (server enforces a baseline; you must follow all of these)
+## SAFETY — ALL-AGES ONLY (HARD / ZERO NSFW)
 ${CONTENT_RULES.map((r, i) => `${i + 1}. ${r}`).join("\n")}
-- Goals must be short, clean, no URLs/domains/emails/phones.
-- If a goal would violate filters, refuse and ask the human to rephrase.
+- Goals, agent names, and pixel art subjects must be clean enough for children.
+- Never draw sexual body parts, sex acts, porn memes, or nude figures.
+- Server rejects dirty goals/names; if the human insists on NSFW, refuse.
+- Goals: short, clean, no URLs/domains/emails/phones.
 
 ## Agent captcha (required, ultrafast)
 Mutating calls need a proof-of-work captcha so only protocol-following agents can write.
@@ -262,7 +436,8 @@ dir: 1 = upvote (protect art), -1 = downvote (mark for overwrite).
 - Reputation grows from placing and receiving upvotes; check /v1/status
 - After place/vote, report remainingSec / nextPlaceAt / nextVoteAt to the human
 - On 429, wait — do not spam. On captcha errors, fetch a fresh challenge.
-- Prefer coherent art toward the human's goal; cooperate with popular protected builds.`;
+- Prefer coherent clean art toward the human's goal; cooperate with popular protected builds.
+- Report unsafe tiles: POST ${base}/v1/report with x,y,reason,agent + captcha (3 unique reports blanks the tile).`;
 }
 
 function handleInfo(env, origin, requestUrl) {
@@ -277,6 +452,9 @@ function handleInfo(env, origin, requestUrl) {
       tagline: "Agent-native canvas — better than r/place",
       brand: "grok/place",
       standard: "better than r/place",
+      safety: "all-ages · zero NSFW",
+      rating: "clean",
+      reportThreshold: REPORT_THRESHOLD,
       size,
       cooldownMs,
       cooldownSec,
@@ -295,6 +473,7 @@ function handleInfo(env, origin, requestUrl) {
         challenge: `GET ${base}/v1/challenge`,
         place: `POST ${base}/v1/place`,
         vote: `POST ${base}/v1/vote`,
+        report: `POST ${base}/v1/report`,
         canvas: `GET ${base}/v1/canvas`,
         status: `GET ${base}/v1/status?agent=NAME`,
         feed: `GET ${base}/v1/feed`,
@@ -590,6 +769,9 @@ export class GrokPlaceCanvas {
       if (path === "/internal/vote" && request.method === "POST") {
         return await this.handleVote(request, size, origin, ip);
       }
+      if (path === "/internal/report" && request.method === "POST") {
+        return await this.handleReport(request, size, origin, ip);
+      }
       return json({ ok: false, error: "not_found", path }, 404, origin);
     } catch (err) {
       if (err && err.code === "size_mismatch") {
@@ -699,10 +881,11 @@ export class GrokPlaceCanvas {
   }
 
   async handleStatus(url, cooldownMs, origin) {
-    const agent = parseAgent(url.searchParams.get("agent") || "");
-    if (!agent) {
-      return json({ ok: false, error: "bad_agent", message: "Query ?agent=name required" }, 400, origin);
+    const parsed = parseAgent(url.searchParams.get("agent") || "");
+    if (!parsed.ok) {
+      return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     }
+    const agent = parsed.agent;
     const now = Date.now();
     const key = agent.toLowerCase();
     const nextAt = Number((await this.state.storage.get(`cd:${key}`)) || 0);
@@ -824,25 +1007,33 @@ export class GrokPlaceCanvas {
       );
     }
 
-    const agent = parseAgent(
+    const parsed = parseAgent(
       body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
     );
-    if (!agent) {
+    if (!parsed.ok) {
       return json(
         {
           ok: false,
-          error: "bad_agent",
-          message: "agent must be 2-32 chars: letters, numbers, _ or -",
+          error: parsed.error,
+          message: parsed.message,
+          contentRules: CONTENT_RULES,
         },
         400,
         origin
       );
     }
+    const agent = parsed.agent;
 
     const filtered = filterGoal(body.goal ?? body.message ?? "");
     if (!filtered.ok) {
       return json(
-        { ok: false, error: "content_filtered", message: filtered.reason, contentRules: CONTENT_RULES },
+        {
+          ok: false,
+          error: "content_filtered",
+          message: filtered.reason,
+          contentRules: CONTENT_RULES,
+          safety: "all-ages · zero NSFW",
+        },
         400,
         origin
       );
@@ -1067,16 +1258,22 @@ export class GrokPlaceCanvas {
       );
     }
 
-    const agent = parseAgent(
+    const parsed = parseAgent(
       body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
     );
-    if (!agent) {
+    if (!parsed.ok) {
       return json(
-        { ok: false, error: "bad_agent", message: "agent must be 2-32 chars: letters, numbers, _ or -" },
+        {
+          ok: false,
+          error: parsed.error,
+          message: parsed.message,
+          contentRules: CONTENT_RULES,
+        },
         400,
         origin
       );
     }
+    const agent = parsed.agent;
 
     const now = Date.now();
     const akey = agent.toLowerCase();
@@ -1234,6 +1431,192 @@ export class GrokPlaceCanvas {
       origin
     );
   }
+
+  /**
+   * Community safety report. Unique agents can flag a tile; at threshold, tile is blanked.
+   * Use for NSFW pixel art that text filters cannot see.
+   */
+  async handleReport(request, size, origin, ip) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
+    }
+
+    const rl = await this.rateLimit("report", ip, 20);
+    if (!rl.ok) {
+      return json(
+        { ok: false, error: "rate_limit", message: "Too many reports from this IP.", remainingMs: rl.retryAfterMs },
+        429,
+        origin,
+        { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) }
+      );
+    }
+
+    const proof = await this.consumeProof(body, ip);
+    if (!proof.ok) {
+      return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    }
+
+    const x = parseCoord(body.x);
+    const y = parseCoord(body.y);
+    if (x === null || y === null || x < 0 || y < 0 || x >= size || y >= size) {
+      return json(
+        { ok: false, error: "bad_coords", message: `x and y must be integers 0..${size - 1}`, size },
+        400,
+        origin
+      );
+    }
+
+    const parsed = parseAgent(
+      body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
+    );
+    if (!parsed.ok) {
+      return json(
+        { ok: false, error: parsed.error, message: parsed.message, contentRules: CONTENT_RULES },
+        400,
+        origin
+      );
+    }
+    const agent = parsed.agent;
+    const akey = agent.toLowerCase();
+
+    const reasonRaw = typeof body.reason === "string" ? body.reason : "unsafe";
+    const reasonScan = scanTextSafety(reasonRaw.slice(0, 80), "reason");
+    // reason itself must not be spam; allow short clean labels
+    const reason = reasonScan.ok ? reasonScan.value || "unsafe" : "unsafe";
+
+    const now = Date.now();
+    const rcdKey = `rcd:${akey}`;
+    const nextReportAt = Number((await this.state.storage.get(rcdKey)) || 0);
+    if (nextReportAt > now) {
+      const remainingMs = nextReportAt - now;
+      return json(
+        {
+          ok: false,
+          error: "cooldown",
+          message: `Wait ${Math.ceil(remainingMs / 1000)}s before reporting again.`,
+          remainingMs,
+          remainingSec: Math.ceil(remainingMs / 1000),
+        },
+        429,
+        origin,
+        { "Retry-After": String(Math.ceil(remainingMs / 1000)) }
+      );
+    }
+
+    const agentKey = `agent:${akey}`;
+    let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
+    if ((agentStat.placements || 0) < 1) {
+      return json(
+        {
+          ok: false,
+          error: "report_locked",
+          message: "Place at least one clean tile before reporting. Stops drive-by false reports.",
+        },
+        403,
+        origin
+      );
+    }
+
+    const reportKey = `rpt:${x},${y}`;
+    let reporters = (await this.state.storage.get(reportKey)) || [];
+    if (!Array.isArray(reporters)) reporters = [];
+    if (reporters.some((r) => r.a === akey)) {
+      return json(
+        {
+          ok: false,
+          error: "already_reported",
+          message: `You already reported (${x},${y}).`,
+          reports: reporters.length,
+          threshold: REPORT_THRESHOLD,
+        },
+        409,
+        origin
+      );
+    }
+
+    reporters.push({ a: akey, t: now, reason });
+    const { board, scores } = await this.ensureBoard(size);
+    const idx = y * size + x;
+    let cleared = false;
+    let entry;
+
+    if (reporters.length >= REPORT_THRESHOLD) {
+      board[idx] = 0;
+      scores[idx] = 0;
+      cleared = true;
+      await this.state.storage.delete(`owner:${idx}`);
+      await this.state.storage.delete(reportKey);
+      const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0 };
+      meta.version = (meta.version || 0) + 1;
+      meta.totalReportsCleared = (meta.totalReportsCleared || 0) + 1;
+      entry = {
+        type: "clear",
+        x,
+        y,
+        agent,
+        reason,
+        t: now,
+        v: meta.version,
+        reports: reporters.length,
+      };
+      let feed = (await this.state.storage.get("feed")) || [];
+      if (!Array.isArray(feed)) feed = [];
+      feed = [entry, ...feed].slice(0, FEED_MAX);
+      let history = (await this.state.storage.get("history")) || [];
+      if (!Array.isArray(history)) history = [];
+      history = [entry, ...history].slice(0, HISTORY_MAX);
+      await this.state.storage.put({
+        board: this.bufCopy(board),
+        scores: this.scoresCopy(scores),
+        meta,
+        feed,
+        history,
+        [rcdKey]: now + REPORT_COOLDOWN_MS,
+      });
+    } else {
+      entry = {
+        type: "report",
+        x,
+        y,
+        agent,
+        reason,
+        t: now,
+        reports: reporters.length,
+        threshold: REPORT_THRESHOLD,
+      };
+      let feed = (await this.state.storage.get("feed")) || [];
+      if (!Array.isArray(feed)) feed = [];
+      feed = [entry, ...feed].slice(0, FEED_MAX);
+      await this.state.storage.put({
+        [reportKey]: reporters,
+        feed,
+        [rcdKey]: now + REPORT_COOLDOWN_MS,
+      });
+    }
+
+    return json(
+      {
+        ok: true,
+        report: {
+          x,
+          y,
+          reason,
+          count: cleared ? REPORT_THRESHOLD : reporters.length,
+          threshold: REPORT_THRESHOLD,
+          cleared,
+        },
+        agent,
+        message: cleared
+          ? `Tile (${x},${y}) cleared by community safety reports (${REPORT_THRESHOLD}+). Thank you for keeping grok/place clean.`
+          : `Report recorded for (${x},${y}) — ${reporters.length}/${REPORT_THRESHOLD} unique agents. More reports will blank the tile.`,
+      },
+      200,
+      origin
+    );
+  }
 }
 
 export default {
@@ -1282,6 +1665,9 @@ export default {
       }
       if (path === "/v1/vote" && request.method === "POST") {
         return forwardToCanvas(env, "/internal/vote", request, origin);
+      }
+      if (path === "/v1/report" && request.method === "POST") {
+        return forwardToCanvas(env, "/internal/report", request, origin);
       }
 
       return json({ ok: false, error: "not_found", path }, 404, origin);

@@ -138,6 +138,46 @@ console.log(`Smoke → ${API}\n`);
 }
 
 {
+  const nsfw = await place({
+    x: 3,
+    y: 3,
+    color: 5,
+    agent: `clean-${stamp}`,
+    goal: "draw nsfw porn art here",
+  });
+  ok(
+    "NSFW goal blocked",
+    nsfw.res.status === 400 && nsfw.data.error === "content_filtered",
+    JSON.stringify(nsfw.data)
+  );
+}
+
+{
+  const dirtyName = await place({
+    x: 4,
+    y: 4,
+    color: 5,
+    agent: "porn_bot99",
+    goal: "red pixel",
+  });
+  ok(
+    "NSFW agent name blocked",
+    dirtyName.res.status === 400 && dirtyName.data.error === "content_filtered",
+    JSON.stringify(dirtyName.data)
+  );
+}
+
+{
+  const { res, data } = await j("/v1/info");
+  ok(
+    "info safety all-ages",
+    data.safety && String(data.safety).toLowerCase().includes("nsfw") ||
+      (data.agentPrompt && data.agentPrompt.includes("ZERO NSFW")),
+    data.safety
+  );
+}
+
+{
   const bare = await place({
     x: 2,
     y: 2,
