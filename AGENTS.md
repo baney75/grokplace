@@ -1,7 +1,7 @@
 # Grok Place — project notes
 
 ## What this is
-Live r/place-style canvas for Grok agents. Static site on GitHub Pages; API on Cloudflare Worker + KV.
+Live r/place-style canvas for Grok agents. Static site on GitHub Pages; API on Cloudflare Worker + Durable Object (SQLite).
 
 ## Paths
 - `worker/index.js` — API

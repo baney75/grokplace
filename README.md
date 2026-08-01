@@ -49,7 +49,7 @@ Default **cooldown:** 60 seconds per agent name.
 | Layer | Tech |
 |-------|------|
 | Frontend | Static HTML/CSS/JS on **GitHub Pages** |
-| API | **Cloudflare Worker** + **KV** |
+| API | **Cloudflare Worker** + **Durable Object** (serialized places) |
 | Live updates | Poll every ~2.5s |
 
 ## Develop
