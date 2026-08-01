@@ -53,6 +53,9 @@
   let nextPlaceAt = 0;
   let nextVoteAt = 0;
   let reputation = 0;
+  let stickyError = null;
+  let stickyErrorUntil = 0;
+  let didAutoFocusArt = false;
 
   function randomAgent() {
     return `grok-${Math.random().toString(36).slice(2, 8)}`;
@@ -187,24 +190,33 @@ dir 1=upvote (protect art), -1=downvote.
   }
 
   function paint() {
-    const ctx = els.board.getContext("2d");
+    const ctx = els.board.getContext("2d", { alpha: true });
+    // clear so empty cells show the dark checker behind the canvas
+    ctx.clearRect(0, 0, size, size);
     const img = ctx.createImageData(size, size);
     const data = img.data;
     for (let i = 0; i < board.length; i++) {
-      const hex = palette[board[i]] || "#FFFFFF";
-      const r = parseInt(hex.slice(1, 3), 16);
-      const g = parseInt(hex.slice(3, 5), 16);
-      const b = parseInt(hex.slice(5, 7), 16);
       const o = i * 4;
+      const ci = board[i];
+      // Unpainted (0) stays transparent so the void checker shows — art pops
+      if (!ci) {
+        data[o + 3] = 0;
+        continue;
+      }
+      const hex = palette[ci] || "#FFFFFF";
+      let r = parseInt(hex.slice(1, 3), 16);
+      let g = parseInt(hex.slice(3, 5), 16);
+      let b = parseInt(hex.slice(5, 7), 16);
+      // subtle gold tint for protected
+      if (scores[i] >= protectScore) {
+        r = Math.min(255, r + 28);
+        g = Math.min(255, g + 18);
+        b = Math.min(255, Math.floor(b * 0.85));
+      }
       data[o] = r;
       data[o + 1] = g;
       data[o + 2] = b;
       data[o + 3] = 255;
-      // subtle gold tint for protected
-      if (scores[i] >= protectScore) {
-        data[o] = Math.min(255, data[o] + 20);
-        data[o + 1] = Math.min(255, data[o + 1] + 12);
-      }
     }
     ctx.putImageData(img, 0, 0);
     applyTransform();
@@ -220,10 +232,58 @@ dir 1=upvote (protect art), -1=downvote.
     const rect = els.wrap.getBoundingClientRect();
     const pad = 24;
     const s = Math.max(2, Math.floor((Math.min(rect.width, rect.height) - pad) / size));
-    scale = Math.min(12, Math.max(2, s));
+    scale = Math.min(14, Math.max(2, s));
     panX = 0;
     panY = 0;
     applyTransform();
+  }
+
+  /** Zoom + pan to painted region so sparse boards still feel alive */
+  function focusArt() {
+    let minX = size,
+      minY = size,
+      maxX = -1,
+      maxY = -1;
+    for (let i = 0; i < board.length; i++) {
+      if (!board[i] && !(scores[i] > 0)) continue;
+      const x = i % size;
+      const y = (i / size) | 0;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    if (maxX < 0) {
+      fitView();
+      return;
+    }
+    // pad region
+    minX = Math.max(0, minX - 4);
+    minY = Math.max(0, minY - 4);
+    maxX = Math.min(size - 1, maxX + 4);
+    maxY = Math.min(size - 1, maxY + 4);
+    const w = maxX - minX + 1;
+    const h = maxY - minY + 1;
+    const rect = els.wrap.getBoundingClientRect();
+    const pad = 32;
+    const s = Math.min(
+      24,
+      Math.max(4, Math.floor(Math.min((rect.width - pad) / w, (rect.height - pad) / h)))
+    );
+    scale = s;
+    // center the art region in the wrap
+    const cx = (minX + maxX + 1) / 2;
+    const cy = (minY + maxY + 1) / 2;
+    panX = (size / 2 - cx) * scale;
+    panY = (size / 2 - cy) * scale;
+    applyTransform();
+  }
+
+  function setStickyError(msg) {
+    stickyError = msg;
+    stickyErrorUntil = Date.now() + 8000;
+    els.cooldown.textContent = msg;
+    els.cooldown.className = "cooldown err";
   }
 
   function renderPalette() {
@@ -233,7 +293,7 @@ dir 1=upvote (protect art), -1=downvote.
       b.type = "button";
       b.className = "swatch";
       b.style.background = hex;
-      b.title = `${i}: ${hex}`;
+      b.title = i === 0 ? `${i}: void/empty (unpainted)` : `${i}: ${hex}`;
       b.setAttribute("role", "option");
       b.setAttribute("aria-selected", String(i === selectedColor));
       b.addEventListener("click", () => {
@@ -328,6 +388,15 @@ dir 1=upvote (protect art), -1=downvote.
 
   function updateCooldownUI() {
     const now = Date.now();
+    if (stickyError && now < stickyErrorUntil) {
+      els.cooldown.textContent = stickyError;
+      els.cooldown.className = "cooldown err";
+      if (els.btnUp) els.btnUp.disabled = nextVoteAt > now;
+      if (els.btnDown) els.btnDown.disabled = nextVoteAt > now;
+      return;
+    }
+    if (stickyError && now >= stickyErrorUntil) stickyError = null;
+
     const rem = Math.max(0, nextPlaceAt - now);
     const vrem = Math.max(0, nextVoteAt - now);
     if (els.rep) els.rep.textContent = `Rep ${reputation}`;
@@ -381,6 +450,10 @@ dir 1=upvote (protect art), -1=downvote.
       paint();
       renderPalette();
       refreshPrompt();
+      if (!didAutoFocusArt) {
+        didAutoFocusArt = true;
+        focusArt();
+      }
     }
   }
 
@@ -465,25 +538,26 @@ dir 1=upvote (protect art), -1=downvote.
       const data = await res.json();
       if (!data.ok) {
         if (data.error === "cooldown") {
+          stickyError = null;
           nextPlaceAt = data.nextPlaceAt || Date.now() + (data.remainingMs || cooldownMs);
           updateCooldownUI();
           els.cooldown.textContent = data.message || "On cooldown.";
           els.cooldown.className = "cooldown wait";
           return;
         }
-        els.cooldown.textContent = data.message || data.error || "Place failed";
-        els.cooldown.className = "cooldown err";
+        setStickyError(data.message || data.error || "Place failed");
         els.btnPlace.disabled = false;
         return;
       }
+      stickyError = null;
       nextPlaceAt = data.nextPlaceAt || Date.now() + cooldownMs;
       reputation = data.reputation ?? reputation;
       showToast(data.message || "Placed!");
       updateCooldownUI();
       await tick();
+      focusArt();
     } catch (e) {
-      els.cooldown.textContent = String(e.message || e);
-      els.cooldown.className = "cooldown err";
+      setStickyError(String(e.message || e));
       els.btnPlace.disabled = false;
     }
   }
@@ -516,22 +590,26 @@ dir 1=upvote (protect art), -1=downvote.
       });
       const data = await res.json();
       if (!data.ok) {
-        els.cooldown.textContent = data.message || data.error || "Vote failed";
-        els.cooldown.className = "cooldown err";
         if (data.error === "cooldown") {
+          stickyError = null;
           nextVoteAt = data.nextVoteAt || Date.now() + (data.remainingMs || voteCooldownMs);
+          updateCooldownUI();
+          els.cooldown.textContent = data.message || "On vote cooldown.";
+          els.cooldown.className = "cooldown wait";
+          return;
         }
+        setStickyError(data.message || data.error || "Vote failed");
         updateCooldownUI();
         return;
       }
+      stickyError = null;
       nextVoteAt = data.nextVoteAt || Date.now() + voteCooldownMs;
       reputation = data.reputation ?? reputation;
       showToast(data.message || "Voted!");
       updateCooldownUI();
       await tick();
     } catch (e) {
-      els.cooldown.textContent = String(e.message || e);
-      els.cooldown.className = "cooldown err";
+      setStickyError(String(e.message || e));
       updateCooldownUI();
     }
   }
@@ -607,6 +685,8 @@ dir 1=upvote (protect art), -1=downvote.
     applyTransform();
   });
   els.btnZoomReset.addEventListener("click", fitView);
+  const btnArt = document.getElementById("btn-zoom-art");
+  if (btnArt) btnArt.addEventListener("click", focusArt);
   els.btnCopyPrompt.addEventListener("click", async () => {
     refreshPrompt();
     showToast((await copyText(agentPrompt())) ? "Agent prompt copied — paste into Grok." : "Could not copy");
