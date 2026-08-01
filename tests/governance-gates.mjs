@@ -109,6 +109,10 @@ runSecret("secret scan ignores shell default expansion", ".github/workflows/exam
 runSecret("secret scan rejects a mixed literal plus provider line", ".github/workflows/example.yml", `${resetName} = "nonfixture-secret-value" # ${providerReference}`, 1);
 runSecret("secret scan rejects a provider assignment with a literal-secret comment", ".github/workflows/example.yml", `${awardName}: ${providerReference} # ${resetName} = "nonfixture-secret-value"`, 1);
 runSecret("secret scan rejects a mixed literal plus fixture marker", ".github/workflows/example.yml", `${resetName} = "nonfixture-secret-value" # test-local`, 1);
+runSecret("secret scan rejects a JSON literal secret", "config/example.json", `{${JSON.stringify(awardName)}: "nonfixture-secret-value"}`, 1);
+runSecret("secret scan rejects a quoted YAML literal secret", ".github/workflows/example.yml", `'${resetName}': 'nonfixture-secret-value'`, 1);
+runSecret("secret scan rejects a bracket-key literal secret", "config/example.js", `env[${JSON.stringify(resetName)}] = "nonfixture-secret-value"`, 1);
+runSecret("secret scan rejects a setter literal secret", "config/example.js", `env.set(${JSON.stringify(awardName)}, "nonfixture-secret-value")`, 1);
 runSecret("secret scan rejects a private key header with a provider marker", ".github/workflows/example.yml", `BEGIN ${"PRIVATE"} KEY # ${providerReference}`, 1);
 
 function runCanvas(name, before, after, expected) {

@@ -24,7 +24,7 @@ for (const line of patch.split("\n")) {
       findings.push({ path, lineNumber, kind: "private key header" });
       continue;
     }
-    const assignment = added.match(/(?:\b(?:AWARD_SECRET|RESET_SECRET)\s*=\s*|^\s*(?:AWARD_SECRET|RESET_SECRET)\s*:\s*|(?<!\$)[{,]\s*(?:AWARD_SECRET|RESET_SECRET)\s*:\s*)/i);
+    const assignment = added.match(/(?:\b(?:AWARD_SECRET|RESET_SECRET)\s*=\s*|^\s*["']?(?:AWARD_SECRET|RESET_SECRET)["']?\s*:\s*|(?<!\$)[{,]\s*["']?(?:AWARD_SECRET|RESET_SECRET)["']?\s*:\s*|\[\s*["'](?:AWARD_SECRET|RESET_SECRET)["']\s*\]\s*=\s*|\.set\(\s*["'](?:AWARD_SECRET|RESET_SECRET)["']\s*,\s*)/i);
     if (!assignment) continue;
     const value = added.slice((assignment.index || 0) + assignment[0].length).trim();
     if (/^\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}\s*$/i.test(value)) continue;
