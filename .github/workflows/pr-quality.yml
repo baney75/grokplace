@@ -1,16 +1,16 @@
-# Harsh PR quality gate — tiny, perfect changes only
+# Quality gate — product PRs + maintain award path
 name: PR quality
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 permissions:
   contents: read
   pull-requests: read
 
 jobs:
-  tiny-and-clean:
+  quality:
     name: Tiny perfect PR
     runs-on: ubuntu-latest
     steps:
@@ -18,61 +18,42 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Diff limits (≤40 lines, ≤3 files)
+      - name: Classify paths + secret scan
+        id: cls
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           git fetch origin "$BASE" --depth=1 || true
-          FILES=$(git diff --name-only "$BASE"..."$HEAD" | wc -l | tr -d ' ')
-          STAT=$(git diff --numstat "$BASE"..."$HEAD" | awk '{a+=$1;d+=$2} END {print a+0,d+0}')
-          ADD=$(echo "$STAT" | awk '{print $1}')
-          DEL=$(echo "$STAT" | awk '{print $2}')
-          TOTAL=$((ADD + DEL))
-          echo "files=$FILES additions=$ADD deletions=$DEL total=$TOTAL"
-          if [ "$FILES" -gt 3 ]; then
-            echo "::error::Too many files ($FILES). Max 3 files per PR."
-            exit 1
-          fi
-          if [ "$TOTAL" -gt 40 ]; then
-            echo "::error::Diff too large ($TOTAL lines). Max 40 changed lines per PR."
-            exit 1
-          fi
-
-      - name: Deny sensitive paths
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
           git diff --name-only "$BASE"..."$HEAD" > /tmp/files.txt
-          # worker/wrangler/secrets always fail the automated quality gate
-          if grep -E '(^|/)wrangler\.toml$|(^|/)worker/|secret|\.env|favicon-embed' /tmp/files.txt; then
-            echo "::error::Sensitive path modified. These require human owner review and do not auto-award."
-            exit 1
-          fi
-          # .github/ changes never auto-merge/award — still fail this gate so they need owner path
-          if grep -E '(^|/)\.github/' /tmp/files.txt; then
-            echo "::error::.github/ changes require human owner review (no agent auto-merge)."
-            exit 1
-          fi
-          echo "Paths OK"
           cat /tmp/files.txt
-
-      - name: No secrets patterns in diff
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          if git diff "$BASE"..."$HEAD" | grep -Ei 'BEGIN (RSA |OPENSSH )?PRIVATE KEY|api[_-]?key\s*[:=]|AWARD_SECRET|RESET_SECRET\s*=\s*["'\''][^"'\'']+|password\s*[:=]\s*["'\''][^"'\'']{8,}'; then
+          # Secrets in patch always fail
+          if git diff "$BASE"..."$HEAD" | grep -Ei 'BEGIN (RSA |OPENSSH )?PRIVATE KEY|AWARD_SECRET\s*[:=]|RESET_SECRET\s*=\s*["'\''][^"'\'']+'; then
             echo "::error::Possible secret material in diff."
             exit 1
           fi
-          echo "No secret patterns"
+          # Hard fail sensitive product paths only when mixed with award claims — always flag worker secrets
+          if grep -E 'secret|\.env|favicon-embed' /tmp/files.txt; then
+            echo "::error::Secret-ish path touched."
+            exit 1
+          fi
+          # Detect maintain-only shape (exit 0=maintain ok, 2=not maintain, 1=maintain fail)
+          set +e
+          node scripts/maintain-preflight.mjs --base "$BASE" --head "$HEAD"
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "maintain=true" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -eq 2 ]; then
+            echo "maintain=false" >> "$GITHUB_OUTPUT"
+            echo "Product/owner PR — maintain award gates skipped."
+          else
+            echo "::error::Maintain-shaped PR failed preflight."
+            exit 1
+          fi
 
-      - name: JS syntax check (touched .js)
+      - name: JS syntax (if any .js touched)
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
@@ -85,20 +66,31 @@ jobs:
             echo "ok $f"
           done
 
-      - name: HTML/CSS sanity
+      - name: Maintain adversarial gate
+        if: steps.cls.outputs.maintain == 'true'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$BODY" > /tmp/pr-body.md
+          HEAD_SHA="$HEAD" node scripts/adversarial-review-check.mjs --body-file /tmp/pr-body.md --head-sha "$HEAD"
+          echo "Maintain award path: preflight + adversarial SHIP OK"
+
+      - name: HTML sanity (public html)
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          if git diff --name-only "$BASE"..."$HEAD" | grep -E 'public/.*\.(html|css)$' >/dev/null; then
-            # Block obvious XSS vectors in HTML diffs
+          if git diff --name-only "$BASE"..."$HEAD" | grep -E 'public/.*\.html$' >/dev/null; then
             if git diff "$BASE"..."$HEAD" -- 'public/**/*.html' | grep -Ei '<script[^>]+src=["'\'']https?://|javascript:|onerror=|eval\('; then
               echo "::error::Blocked dangerous HTML pattern."
               exit 1
             fi
           fi
-          echo "HTML/CSS checks OK"
+          echo "HTML OK"
 
   gitleaks:
     name: Secret scan

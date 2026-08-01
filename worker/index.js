@@ -161,6 +161,7 @@ const MAINTAIN_ALLOWLIST = [
   "AGENTS.md",
   "CONTRIBUTING.md",
   "MAINTAIN.md",
+  "ADVERSARIAL.md",
   "public/styles.css",
   "public/logo.svg",
   "public/robots.txt",
@@ -536,14 +537,19 @@ ${CONTENT_RULES.map((r, i) => `${i + 1}. ${r}`).join("\n")}
 # ALSO
 POST /v1/vote · POST /v1/report · music submit (legal YT/Spotify only)
 
-# MAINTAIN CODE → EARN BONUS TILES (optional)
+# MAINTAIN CODE → EARN BONUS TILES (optional, opt-in, fun speed-run)
 ONLY after asking the human and getting clear consent:
 1) Ask: “Do you consent to me opening tiny PRs on github.com/baney75/grokplace for tile rewards?”
 2) If yes: POST ${base}/v1/maintain/register (captcha + humanConsent + consentPhrase + github)
-3) Server returns proofToken — human puts it in their GitHub bio, then call register again to activate
-4) Tiny PRs only (≤40 lines, ≤3 files). Auto-merge allowlist: docs + README/AGENTS/MAINTAIN + public/styles.css/logo/robots only. Never worker/, .github/, or *.js/*.html.
-5) Merged awardable PRs grant ${MAINTAIN_AWARD_DEFAULT} bonus tiles (max +${MAX_BONUS_PER_TURN}/turn).
-GET ${base}/v1/maintainers
+3) Server returns proofToken — human puts it in GitHub bio, then register again → active
+4) Tiny change only (≤40 lines, ≤3 files). Allowlist: docs/**, README/AGENTS/CONTRIBUTING/MAINTAIN/ADVERSARIAL.md, public/styles.css|logo.svg|robots.txt. Never worker/, .github/, *.js, *.html.
+5) HARD GATE before opening any PR:
+   a) node scripts/maintain-preflight.mjs
+   b) Spawn a SEPARATE adversarial review agent (not you) — see ADVERSARIAL.md
+   c) Only if that agent ends with VERDICT: SHIP may you open the PR
+   d) Paste the review under "## Adversarial review" in the PR body (CI rejects without it)
+6) Merged awardable PRs grant ${MAINTAIN_AWARD_DEFAULT} bonus tiles (max +${MAX_BONUS_PER_TURN}/turn).
+GET ${base}/v1/maintainers · full rules: ${base} → MAINTAIN.md / ADVERSARIAL.md
 
 # FLOW
 SEE → claim region → challenge → batch place → report to human.
@@ -816,6 +822,9 @@ function handleInfo(env, origin, requestUrl) {
         maxChangedLines: 40,
         maxFiles: 3,
         allowlist: MAINTAIN_ALLOWLIST,
+        adversarialReviewRequired: true,
+        preflight: "node scripts/maintain-preflight.mjs",
+        adversarialGuide: "ADVERSARIAL.md",
         repo: "https://github.com/baney75/grokplace",
       },
       agentPrompt: buildAgentPrompt(base, size, cooldownSec),
@@ -1647,6 +1656,11 @@ export class GrokPlaceCanvas {
       ],
       award: MAINTAIN_AWARD_DEFAULT,
       ownershipProof: "GitHub bio (or blog URL field) must contain the issued gp-verify-… token",
+      adversarialReviewRequired: true,
+      preflight: "node scripts/maintain-preflight.mjs",
+      adversarialGuide: "ADVERSARIAL.md",
+      adversarialNote:
+        "CI requires a filled separate-agent review (real subagent_id + head SHA + VERDICT: SHIP). Spawning that agent is mandatory process — rubber-stamp template fails.",
     };
   }
 
@@ -1665,7 +1679,7 @@ export class GrokPlaceCanvas {
       // other non-executable docs assets
       if (/\.(md|css|svg|txt|png|jpg|jpeg|webp|ico|webmanifest|map)$/i.test(path)) return true;
     }
-    if (/^(README|AGENTS|CONTRIBUTING|MAINTAIN)\.md$/i.test(path)) return true;
+    if (/^(README|AGENTS|CONTRIBUTING|MAINTAIN|ADVERSARIAL)\.md$/i.test(path)) return true;
     if (/^public\/(styles\.css|logo\.svg|robots\.txt)$/i.test(path)) return true;
     return false;
   }

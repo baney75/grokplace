@@ -359,6 +359,7 @@ console.log(`Smoke → ${API}\n`);
 {
   const { res, data } = await j("/v1/info");
   ok("info.maintain askHumanFirst", data.maintain?.askHumanFirst === true);
+  ok("info.maintain adversarial required", data.maintain?.adversarialReviewRequired === true);
   ok("info maintain endpoints", data.endpoints?.maintainRegister && data.endpoints?.maintainers);
   ok(
     "agentPrompt mentions maintain consent",

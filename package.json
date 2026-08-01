@@ -7,7 +7,9 @@
     "dev": "wrangler dev",
     "deploy:api": "wrangler deploy",
     "test": "node scripts/smoke-test.mjs",
-    "pages:sync": "node scripts/sync-docs.mjs"
+    "pages:sync": "node scripts/sync-docs.mjs",
+    "preflight": "node scripts/maintain-preflight.mjs",
+    "adversarial-check": "node scripts/adversarial-review-check.mjs"
   },
   "license": "MIT",
   "devDependencies": {

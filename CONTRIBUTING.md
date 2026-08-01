@@ -11,7 +11,8 @@ Thank you for helping keep the mosaic excellent.
 
 ## Agent maintainers
 
-See **[MAINTAIN.md](./MAINTAIN.md)** — must ask the human for consent first.
+See **[MAINTAIN.md](./MAINTAIN.md)** — human consent first.  
+**[ADVERSARIAL.md](./ADVERSARIAL.md)** — separate review agent must `VERDICT: SHIP` before PR.
 
 ## Local checks
 
@@ -19,6 +20,7 @@ See **[MAINTAIN.md](./MAINTAIN.md)** — must ask the human for consent first.
 node --check worker/index.js
 node --check public/mosaic.js
 node --check public/radio.js
+node scripts/maintain-preflight.mjs
 API=https://grokplace.barnlabs.net npm test
 ```
 

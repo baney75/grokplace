@@ -49,7 +49,7 @@ jobs:
           fi
           # Docs + safe static only. Never auto-merge workflows, worker, or executable JS/HTML.
           # Full-path allowlist (end-anchored). No JS/HTML/workflows.
-          ALLOW='^(docs/.*|README\.md|AGENTS\.md|CONTRIBUTING\.md|MAINTAIN\.md|public/styles\.css|public/logo\.svg|public/robots\.txt)$'
+          ALLOW='^(docs/.*|README\.md|AGENTS\.md|CONTRIBUTING\.md|MAINTAIN\.md|ADVERSARIAL\.md|public/styles\.css|public/logo\.svg|public/robots\.txt)$'
           for f in "${FILES[@]}"; do
             if ! echo "$f" | grep -Eq "$ALLOW"; then
               echo "Not allowlisted for auto-merge: $f"
@@ -65,6 +65,19 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Adversarial SHIP must be in PR body (bound to head)
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$BODY" > /tmp/pr-body.md
+          if [ ! -f scripts/adversarial-review-check.mjs ]; then
+            echo "::error::adversarial-review-check.mjs missing — rebase onto main."
+            exit 1
+          fi
+          HEAD_SHA="$HEAD" node scripts/adversarial-review-check.mjs --body-file /tmp/pr-body.md --head-sha "$HEAD"
 
       - name: Wait for PR quality checks then enable auto-merge
         env:

@@ -38,7 +38,39 @@ jobs:
           echo "paths=$PATHS" >> "$GITHUB_OUTPUT"
           echo "author=${{ github.event.pull_request.user.login }}" >> "$GITHUB_OUTPUT"
 
+      - name: Require adversarial SHIP on PR body + maintain shape
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.merge_commit_sha }}
+          HEAD_FOR_REVIEW: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          set +e
+          node scripts/maintain-preflight.mjs --base "$BASE" --head "$HEAD"
+          code=$?
+          set -e
+          if [ "$code" -eq 2 ]; then
+            echo "Not maintain-shaped — no tile award."
+            echo "skip=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ "$code" -ne 0 ]; then
+            echo "Preflight failed — no award."
+            echo "skip=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          printf '%s' "$BODY" > /tmp/pr-body.md
+          # Bind to the PR head that was reviewed (not only merge commit)
+          if ! HEAD_SHA="$HEAD_FOR_REVIEW" node scripts/adversarial-review-check.mjs --body-file /tmp/pr-body.md --head-sha "$HEAD_FOR_REVIEW"; then
+            echo "Adversarial gate failed on merge — no award."
+            echo "skip=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_ENV"
+
       - name: Call award API
+        if: env.skip != 'true'
         env:
           AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
           API: https://grokplace.barnlabs.net
@@ -51,14 +83,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${AWARD_SECRET:-}" ]; then
-            echo "AWARD_SECRET not configured — skip award (set repo secret)."
+            echo "AWARD_SECRET not configured — skip award."
             exit 0
           fi
           if [ "$TOTAL" -gt 40 ] || [ "$FILES" -gt 3 ]; then
-            echo "PR too large for award (files=$FILES total=$TOTAL)."
+            echo "PR too large for award."
             exit 0
           fi
-          # amount is fixed server-side; paths must be allowlisted (no workflows / no JS HTML)
           BODY=$(jq -n \
             --arg github "$AUTHOR" \
             --argjson pr "$PR" \
