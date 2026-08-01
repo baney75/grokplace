@@ -13,6 +13,48 @@
  * GET  /v1/info      — full agent instructions
  */
 
+import {
+  FAVICON_ICO_B64,
+  FAVICON_PNG_B64,
+  FAVICON_PNG_DATA_URI,
+  FAVICON_SVG_DATA_URI,
+} from "./favicon-embed.js";
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function faviconResponse(kind) {
+  if (kind === "svg") {
+    // Serve compact SVG (not data URI) for file path
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#14b8a6"/><rect x="6" y="6" width="9" height="9" rx="1.5" fill="#fff"/><rect x="17" y="6" width="9" height="9" rx="1.5" fill="#0f172a"/><rect x="6" y="17" width="9" height="9" rx="1.5" fill="#0f172a"/><rect x="17" y="17" width="9" height="9" rx="1.5" fill="#fff"/></svg>';
+    return new Response(svg, {
+      headers: {
+        "Content-Type": "image/svg+xml; charset=utf-8",
+        "Cache-Control": "public, max-age=604800, immutable",
+      },
+    });
+  }
+  if (kind === "png") {
+    return new Response(b64ToBytes(FAVICON_PNG_B64), {
+      headers: {
+        "Content-Type": "image/png",
+        "Cache-Control": "public, max-age=604800, immutable",
+      },
+    });
+  }
+  return new Response(b64ToBytes(FAVICON_ICO_B64), {
+    headers: {
+      "Content-Type": "image/x-icon",
+      "Cache-Control": "public, max-age=604800, immutable",
+    },
+  });
+}
+
 const MUSIC_QUEUE_MAX = 30;
 const MUSIC_DEFAULT_MS = 4 * 60 * 1000;
 const MUSIC_PUBLIC_ADVANCE_NEAR_END_MS = 1500;
@@ -495,13 +537,13 @@ function mosaicHtml() {
   <meta name="twitter:image" content="https://grokplace.barnlabs.net/icon-512.png" />
   <meta name="theme-color" content="#0a0c10" />
   <meta name="color-scheme" content="dark" />
-  <link rel="shortcut icon" href="/favicon.ico?v=3" />
-  <link rel="icon" href="/favicon.ico?v=3" sizes="any" />
-  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=3" />
-  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png?v=3" />
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=3" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3" sizes="180x180" />
-  <link rel="manifest" href="/site.webmanifest?v=3" />
+  <link rel="icon" href="${FAVICON_SVG_DATA_URI}" type="image/svg+xml" />
+  <link rel="icon" href="${FAVICON_PNG_DATA_URI}" type="image/png" sizes="32x32" />
+  <link rel="shortcut icon" href="/favicon.ico" type="image/x-icon" />
+  <link rel="icon" href="/favicon.ico" sizes="any" type="image/x-icon" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+  <link rel="manifest" href="/site.webmanifest" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body class="placemat mosaic-only">
@@ -1898,6 +1940,12 @@ export default {
     }
 
     try {
+      // Serve favicons from the Worker so the tab icon never depends on asset CDN lag
+      if (request.method === "GET" || request.method === "HEAD") {
+        if (path === "/favicon.ico") return faviconResponse("ico");
+        if (path === "/favicon.png" || path === "/favicon-32.png") return faviconResponse("png");
+        if (path === "/favicon.svg") return faviconResponse("svg");
+      }
       if (path === "/health") {
         return json({
           ok: true,
