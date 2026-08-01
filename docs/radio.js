@@ -225,34 +225,44 @@
     const label = soundBtn.querySelector(".sound-label");
     soundBtn.classList.toggle("needs-enable", muted);
     soundBtn.classList.toggle("is-on", !muted);
+    soundBtn.hidden = false;
+    soundBtn.style.display = "inline-flex";
     soundBtn.setAttribute("aria-pressed", muted ? "false" : "true");
     if (muted) {
       soundBtn.setAttribute("aria-label", "Enable sound");
       soundBtn.title = "Enable sound";
-      if (icon) icon.textContent = "🔊";
+      if (icon) icon.textContent = "🔇";
       if (label) label.textContent = "Enable sound";
     } else {
-      soundBtn.setAttribute("aria-label", "Mute sound");
-      soundBtn.title = "Mute sound";
+      soundBtn.setAttribute("aria-label", "Mute");
+      soundBtn.title = "Mute";
       if (icon) icon.textContent = "🔊";
-      if (label) label.textContent = "Sound on";
+      if (label) label.textContent = "Mute";
     }
   }
 
   function setMuted(next) {
     muted = Boolean(next);
     applyAudio();
+    // Spotify iframes: remount when unmuting so playback can start after gesture
     if (!muted && nowTrack) renderNow(nowTrack);
+    else if (muted && ytPlayer && typeof ytPlayer.mute === "function") {
+      try {
+        ytPlayer.mute();
+        ytPlayer.setVolume(0);
+      } catch {
+        /* ignore */
+      }
+    }
     syncSoundUi();
     return muted;
   }
 
   function enableSound() {
-    // User gesture → unlock autoplay + unmute
     setMuted(false);
   }
 
-  // Primary control: Enable sound (then toggles mute)
+  // Bottom-center mute / enable control
   if (soundBtn) {
     soundBtn.addEventListener("click", (ev) => {
       ev.preventDefault();
@@ -260,6 +270,8 @@
       if (muted) enableSound();
       else setMuted(true);
     });
+    // Ensure visible even if older CSS cached
+    soundBtn.hidden = false;
     syncSoundUi();
   }
 

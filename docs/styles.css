@@ -387,9 +387,9 @@ body.mosaic-only #yt-player-inner {
 .toast {
   position: fixed;
   left: 50%;
-  bottom: max(5.5rem, calc(var(--safe-b) + 5.2rem));
+  bottom: max(5.75rem, calc(var(--safe-b) + 5.25rem));
   transform: translateX(-50%);
-  z-index: 120;
+  z-index: 210;
   padding: 0.65rem 1rem;
   border-radius: 999px;
   background: rgba(15, 23, 32, 0.94);
@@ -401,15 +401,15 @@ body.mosaic-only #yt-player-inner {
   pointer-events: none;
 }
 
-/* Live ticker — board is breathing */
+/* Live ticker — above bottom edge, leave room for mute button */
 .ticker {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 0;
+  bottom: max(4.25rem, calc(var(--safe-b) + 3.75rem));
   z-index: 90;
-  padding: 0.55rem max(0.75rem, var(--safe-r)) calc(0.55rem + var(--safe-b)) max(0.75rem, var(--safe-l));
-  background: linear-gradient(to top, rgba(5, 6, 8, 0.92), rgba(5, 6, 8, 0.55) 70%, transparent);
+  padding: 0.45rem max(0.75rem, var(--safe-r)) 0.35rem max(0.75rem, var(--safe-l));
+  background: linear-gradient(to top, rgba(5, 6, 8, 0.75), transparent);
   pointer-events: none;
 }
 
@@ -521,7 +521,6 @@ body.mosaic-only #yt-player-inner {
   -webkit-user-drag: none;
 }
 
-/* Enable sound — primary when muted; quieter when sound is on */
 .share-btn {
   pointer-events: auto !important;
   display: inline-flex !important;
@@ -553,47 +552,56 @@ body.mosaic-only #yt-player-inner {
   transform: translateY(-1px);
 }
 
+/* Mute / Enable sound — fixed bottom center (where users look) */
 .sound-btn {
+  position: fixed !important;
+  left: 50% !important;
+  bottom: max(1.15rem, calc(var(--safe-b) + 0.9rem)) !important;
+  transform: translateX(-50%);
+  z-index: 200 !important;
   pointer-events: auto !important;
   display: inline-flex !important;
   visibility: visible !important;
+  opacity: 1 !important;
   align-items: center;
-  gap: 0.45rem;
-  margin: 0;
-  padding: 0.6rem 1rem;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 0 !important;
+  min-width: 11rem;
+  min-height: 2.85rem;
+  padding: 0.8rem 1.4rem;
   border-radius: 999px;
-  border: 1px solid rgba(45, 212, 191, 0.55);
-  background: linear-gradient(135deg, rgba(20, 184, 166, 0.95), rgba(14, 165, 233, 0.9)) !important;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(45, 212, 191, 0.7);
+  background: linear-gradient(135deg, #2dd4bf, #38bdf8) !important;
   box-shadow:
-    0 8px 28px rgba(0, 0, 0, 0.4),
-    0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+    0 14px 44px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.12) inset,
+    0 0 28px rgba(45, 212, 191, 0.3);
   color: #041016 !important;
   font: inherit;
-  font-size: 0.9rem;
-  font-weight: 700;
+  font-size: 0.98rem;
+  font-weight: 800;
   letter-spacing: 0.01em;
   cursor: pointer;
-  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  transition: transform 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
   -webkit-tap-highlight-color: transparent;
 }
 
 .sound-btn:hover,
 .sound-btn:focus-visible {
   outline: none;
-  transform: translateY(-1px);
+  transform: translateX(-50%) translateY(-2px);
   box-shadow:
-    0 10px 32px rgba(0, 0, 0, 0.45),
-    0 0 20px rgba(45, 212, 191, 0.25);
+    0 16px 48px rgba(0, 0, 0, 0.55),
+    0 0 32px rgba(45, 212, 191, 0.4);
 }
 
 .sound-btn:active {
-  transform: translateY(0);
+  transform: translateX(-50%) translateY(0);
 }
 
 .sound-btn .sound-icon {
-  font-size: 1.05rem;
+  font-size: 1.2rem;
   line-height: 1;
 }
 
@@ -602,20 +610,20 @@ body.mosaic-only #yt-player-inner {
   white-space: nowrap;
 }
 
-/* After sound is on — secondary mute control */
+/* Sound playing → becomes Mute */
 .sound-btn.is-on {
-  border: 1px solid var(--glass-border);
-  background: var(--glass) !important;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(12, 16, 24, 0.94) !important;
   color: var(--text) !important;
-  font-weight: 600;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  font-weight: 700;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
 }
 
 .sound-btn.is-on:hover,
 .sound-btn.is-on:focus-visible {
-  border-color: rgba(45, 212, 191, 0.45);
-  background: rgba(16, 22, 32, 0.88) !important;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  border-color: rgba(45, 212, 191, 0.55);
+  background: rgba(16, 22, 32, 0.98) !important;
+  transform: translateX(-50%) translateY(-2px);
 }
 
 .sound-btn.is-on .sound-label {

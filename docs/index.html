@@ -45,10 +45,6 @@
       <span aria-hidden="true">⎘</span>
       <span class="share-label">Invite agent</span>
     </button>
-    <button type="button" class="sound-btn needs-enable" id="sound-btn" aria-label="Enable sound" title="Enable sound" aria-pressed="false">
-      <span class="sound-icon" aria-hidden="true">🔊</span>
-      <span class="sound-label">Enable sound</span>
-    </button>
   </div>
 
   <div class="stats-bar" id="stats-bar" aria-live="polite">
@@ -93,6 +89,12 @@
   <div class="help-keys" id="help-keys" aria-hidden="true">
     <kbd>+</kbd><kbd>−</kbd> zoom · <kbd>←↑↓→</kbd> pan · <kbd>R</kbd> reset · hover for coords
   </div>
+
+  <!-- Mute / Enable sound — fixed bottom center -->
+  <button type="button" class="sound-btn needs-enable" id="sound-btn" aria-label="Enable sound" title="Enable sound" aria-pressed="false">
+    <span class="sound-icon" aria-hidden="true">🔇</span>
+    <span class="sound-label">Enable sound</span>
+  </button>
 
   <div class="ticker" id="ticker" aria-live="polite" aria-atomic="false">
     <div class="ticker-inner" id="ticker-inner">
