@@ -42,12 +42,7 @@ jobs:
           git diff --name-status "$BASE"..."$HEAD" | awk '$1 !~ /^D/ { print $NF }' > /tmp/files-present-after-pr.txt
           cat /tmp/files.txt
           # Secrets in patch always fail
-          if git diff "$BASE"..."$HEAD" \
-            | grep -Ei 'BEGIN (RSA |OPENSSH )?PRIVATE KEY|(AWARD_SECRET|RESET_SECRET)[[:space:]]*[:=][[:space:]]*["'\''][^"'\'']{8,}' \
-            | grep -Eiv '\$\{\{[[:space:]]*secrets\.|(AWARD_SECRET|RESET_SECRET)[[:space:]]*:[[:space:]]*["'\'']?(test|local)-'; then
-            echo "::error::Possible secret material in diff."
-            exit 1
-          fi
+          git diff "$BASE"..."$HEAD" | node scripts/secret-diff-scan.mjs
           # Hard fail sensitive product paths only when mixed with award claims — always flag worker secrets
           if grep -Ei 'secret|\.env|favicon-embed' /tmp/files-present-after-pr.txt; then
             echo "::error::Secret-ish path touched."

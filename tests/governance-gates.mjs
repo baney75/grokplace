@@ -36,6 +36,12 @@ function runArtifact(name, artifact, expected) {
   check(name, out.status === expected, `${out.stdout}${out.stderr}`.trim());
 }
 
+function runSecret(name, path, addedLine, expected) {
+  const patch = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -0,0 +1 @@\n+${addedLine}\n`;
+  const out = spawnSync(process.execPath, ["scripts/secret-diff-scan.mjs"], { cwd: root, encoding: "utf8", input: patch });
+  check(name, out.status === expected, `${out.stdout}${out.stderr}`.trim());
+}
+
 const sha = "0123456789abcdef0123456789abcdef01234567";
 
 const qualityWorkflow = readFileSync(join(root, ".github/workflows/pr-quality.yml"), "utf8");
@@ -48,7 +54,7 @@ check("durable reservations have scheduled and manual reconciliation", /schedule
 check("privileged workflow checks out the default branch", /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/.test(mergeWorkflow));
 check("untrusted PR workflow receives no award secret", !/secrets\.AWARD_SECRET/.test(qualityWorkflow));
 check("secret-path guard permits deletion of a forbidden legacy file", /git diff --name-status/.test(qualityWorkflow) && /\$1 !~ \/\^D\//.test(qualityWorkflow) && /files-present-after-pr\.txt/.test(qualityWorkflow));
-check("supplemental secret scan permits provider references and explicit fixtures", /secrets\\\./.test(qualityWorkflow) && /\(test\|local\)-/.test(qualityWorkflow) && /PRIVATE KEY/.test(qualityWorkflow));
+check("trusted PR workflow runs the path-aware secret diff scanner", /git diff[^\n]+\| node scripts\/secret-diff-scan\.mjs/.test(qualityWorkflow));
 check("trusted award workflow is serialized", /group:\s*maintain-awards-\$\{\{ github\.repository \}\}/.test(mergeWorkflow) && /cancel-in-progress:\s*false/.test(mergeWorkflow));
 check("merge refuses a bank that cannot accept the full award", /\.bank\.bonusTiles >= 0 and \.bank\.bonusTiles <= 190/.test(mergeWorkflow));
 check("trusted workflow resolves the immutable review artifact", /\/v1\/reviews/.test(mergeWorkflow) && /review-artifact-check\.mjs/.test(mergeWorkflow));
@@ -93,6 +99,17 @@ runArtifact("accepts a verified distinct critic artifact", validArtifact, 0);
 runArtifact("rejects a forged artifact id", { ...validArtifact, review: { ...validArtifact.review, id: "rv_22222222222222222222222222222222" } }, 1);
 runArtifact("rejects a stale artifact head", { ...validArtifact, review: { ...validArtifact.review, headSha: "f".repeat(40) } }, 1);
 runArtifact("rejects the maintainer as its own critic", { ...validArtifact, review: { ...validArtifact.review, reviewerAgent: "author-agent" } }, 1);
+
+const awardName = ["AWARD", "SECRET"].join("_");
+const resetName = ["RESET", "SECRET"].join("_");
+const providerReference = "$" + "{{ secrets.AWARD_SECRET }}";
+runSecret("secret scan accepts an exact provider reference", ".github/workflows/example.yml", `${awardName}: ${providerReference}`, 0);
+runSecret("secret scan accepts a named fixture only in tests", "tests/example.mjs", `${awardName}: "test-award-fixture"`, 0);
+runSecret("secret scan ignores shell default expansion", ".github/workflows/example.yml", `[ -n "\${${awardName}:-}" ]`, 0);
+runSecret("secret scan rejects a mixed literal plus provider line", ".github/workflows/example.yml", `${resetName} = "nonfixture-secret-value" # ${providerReference}`, 1);
+runSecret("secret scan rejects a provider assignment with a literal-secret comment", ".github/workflows/example.yml", `${awardName}: ${providerReference} # ${resetName} = "nonfixture-secret-value"`, 1);
+runSecret("secret scan rejects a mixed literal plus fixture marker", ".github/workflows/example.yml", `${resetName} = "nonfixture-secret-value" # test-local`, 1);
+runSecret("secret scan rejects a private key header with a provider marker", ".github/workflows/example.yml", `BEGIN ${"PRIVATE"} KEY # ${providerReference}`, 1);
 
 function runCanvas(name, before, after, expected) {
   const beforeFile = join(temp, `${name}-before.json`);

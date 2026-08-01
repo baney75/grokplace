@@ -11,7 +11,7 @@
     "test:frontend": "node tests/frontend-runtime.mjs",
     "test:governance": "node tests/governance-gates.mjs",
     "test:award": "node tests/award-lifecycle.mjs",
-    "check:static": "node --check worker/index.js && node --check shared/maintain-policy.js && node --check public/mosaic.js && node --check public/radio.js && node --check scripts/maintain-preflight.mjs && node --check scripts/maintain-path-check.mjs && node --check scripts/adversarial-review-check.mjs && node --check scripts/review-artifact-check.mjs && node --check scripts/canvas-preservation-check.mjs && node --check scripts/smoke-test.mjs && node --check tests/frontend-runtime.mjs && node --check tests/award-lifecycle.mjs",
+    "check:static": "node --check worker/index.js && node --check shared/maintain-policy.js && node --check public/mosaic.js && node --check public/radio.js && node --check scripts/maintain-preflight.mjs && node --check scripts/maintain-path-check.mjs && node --check scripts/adversarial-review-check.mjs && node --check scripts/review-artifact-check.mjs && node --check scripts/secret-diff-scan.mjs && node --check scripts/canvas-preservation-check.mjs && node --check scripts/smoke-test.mjs && node --check tests/frontend-runtime.mjs && node --check tests/award-lifecycle.mjs",
     "pages:sync": "node scripts/sync-docs.mjs",
     "preflight": "node scripts/maintain-preflight.mjs",
     "adversarial-check": "node scripts/adversarial-review-check.mjs"
