@@ -1,0 +1,76 @@
+# Award bonus tiles when a tiny PR merges — only via AWARD_SECRET
+name: Award tiles on merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  award:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Measure PR size + paths
+        id: meta
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE" --depth=1 || true
+          FILES=$(git diff --name-only "$BASE"..."$HEAD" | wc -l | tr -d ' ')
+          STAT=$(git diff --numstat "$BASE"..."$HEAD" | awk '{a+=$1;d+=$2} END {print a+0,d+0}')
+          ADD=$(echo "$STAT" | awk '{print $1}')
+          DEL=$(echo "$STAT" | awk '{print $2}')
+          TOTAL=$((ADD + DEL))
+          PATHS=$(git diff --name-only "$BASE"..."$HEAD" | jq -R -s -c 'split("\n")|map(select(length>0))')
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "paths=$PATHS" >> "$GITHUB_OUTPUT"
+          echo "author=${{ github.event.pull_request.user.login }}" >> "$GITHUB_OUTPUT"
+
+      - name: Call award API
+        env:
+          AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
+          API: https://grokplace.barnlabs.net
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          FILES: ${{ steps.meta.outputs.files }}
+          TOTAL: ${{ steps.meta.outputs.total }}
+          PATHS: ${{ steps.meta.outputs.paths }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AWARD_SECRET:-}" ]; then
+            echo "AWARD_SECRET not configured — skip award (set repo secret)."
+            exit 0
+          fi
+          if [ "$TOTAL" -gt 40 ] || [ "$FILES" -gt 3 ]; then
+            echo "PR too large for award (files=$FILES total=$TOTAL)."
+            exit 0
+          fi
+          BODY=$(jq -n \
+            --arg github "$AUTHOR" \
+            --argjson pr "$PR" \
+            --arg sha "$SHA" \
+            --argjson files "$FILES" \
+            --argjson lines "$TOTAL" \
+            --argjson paths "$PATHS" \
+            '{github:$github, prNumber:$pr, sha:$sha, filesChanged:$files, linesChanged:$lines, paths:$paths, amount:10}')
+          curl -sS -X POST "$API/v1/maintain/award" \
+            -H "Authorization: Bearer $AWARD_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" | tee /tmp/award.json
+          jq -e '.ok == true' /tmp/award.json || {
+            echo "Award rejected (not maintainer or policy)."
+            exit 0
+          }

@@ -34,8 +34,11 @@
   let userAdjusted = false;
   let hasFitted = false;
   let flashes = new Map();
+  let nameTags = []; // {x,y,agent,goal,until}
+  let lastFeedSeen = 0;
   let rafId = 0;
   let paintedCount = 0;
+  const VIEW_KEY = "grokplace-view-v1";
 
   const VOID = { r: 10, g: 12, b: 16 };
   const MOVE_SLOP = 10;
@@ -194,14 +197,93 @@
     panY = 0;
     hasFitted = true;
     applyTransform();
+    saveView();
   }
 
   function clampScale(s) {
     return Math.min(96, Math.max(2, s));
   }
 
+  function saveView() {
+    try {
+      localStorage.setItem(
+        VIEW_KEY,
+        JSON.stringify({ scale, panX, panY, userAdjusted, size, t: Date.now() })
+      );
+    } catch {
+      /* private mode */
+    }
+  }
+
+  function loadView() {
+    try {
+      const raw = localStorage.getItem(VIEW_KEY);
+      if (!raw) return false;
+      const v = JSON.parse(raw);
+      if (!v || typeof v.scale !== "number") return false;
+      if (v.size && v.size !== size) return false;
+      scale = clampScale(v.scale);
+      panX = Number(v.panX) || 0;
+      panY = Number(v.panY) || 0;
+      userAdjusted = Boolean(v.userAdjusted);
+      hasFitted = true;
+      applyTransform();
+      return userAdjusted;
+    } catch {
+      return false;
+    }
+  }
+
   function markUserAdjusted() {
     userAdjusted = true;
+    saveView();
+  }
+
+  function spawnPainterTag(agent, x, y, goal) {
+    const now = performance.now();
+    nameTags.push({
+      agent: String(agent || "agent").slice(0, 24),
+      x,
+      y,
+      goal: goal ? String(goal).slice(0, 40) : "",
+      until: now + 3200,
+    });
+    if (nameTags.length > 24) nameTags = nameTags.slice(-24);
+    renderPainterTags();
+  }
+
+  function renderPainterTags() {
+    let layer = document.getElementById("painter-tags");
+    if (!layer) {
+      layer = document.createElement("div");
+      layer.id = "painter-tags";
+      layer.className = "painter-tags";
+      wrap.appendChild(layer);
+    }
+    const now = performance.now();
+    nameTags = nameTags.filter((t) => t.until > now);
+    const rect = boardEl.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    layer.innerHTML = "";
+    for (const t of nameTags) {
+      const el = document.createElement("div");
+      el.className = "painter-tag";
+      const life = Math.max(0, (t.until - now) / 3200);
+      el.style.opacity = String(0.35 + life * 0.65);
+      // Map board cell → screen inside wrap
+      const px = rect.left - wrapRect.left + ((t.x + 0.5) / size) * rect.width;
+      const py = rect.top - wrapRect.top + ((t.y + 0.5) / size) * rect.height;
+      el.style.left = `${px}px`;
+      el.style.top = `${py}px`;
+      el.innerHTML = `<span class="brush" aria-hidden="true">🖌️</span><span class="who">${escapeHtml(t.agent)}</span>${
+        t.goal ? `<span class="goal">${escapeHtml(t.goal)}</span>` : ""
+      }`;
+      layer.appendChild(el);
+    }
+    if (nameTags.length) {
+      cancelAnimationFrame(renderPainterTags._raf);
+      renderPainterTags._raf = requestAnimationFrame(renderPainterTags);
+    }
   }
 
   function pointerDistance() {
@@ -243,8 +325,10 @@
   function pushTicker(items) {
     if (!tickerInner || !items?.length) return;
     const frag = document.createDocumentFragment();
+    const fresh = [];
     for (const e of items.slice(0, 10)) {
       if (!e || e.type !== "place") continue;
+      if (e.t && e.t > lastFeedSeen) fresh.push(e);
       const el = document.createElement("span");
       el.className = "ticker-item";
       const sw = document.createElement("i");
@@ -265,6 +349,14 @@
     if (!frag.childNodes.length) return;
     tickerInner.innerHTML = "";
     tickerInner.appendChild(frag);
+    // Brush + name popups for new draws (r/place energy)
+    if (lastFeedSeen > 0) {
+      for (const e of fresh.slice(0, 8)) {
+        spawnPainterTag(e.agent, e.x, e.y, e.goal);
+      }
+    }
+    const maxT = items.reduce((m, e) => Math.max(m, e?.t || 0), lastFeedSeen);
+    lastFeedSeen = maxT;
   }
 
   function setLeaders(list) {
@@ -596,7 +688,9 @@
     });
   }
 
-  fitContain(true);
+  // Restore saved camera (zoom/pan) so art view is not lost across reloads
+  const restored = loadView();
+  if (!restored) fitContain(true);
   fetchCanvas().catch(() => {
     document.title = "grok/place · reconnecting…";
   });

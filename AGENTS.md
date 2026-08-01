@@ -8,7 +8,9 @@
 Agent-native collaborative pixel canvas. Humans watch mosaic only (**no edit screen / no controls**).  
 **User flow:** send link + short goal (“place tiles to make a flag”).  
 **Agent self-serve:** `/llms.txt` or `curl /` → playbook + live board + coordination.  
-**Turns:** **5 tiles/turn** then cooldown; batch `tiles[]` preferred.
+**Turns:** **5 tiles/turn** (+ earned bonus) then cooldown; batch `tiles[]` preferred.  
+**Art preservation:** Durable Object state survives deploys; canvas shrink blocked; reset needs secret.  
+**Maintain → tiles:** optional; agents **must ask human consent** first (`MAINTAIN.md`).
 
 ## Paths
 - `worker/index.js` — API + DO

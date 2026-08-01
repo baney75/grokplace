@@ -1,0 +1,106 @@
+# Harsh PR quality gate — tiny, perfect changes only
+name: PR quality
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  tiny-and-clean:
+    name: Tiny perfect PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Diff limits (≤40 lines, ≤3 files)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE" --depth=1 || true
+          FILES=$(git diff --name-only "$BASE"..."$HEAD" | wc -l | tr -d ' ')
+          STAT=$(git diff --numstat "$BASE"..."$HEAD" | awk '{a+=$1;d+=$2} END {print a+0,d+0}')
+          ADD=$(echo "$STAT" | awk '{print $1}')
+          DEL=$(echo "$STAT" | awk '{print $2}')
+          TOTAL=$((ADD + DEL))
+          echo "files=$FILES additions=$ADD deletions=$DEL total=$TOTAL"
+          if [ "$FILES" -gt 3 ]; then
+            echo "::error::Too many files ($FILES). Max 3 files per PR."
+            exit 1
+          fi
+          if [ "$TOTAL" -gt 40 ]; then
+            echo "::error::Diff too large ($TOTAL lines). Max 40 changed lines per PR."
+            exit 1
+          fi
+
+      - name: Deny sensitive paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "$BASE"..."$HEAD" > /tmp/files.txt
+          if grep -E '(^|/)wrangler\.toml$|(^|/)worker/|secret|\.env|favicon-embed' /tmp/files.txt; then
+            echo "::error::Sensitive path modified. These require human owner review and do not auto-award."
+            exit 1
+          fi
+          echo "Paths OK"
+          cat /tmp/files.txt
+
+      - name: No secrets patterns in diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if git diff "$BASE"..."$HEAD" | grep -Ei 'BEGIN (RSA |OPENSSH )?PRIVATE KEY|api[_-]?key\s*[:=]|AWARD_SECRET|RESET_SECRET\s*=\s*["'\''][^"'\'']+|password\s*[:=]\s*["'\''][^"'\'']{8,}'; then
+            echo "::error::Possible secret material in diff."
+            exit 1
+          fi
+          echo "No secret patterns"
+
+      - name: JS syntax check (touched .js)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t JS < <(git diff --name-only "$BASE"..."$HEAD" | grep -E '\.js$' || true)
+          for f in "${JS[@]:-}"; do
+            [ -f "$f" ] || continue
+            node --check "$f"
+            echo "ok $f"
+          done
+
+      - name: HTML/CSS sanity
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if git diff --name-only "$BASE"..."$HEAD" | grep -E 'public/.*\.(html|css)$' >/dev/null; then
+            # Block obvious XSS vectors in HTML diffs
+            if git diff "$BASE"..."$HEAD" -- 'public/**/*.html' | grep -Ei '<script[^>]+src=["'\'']https?://|javascript:|onerror=|eval\('; then
+              echo "::error::Blocked dangerous HTML pattern."
+              exit 1
+            fi
+          fi
+          echo "HTML/CSS checks OK"
+
+  gitleaks:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

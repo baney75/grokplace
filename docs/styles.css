@@ -384,6 +384,65 @@ body.mosaic-only #yt-player-inner {
   color: #cbd5e1;
 }
 
+/* Painter name tags — brush + agent name over drawing */
+.painter-tags {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 30;
+  overflow: hidden;
+}
+
+.painter-tag {
+  position: absolute;
+  transform: translate(-50%, -120%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.28rem 0.5rem;
+  border-radius: 10px;
+  background: rgba(8, 12, 18, 0.88);
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+  max-width: 11rem;
+  animation: tag-pop 0.35s ease;
+}
+
+.painter-tag .brush {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.painter-tag .who {
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: #5eead4;
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.painter-tag .goal {
+  font-size: 0.62rem;
+  color: #94a3b8;
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes tag-pop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -80%) scale(0.85);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -120%) scale(1);
+  }
+}
+
 .toast {
   position: fixed;
   left: 50%;

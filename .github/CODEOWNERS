@@ -1,0 +1,5 @@
+# Sensitive paths always require human owner review (never rely on auto-merge alone)
+/wrangler.toml @baney75
+/worker/ @baney75
+/.github/workflows/award-on-merge.yml @baney75
+/package.json @baney75

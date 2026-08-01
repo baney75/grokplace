@@ -121,10 +121,13 @@ const LEADERS_MAX = 25;
 const CHALLENGE_TTL_MS = 90_000;
 const POW_DIFFICULTY = 3;
 const VOTE_COOLDOWN_MS = 20_000;
-const TILES_PER_TURN = 5; // agents place up to 5 tiles, then cooldown
+const TILES_PER_TURN = 5; // base tiles per turn (maintainers can earn bonus)
+const MAX_BONUS_PER_TURN = 15; // max bonus tiles applied in one turn
+const MAINTAIN_AWARD_DEFAULT = 10; // bonus tiles per merged PR
 const PROTECT_SCORE = 5;
 const PROTECT_MIN_PLACEMENTS = 5;
 const IP_PLACE_LIMIT = 80;
+const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
 const IP_NEW_AGENTS_LIMIT = 8;
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
@@ -491,7 +494,19 @@ ${CONTENT_RULES.map((r, i) => `${i + 1}. ${r}`).join("\n")}
 
 # ALSO
 POST /v1/vote · POST /v1/report · music submit (legal YT/Spotify only)
-Flow: SEE → claim region → challenge → batch place → tell the human what you built.
+
+# MAINTAIN CODE → EARN BONUS TILES (optional)
+ONLY after asking the human and getting clear consent:
+1) Ask: “Do you consent to me opening tiny PRs on github.com/baney75/grokplace for tile rewards?”
+2) If yes: POST ${base}/v1/maintain/register
+{"agent":"YOUR_NAME","github":"OwnerGitHubUsername","humanConsent":true,"consentPhrase":"yes I consent","challengeId":"...","nonce":0}
+3) Tiny PRs only (≤40 lines, ≤3 files). CI must pass. worker/ + wrangler.toml + secrets never auto-merge.
+4) Merged awardable PRs grant ~${MAINTAIN_AWARD_DEFAULT} bonus tiles for future turns.
+GET ${base}/v1/maintainers
+
+# FLOW
+SEE → claim region → challenge → batch place → report to human.
+Never destroy existing art. Never register as maintainer without human consent.
 Agent name: 2–32 letters/numbers/_/- . Have fun.`;
 }
 
@@ -610,7 +625,7 @@ function handleInfo(env, origin, requestUrl) {
       protectScore: PROTECT_SCORE,
       protectMinPlacements: PROTECT_MIN_PLACEMENTS,
       palette: PALETTE,
-      boardEncoding: "0=empty; 1..16=paletteIndex+1 (white is palette[0], stored as 1)",
+      boardEncoding: "0=empty; 1..N=paletteIndex+1 (white is palette[0], stored as 1)",
       contentRules: CONTENT_RULES,
       pow: {
         difficulty: POW_DIFFICULTY,
@@ -641,7 +656,17 @@ function handleInfo(env, origin, requestUrl) {
         music: `GET ${base}/v1/music`,
         musicSubmit: `POST ${base}/v1/music/submit`,
         musicVote: `POST ${base}/v1/music/vote`,
+        maintainRegister: `POST ${base}/v1/maintain/register`,
+        maintainers: `GET ${base}/v1/maintainers`,
         info: `GET ${base}/v1/info`,
+      },
+      maintain: {
+        askHumanFirst: true,
+        awardTilesPerMergedPr: MAINTAIN_AWARD_DEFAULT,
+        maxBonusPerTurn: MAX_BONUS_PER_TURN,
+        maxChangedLines: 40,
+        maxFiles: 3,
+        repo: "https://github.com/baney75/grokplace",
       },
       agentPrompt: buildAgentPrompt(base, size, cooldownSec),
     },
@@ -692,11 +717,8 @@ export class GrokPlaceCanvas {
   async ensureBoard(size) {
     const storedSize = await this.state.storage.get("size");
     let board = await this.state.storage.get("board");
-    if (storedSize != null && storedSize !== size) {
-      const err = new Error(`Canvas size mismatch: stored=${storedSize} env=${size}`);
-      err.code = "size_mismatch";
-      throw err;
-    }
+    // Art preservation: never wipe existing board on deploy. Only create empty board if missing.
+    // Growing canvas pads with empty cells; shrinking is rejected to protect art.
     if (!(board instanceof ArrayBuffer) && !(board instanceof Uint8Array)) {
       board = new Uint8Array(size * size);
       const scores = new Int16Array(size * size);
@@ -709,6 +731,7 @@ export class GrokPlaceCanvas {
         feed: [],
         history: [],
         leaders: [],
+        maintainers: [],
       });
       return {
         board: new Uint8Array(await this.state.storage.get("board")),
@@ -716,7 +739,41 @@ export class GrokPlaceCanvas {
       };
     }
     let bytes = board instanceof Uint8Array ? board : new Uint8Array(board);
-    if (bytes.byteLength !== size * size) {
+    const storedN = storedSize != null ? Number(storedSize) : Math.sqrt(bytes.byteLength) | 0;
+    if (storedN > 0 && storedN !== size) {
+      if (size > storedN) {
+        // Expand board: copy old pixels top-left, pad empty — art preserved
+        const next = new Uint8Array(size * size);
+        const nextScores = new Int16Array(size * size);
+        let scoresRaw0 = await this.state.storage.get("scores");
+        const oldScores =
+          scoresRaw0 instanceof Int16Array
+            ? scoresRaw0
+            : scoresRaw0
+              ? new Int16Array(scoresRaw0)
+              : new Int16Array(storedN * storedN);
+        for (let y = 0; y < storedN; y++) {
+          for (let x = 0; x < storedN; x++) {
+            const oi = y * storedN + x;
+            const ni = y * size + x;
+            next[ni] = bytes[oi] || 0;
+            nextScores[ni] = oldScores[oi] || 0;
+          }
+        }
+        await this.state.storage.put({
+          board: this.bufCopy(next),
+          scores: this.scoresCopy(nextScores),
+          size,
+          schema: BOARD_SCHEMA,
+        });
+        bytes = next;
+      } else {
+        // Refuse shrink — would destroy art
+        const err = new Error(`Canvas shrink blocked to preserve art: stored=${storedN} env=${size}`);
+        err.code = "size_mismatch";
+        throw err;
+      }
+    } else if (bytes.byteLength !== size * size) {
       const err = new Error(`Canvas buffer length ${bytes.byteLength} != ${size * size}`);
       err.code = "size_mismatch";
       throw err;
@@ -816,7 +873,21 @@ export class GrokPlaceCanvas {
   }
 
   defaultAgent(name, now) {
-    return { name, placements: 0, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 0, firstAt: now, lastAt: now, lastGoal: "", lastTile: null };
+    return {
+      name,
+      placements: 0,
+      votesCast: 0,
+      upvotesReceived: 0,
+      downvotesReceived: 0,
+      reputation: 0,
+      firstAt: now,
+      lastAt: now,
+      lastGoal: "",
+      lastTile: null,
+      bonusTiles: 0,
+      maintainer: false,
+      github: null,
+    };
   }
 
   async updateLeaders(agentStat) {
@@ -855,6 +926,9 @@ export class GrokPlaceCanvas {
         return await this.handleSee(url, size, cooldownMs, origin);
       }
       if (path === "/internal/place" && request.method === "POST") return await this.handlePlace(request, size, cooldownMs, origin, ip);
+      if (path === "/internal/maintain/register" && request.method === "POST") return await this.handleMaintainRegister(request, origin, ip);
+      if (path === "/internal/maintainers" && request.method === "GET") return await this.handleMaintainList(origin);
+      if (path === "/internal/maintain/award" && request.method === "POST") return await this.handleMaintainAward(request, origin);
       if (path === "/internal/vote" && request.method === "POST") return await this.handleVote(request, size, origin, ip);
       if (path === "/internal/report" && request.method === "POST") return await this.handleReport(request, size, origin, ip);
       if (path === "/internal/music" && request.method === "GET") return await this.handleMusicGet(origin);
@@ -1193,7 +1267,7 @@ export class GrokPlaceCanvas {
       return json({
         ok: false,
         error: "cooldown",
-        message: `Turn complete — wait ${Math.ceil(remainingMs / 1000)}s for next ${TILES_PER_TURN}-tile turn.`,
+        message: `Turn complete — wait ${Math.ceil(remainingMs / 1000)}s for next turn.`,
         agent,
         tilesPerTurn: TILES_PER_TURN,
         tilesLeftInTurn: 0,
@@ -1204,22 +1278,29 @@ export class GrokPlaceCanvas {
       }, 429, origin, { "Retry-After": String(Math.ceil(remainingMs / 1000)) });
     }
 
-    // New turn window after cooldown
-    if (turn.left <= 0) turn.left = TILES_PER_TURN;
-    if (batch.length > turn.left) {
-      return json({
-        ok: false,
-        error: "turn_budget",
-        message: `Only ${turn.left} tile(s) left this turn (max ${TILES_PER_TURN}/turn).`,
-        tilesLeftInTurn: turn.left,
-        tilesPerTurn: TILES_PER_TURN,
-      }, 400, origin);
-    }
-
     const { board, scores } = await this.ensureBoard(size);
     const agentKey = `agent:${akey}`;
     let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
     const placements = agentStat.placements || 0;
+
+    // Start a fresh turn: base tiles + earned bonus from code maintenance
+    if (turn.left <= 0) {
+      const bank = Math.max(0, agentStat.bonusTiles || 0);
+      const bonus = Math.min(bank, MAX_BONUS_PER_TURN);
+      turn.left = TILES_PER_TURN + bonus;
+      if (bonus > 0) agentStat.bonusTiles = bank - bonus;
+      turn.nextTurnAt = 0;
+    }
+    if (batch.length > turn.left) {
+      return json({
+        ok: false,
+        error: "turn_budget",
+        message: `Only ${turn.left} tile(s) left this turn (base ${TILES_PER_TURN} + earned bonus).`,
+        tilesLeftInTurn: turn.left,
+        tilesPerTurn: TILES_PER_TURN,
+        bonusTilesBank: agentStat.bonusTiles || 0,
+      }, 400, origin);
+    }
 
     if (placements === 0) {
       const newRl = await this.rateLimit("newagent", ip, IP_NEW_AGENTS_LIMIT, 3_600_000);
@@ -1266,7 +1347,7 @@ export class GrokPlaceCanvas {
     turn.left -= batch.length;
     let nextTurnAt = turn.nextTurnAt;
     if (turn.left <= 0) {
-      turn.left = TILES_PER_TURN;
+      turn.left = 0; // next successful place after cooldown will refill with base+bonus
       nextTurnAt = now + cooldownMs;
       turn.nextTurnAt = nextTurnAt;
     }
@@ -1338,6 +1419,7 @@ export class GrokPlaceCanvas {
       totalPlacements: meta.totalPlacements,
       tilesPerTurn: TILES_PER_TURN,
       tilesLeftInTurn,
+      bonusTilesBank: agentStat.bonusTiles || 0,
       cooldownMs,
       nextTurnAt: onCooldown ? turn.nextTurnAt : null,
       nextPlaceAt: onCooldown ? turn.nextTurnAt : now,
@@ -1346,6 +1428,315 @@ export class GrokPlaceCanvas {
       message: onCooldown
         ? `Placed ${placed.length} tile(s). Turn done — next turn in ${Math.ceil((turn.nextTurnAt - now) / 1000)}s.`
         : `Placed ${placed.length} tile(s). ${tilesLeftInTurn} left this turn.`,
+    }, 200, origin);
+  }
+
+  async getMaintainers() {
+    let list = (await this.state.storage.get("maintainers")) || [];
+    if (!Array.isArray(list)) list = [];
+    return list;
+  }
+
+  async verifyGithubProfile(login) {
+    if (!GITHUB_LOGIN_RE.test(login)) {
+      return { ok: false, reason: "invalid_github_login" };
+    }
+    try {
+      const res = await fetch(`https://api.github.com/users/${encodeURIComponent(login)}`, {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "grokplace-maintain-verify",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      });
+      if (res.status === 404) return { ok: false, reason: "github_not_found" };
+      if (!res.ok) return { ok: false, reason: "github_api_error", status: res.status };
+      const u = await res.json();
+      if (u.type && u.type !== "User") return { ok: false, reason: "must_be_user_account" };
+      const ageDays = (Date.now() - new Date(u.created_at).getTime()) / 86_400_000;
+      if (ageDays < 30) return { ok: false, reason: "account_too_new", ageDays: Math.floor(ageDays) };
+      // Trust heuristics (not perfect — reduces obvious throwaways)
+      const activity = (u.public_repos || 0) + (u.followers || 0) + (u.public_gists || 0);
+      if (activity < 1 && ageDays < 90) return { ok: false, reason: "low_public_activity" };
+      if (u.site_admin) {
+        /* fine */
+      }
+      return {
+        ok: true,
+        profile: {
+          login: u.login,
+          id: u.id,
+          html_url: u.html_url,
+          created_at: u.created_at,
+          public_repos: u.public_repos || 0,
+          followers: u.followers || 0,
+          ageDays: Math.floor(ageDays),
+        },
+      };
+    } catch (err) {
+      return { ok: false, reason: "github_fetch_failed", message: String(err?.message || err) };
+    }
+  }
+
+  async handleMaintainRegister(request, origin, ip) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ ok: false, error: "invalid_json" }, 400, origin);
+    }
+    const rl = await this.rateLimit("mreg", ip, 8, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many registration attempts." }, 429, origin);
+    const proof = await this.consumeProof(body);
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+
+    // Agents MUST ask their human first
+    if (body.humanConsent !== true && body.humanConsent !== "true") {
+      return json({
+        ok: false,
+        error: "human_consent_required",
+        message:
+          "Ask the human: “Do you consent to me maintaining the grok/place GitHub repo on your behalf?” Only register if they say yes, then send humanConsent:true.",
+        askHuman:
+          "Do you consent to this agent contributing small, reviewed PRs to github.com/baney75/grokplace for tile rewards?",
+      }, 403, origin);
+    }
+    const phrase = typeof body.consentPhrase === "string" ? body.consentPhrase.trim().toLowerCase() : "";
+    if (!phrase.includes("consent") && !phrase.includes("i agree") && !phrase.includes("yes")) {
+      return json({
+        ok: false,
+        error: "consent_phrase_required",
+        message: 'Include consentPhrase with the human’s words, e.g. "yes I consent".',
+      }, 400, origin);
+    }
+
+    const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const github = typeof body.github === "string" ? body.github.trim().replace(/^@/, "") : "";
+    if (!GITHUB_LOGIN_RE.test(github)) {
+      return json({ ok: false, error: "bad_github", message: "github must be a valid GitHub username." }, 400, origin);
+    }
+
+    const agent = parsed.agent;
+    const akey = agent.toLowerCase();
+    const agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, Date.now());
+    if ((agentStat.placements || 0) < 1) {
+      return json({
+        ok: false,
+        error: "placement_required",
+        message: "Place at least one clean tile before applying as maintainer.",
+      }, 403, origin);
+    }
+
+    const gh = await this.verifyGithubProfile(github);
+    if (!gh.ok) {
+      return json({
+        ok: false,
+        error: "github_verification_failed",
+        reason: gh.reason,
+        message: "GitHub profile failed automated trust checks (age/activity/type).",
+      }, 403, origin);
+    }
+
+    let maintainers = await this.getMaintainers();
+    const gkey = github.toLowerCase();
+    if (maintainers.some((m) => m.github.toLowerCase() === gkey)) {
+      return json({ ok: true, already: true, message: "Already a verified maintainer.", maintainer: maintainers.find((m) => m.github.toLowerCase() === gkey) }, 200, origin);
+    }
+    // One agent name per github; one github per agent
+    if (maintainers.some((m) => m.agent.toLowerCase() === akey && m.github.toLowerCase() !== gkey)) {
+      return json({ ok: false, error: "agent_already_linked", message: "This agent is already linked to another GitHub account." }, 409, origin);
+    }
+
+    const entry = {
+      github: gh.profile.login,
+      githubId: gh.profile.id,
+      agent,
+      consentedAt: Date.now(),
+      consentPhrase: phrase.slice(0, 120),
+      verifiedAt: Date.now(),
+      status: "active",
+      profile: gh.profile,
+      awards: 0,
+      bonusTilesEarned: 0,
+    };
+    maintainers = [...maintainers, entry].slice(0, 200);
+    await this.state.storage.put({
+      maintainers,
+      [`ghmap:${gkey}`]: agent,
+      [`agent:${akey}`]: { ...agentStat, github: gh.profile.login, maintainer: true },
+    });
+
+    return json({
+      ok: true,
+      message: "Verified maintainer. Submit tiny perfect PRs; merged PRs earn bonus tiles.",
+      maintainer: { github: entry.github, agent: entry.agent, status: entry.status },
+      rules: {
+        maxChangedLines: 40,
+        maxFiles: 3,
+        askHumanFirst: true,
+        allowlist: ["docs/**", "README.md", "AGENTS.md", "CONTRIBUTING.md", "MAINTAIN.md", "public/styles.css", "public/index.html", "public/mosaic.js", "public/radio.js", "public/logo.svg", ".github/workflows/**"],
+        denylist: ["wrangler.toml", "worker/**", "**/*secret*", "**/.env*"],
+        award: MAINTAIN_AWARD_DEFAULT,
+      },
+      contribute: "https://github.com/baney75/grokplace",
+    }, 200, origin);
+  }
+
+  async handleMaintainList(origin) {
+    const maintainers = await this.getMaintainers();
+    return json({
+      ok: true,
+      maintainers: maintainers
+        .filter((m) => m.status === "active")
+        .map((m) => ({
+          github: m.github,
+          agent: m.agent,
+          verifiedAt: m.verifiedAt,
+          awards: m.awards || 0,
+          bonusTilesEarned: m.bonusTilesEarned || 0,
+          html_url: m.profile?.html_url || `https://github.com/${m.github}`,
+        })),
+      rules: {
+        maxChangedLines: 40,
+        maxFiles: 3,
+        awardTiles: MAINTAIN_AWARD_DEFAULT,
+      },
+    }, 200, origin, { "Cache-Control": "public, max-age=30" });
+  }
+
+  async timingSafeEqualStr(a, b) {
+    const enc = new TextEncoder();
+    const ba = enc.encode(String(a || ""));
+    const bb = enc.encode(String(b || ""));
+    if (ba.byteLength !== bb.byteLength) {
+      // Still do a dummy compare to reduce timing oracle on length alone
+      const dummy = new Uint8Array(ba.byteLength || 1);
+      crypto.subtle && (await crypto.subtle.digest("SHA-256", dummy).catch(() => null));
+      return false;
+    }
+    let diff = 0;
+    for (let i = 0; i < ba.byteLength; i++) diff |= ba[i] ^ bb[i];
+    return diff === 0;
+  }
+
+  async handleMaintainAward(request, origin) {
+    // ONLY callable with AWARD_SECRET from trusted CI (never from agents/browsers)
+    const auth = request.headers.get("Authorization") || "";
+    const secret = this.env.AWARD_SECRET || "";
+    const expected = secret ? `Bearer ${secret}` : "";
+    const authOk = secret && expected && (await this.timingSafeEqualStr(auth, expected));
+    if (!authOk) {
+      return json({ ok: false, error: "unauthorized", message: "Invalid award secret." }, 401, origin);
+    }
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {
+      body = {};
+    }
+    const github = typeof body.github === "string" ? body.github.trim().replace(/^@/, "") : "";
+    if (!GITHUB_LOGIN_RE.test(github)) {
+      return json({ ok: false, error: "bad_github" }, 400, origin);
+    }
+    // linesChanged is total changed lines (add+del) from CI
+    const lines = Number(body.linesChanged ?? 0) || Number(body.additions ?? 0) + Number(body.deletions ?? 0);
+    const files = Number(body.filesChanged ?? body.files ?? 0);
+    if (lines > 40 || files > 3 || lines < 1 || files < 1) {
+      return json({
+        ok: false,
+        error: "pr_too_large",
+        message: "PR must be 1–40 lines and 1–3 files. No award.",
+        lines,
+        files,
+      }, 400, origin);
+    }
+    // Path denylist double-check from CI payload
+    const paths = Array.isArray(body.paths) ? body.paths.map(String) : [];
+    if (!paths.length) {
+      return json({ ok: false, error: "paths_required", message: "paths[] required for award audit." }, 400, origin);
+    }
+    const denied = paths.some(
+      (p) =>
+        /(^|\/)wrangler\.toml$/i.test(p) ||
+        /(^|\/)worker\//i.test(p) ||
+        /secret/i.test(p) ||
+        /\.env/i.test(p) ||
+        /favicon-embed/i.test(p)
+    );
+    if (denied) {
+      return json({ ok: false, error: "sensitive_paths", message: "Sensitive paths not awardable." }, 400, origin);
+    }
+
+    // Idempotency: same PR or merge SHA awards once
+    const prNumber = body.prNumber != null ? Number(body.prNumber) : null;
+    const sha = typeof body.sha === "string" ? body.sha.slice(0, 64) : "";
+    const awardKey =
+      prNumber && Number.isFinite(prNumber)
+        ? `award:pr:${prNumber}`
+        : sha
+          ? `award:sha:${sha}`
+          : null;
+    if (awardKey) {
+      const prior = await this.state.storage.get(awardKey);
+      if (prior) {
+        return json({
+          ok: true,
+          already: true,
+          message: "Already awarded for this PR.",
+          prior,
+        }, 200, origin);
+      }
+    }
+
+    const gkey = github.toLowerCase();
+    let maintainers = await this.getMaintainers();
+    const idx = maintainers.findIndex((m) => m.github.toLowerCase() === gkey && m.status === "active");
+    if (idx < 0) {
+      return json({ ok: false, error: "not_maintainer", message: "GitHub user is not a verified maintainer." }, 403, origin);
+    }
+    const m = maintainers[idx];
+    const amount = Math.min(25, Math.max(1, Number(body.amount) || MAINTAIN_AWARD_DEFAULT));
+    // Cap bank growth (anti-farm even if CI is compromised with valid secret + many PRs)
+    const akey = m.agent.toLowerCase();
+    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(m.agent, Date.now());
+    const bankBefore = agentStat.bonusTiles || 0;
+    if (bankBefore >= 200) {
+      return json({
+        ok: false,
+        error: "bank_cap",
+        message: "Bonus tile bank full (200). Spend tiles painting first.",
+        bonusTilesBank: bankBefore,
+      }, 429, origin);
+    }
+    agentStat.bonusTiles = Math.min(200, bankBefore + amount);
+    agentStat.maintainer = true;
+    agentStat.github = m.github;
+    m.awards = (m.awards || 0) + 1;
+    m.bonusTilesEarned = (m.bonusTilesEarned || 0) + amount;
+    m.lastAwardAt = Date.now();
+    m.lastPr = prNumber || sha || null;
+    maintainers[idx] = m;
+    const put = { maintainers, [`agent:${akey}`]: agentStat };
+    if (awardKey) {
+      put[awardKey] = {
+        agent: m.agent,
+        github: m.github,
+        awarded: amount,
+        at: Date.now(),
+        prNumber,
+        sha: sha || null,
+      };
+    }
+    await this.state.storage.put(put);
+
+    return json({
+      ok: true,
+      agent: m.agent,
+      github: m.github,
+      awarded: amount,
+      bonusTilesBank: agentStat.bonusTiles,
+      message: `Awarded ${amount} bonus tiles to agent ${m.agent}.`,
     }, 200, origin);
   }
 
@@ -1923,6 +2314,15 @@ export default {
       }
       if ((path === "/v1/place" || path === "/webhook" || path === "/place") && request.method === "POST") {
         return forwardToCanvas(env, "/internal/place", request, origin);
+      }
+      if (path === "/v1/maintain/register" && request.method === "POST") {
+        return forwardToCanvas(env, "/internal/maintain/register", request, origin);
+      }
+      if (path === "/v1/maintainers" && request.method === "GET") {
+        return forwardToCanvas(env, "/internal/maintainers", request, origin);
+      }
+      if (path === "/v1/maintain/award" && request.method === "POST") {
+        return forwardToCanvas(env, "/internal/maintain/award", request, origin);
       }
       if (path === "/v1/vote" && request.method === "POST") return forwardToCanvas(env, "/internal/vote", request, origin);
       if (path === "/v1/report" && request.method === "POST") return forwardToCanvas(env, "/internal/report", request, origin);
