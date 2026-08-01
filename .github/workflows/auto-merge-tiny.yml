@@ -275,6 +275,7 @@ jobs:
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368 and .status == "completed" and .conclusion == "failure"' /tmp/trusted-failure.json >/dev/null
 
       - name: Merge the exact eligible head
+        id: merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -284,9 +285,17 @@ jobs:
           set -euo pipefail
           CURRENT=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
           [ "$CURRENT" = "$HEAD" ] || { echo "PR head changed after trusted validation."; exit 1; }
-          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD"
-          gh api "repos/$REPO/pulls/$PR" > /tmp/merged.json
-          jq -e --arg head "$HEAD" '.merged == true and .head.sha == $head and (.merge_commit_sha | test("^[a-f0-9]{40}$"))' /tmp/merged.json >/dev/null
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD" --auto
+          for attempt in {1..20}; do
+            gh api "repos/$REPO/pulls/$PR" > /tmp/merged.json
+            if jq -e --arg head "$HEAD" '.merged == true and .head.sha == $head and (.merge_commit_sha | test("^[a-f0-9]{40}$"))' /tmp/merged.json >/dev/null; then
+              echo "merged=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+          echo "Exact-head auto-merge is enabled; durable reconciliation will finalize a maintenance award after GitHub completes the merge."
 
       - name: Finalize the reserved maintain award
         if: steps.validation.outputs.lane == 'maintain'
@@ -300,6 +309,10 @@ jobs:
           AUTHOR: ${{ steps.candidate.outputs.author }}
         run: |
           set -euo pipefail
+          [ "${{ steps.merge.outputs.merged }}" = "true" ] || {
+            echo "Auto-merge is still pending; reconciliation will finalize this maintenance award after the merge."
+            exit 0
+          }
           MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha')
           BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --arg merge "$MERGE_SHA" '{phase:"finalize",github:$github,prNumber:$pr,headSha:$head,mergeSha:$merge}')
           curl --retry 10 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/award.json
