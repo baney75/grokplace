@@ -67,7 +67,7 @@ function testEnv({ limiterError = false } = {}) {
 
 {
   const { env, calls } = testEnv();
-  const response = await maintenanceWorker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/challenge?scope=place"), env);
+  const response = await maintenanceWorker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/challenge?scope=agent%3Aclaim"), env);
   check("maintenance challenge rejects non-evidence scopes before rate limit or DO", response.status === 400 && calls.length === 0);
 }
 
@@ -76,15 +76,25 @@ function testEnv({ limiterError = false } = {}) {
   const response = await maintenanceWorker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/agent/claim", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent: "reviewer" }),
+    body: JSON.stringify({}),
+  }), env);
+  check("maintenance cannot issue normal agent capabilities", response.status === 404 && calls.length === 0);
+}
+
+{
+  const { env, calls } = testEnv();
+  const response = await maintenanceWorker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/reviews/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
   }), env);
   const forwarded = calls.find((call) => call.type === "do");
   check(
-    "maintenance claim is rate-limited and forwards only to the internal claim writer",
+    "maintenance review claim is rate-limited and forwards only to the internal review-claim writer",
     response.status === 200
       && calls.filter((call) => call.type === "limit").length === 1
       && forwarded
-      && new URL(forwarded.url).pathname === "/internal/agent/claim"
+      && new URL(forwarded.url).pathname === "/internal/reviews/claim"
   );
 }
 
@@ -108,7 +118,7 @@ function testEnv({ limiterError = false } = {}) {
   const { env, calls } = testEnv();
   const response = await maintenanceWorker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/reviews/attest", {
     method: "POST",
-    headers: { Authorization: "Agent placeholder", "Content-Type": "application/json" },
+    headers: { Authorization: "Review placeholder", "Content-Type": "application/json" },
     body: JSON.stringify({ agent: "critic" }),
   }), env);
   const forwarded = calls.find((call) => call.type === "do");
@@ -117,7 +127,7 @@ function testEnv({ limiterError = false } = {}) {
     response.status === 200
       && forwarded
       && new URL(forwarded.url).pathname === "/internal/reviews/attest"
-      && forwarded.init.headers.get("Authorization") === "Agent placeholder"
+      && forwarded.init.headers.get("Authorization") === "Review placeholder"
   );
 }
 

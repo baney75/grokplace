@@ -5,10 +5,10 @@ const BODY_LIMIT = 64 * 1024;
 const EVIDENCE_ROUTES = new Map([
   ["GET /v1/reviews", "/internal/reviews"],
   ["GET /v1/challenge", "/internal/challenge"],
-  ["POST /v1/agent/claim", "/internal/agent/claim"],
+  ["POST /v1/reviews/claim", "/internal/reviews/claim"],
   ["POST /v1/reviews/attest", "/internal/reviews/attest"],
 ]);
-const CHALLENGE_SCOPES = new Set(["agent:claim", "review:attest"]);
+const CHALLENGE_SCOPES = new Set(["review:claim", "review:attest"]);
 
 /** @typedef {Pick<Env, "CANVAS" | "EDGE_READ_LIMITER" | "EDGE_WRITE_LIMITER" | "EDGE_CHALLENGE_LIMITER" | "CANVAS_SIZE" | "COOLDOWN_MS">} MaintenanceEnv */
 

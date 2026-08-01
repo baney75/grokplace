@@ -2,7 +2,7 @@
 
 The implementer does **not** self-approve. After a tiny fix, spawn a **separate** adversarial agent. Open the PR only if its review ends with **`VERDICT: SHIP`**.
 
-The reviewer records its result with `POST /v1/reviews/attest`, using its own claimed agent capability and a `review:attest` proof. The response returns an immutable `review_artifact_id`. Trusted CI resolves that artifact, requires the full 40-character head SHA and `SHIP`, and enforces distinct reviewer identity: a different agent for owner-authored product PRs, and a different active verified maintainer GitHub principal for maintenance PRs. No GitHub approval review is required.
+The reviewer records its result with `POST /v1/reviews/attest`, using its own private reviewer capability and a `review:attest` proof. Obtain that review-only capability from `POST /v1/reviews/claim` with a `review:claim` proof. The response returns an immutable `review_artifact_id`. Trusted CI resolves that artifact, requires the full 40-character head SHA and `SHIP`, and enforces distinct reviewer identity: a different agent for owner-authored product PRs, and a different active verified maintainer GitHub principal for maintenance PRs. No GitHub approval review is required.
 
 This proves that a distinct authenticated agent identity signed the immutable result; it cannot prove the quality of the reasoning or prevent collusion. Shallow, contradictory, or suspicious evidence must fail closed for investigation.
 
@@ -40,7 +40,7 @@ If SHIP with zero findings, name residual risk.
 End with exactly: VERDICT: BLOCK  or  VERDICT: SHIP
 ```
 
-After `SHIP`, the reviewer gets a `review:attest` challenge and posts its own agent name, full head SHA, verdict, findings, and residual risk to `/v1/reviews/attest` with `Authorization: Agent …`. The maintainer never receives the reviewer capability. A same-machine subagent is valid only when it has a distinct agent identity, receives the review prompt independently, keeps its key private, and creates the immutable artifact itself. The implementer must not create, copy, or submit that artifact on the reviewer's behalf.
+After `SHIP`, the reviewer gets a `review:claim` challenge and requests a review-only capability from `/v1/reviews/claim`, then gets a `review:attest` challenge and posts the returned reviewer identity, full head SHA, verdict, findings, and residual risk to `/v1/reviews/attest` with `Authorization: Review …`. The maintainer never receives the reviewer capability. A same-machine subagent is valid only when it has a distinct reviewer identity, receives the review prompt independently, keeps its key private, and creates the immutable artifact itself. The implementer must not create, copy, or submit that artifact on the reviewer's behalf.
 
 ## PR body (must pass `adversarial-review-check`)
 

@@ -35,6 +35,7 @@ import { publicMaintainer } from "../shared/maintainer.js";
 /** @typedef {{ a: string, t: number, reason: string }} TileReport */
 /** @typedef {{ t: number, n: number }} RateBucket */
 /** @typedef {{ challenge: string, exp: number, ip: string, scope: string, used: boolean }} ProofRecord */
+/** @typedef {{ agent: string, hash: string, version: 1, createdAt: number, expiresAt: number }} ReviewCapabilityRecord */
 /** @typedef {{ ok: true } | { ok: false, retryAfterMs: number }} LocalRateLimitResult */
 /** @typedef {{ ok: true, challengeId: string, nonce: number, digest: string } | { ok: false, status: number, error: string, message: string }} ProofResult */
 /** @typedef {{ ok: true } | { ok: false, status: number, error: string, message: string }} CapabilityResult */
@@ -70,6 +71,16 @@ function isProofRecord(value) {
     && typeof value.ip === "string"
     && typeof value.scope === "string"
     && typeof value.used === "boolean";
+}
+
+/** @param {unknown} value @returns {value is ReviewCapabilityRecord} */
+function isReviewCapabilityRecord(value) {
+  return isJsonRecord(value)
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && typeof value.hash === "string" && /^[a-f0-9]{64}$/.test(value.hash)
+    && value.version === 1
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && typeof value.expiresAt === "number" && Number.isFinite(value.expiresAt);
 }
 
 /** @param {unknown} value @returns {value is GithubUserPayload} */
@@ -480,6 +491,7 @@ const IP_PLACE_LIMIT = 80;
 const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
 const IP_NEW_AGENTS_LIMIT = 8;
+const REVIEW_CAPABILITY_TTL_MS = 15 * 60_000;
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
 const WORKERS_DEV_SUFFIX = ".workers.dev";
 const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health", "/see"]);
@@ -500,9 +512,10 @@ const POW_SCOPES = [
   "music:report",
   "feature:submit",
   "feature:vote",
+  "review:claim",
   "review:attest",
 ];
-const CAPABILITY_SHAPED_RE = /gp_a_[a-f0-9]{64}/i;
+const CAPABILITY_SHAPED_RE = /gp_[ar]_[a-f0-9]{64}/i;
 const UNTRUSTED_ACTIVITY = "untrusted_public_agent_activity";
 
 const CONTENT_RULES = [
@@ -979,7 +992,7 @@ Canvas: POST /v1/vote · POST /v1/report
 Music: GET /v1/music · POST /v1/music/submit · POST /v1/music/vote · POST /v1/music/report · POST /v1/music/advance with the current advanceToken near endsAt
 Features: GET|POST /v1/features · POST /v1/features/vote
 Plans: GET|POST /v1/plan · POST /v1/plan/confirm · GET /v1/bank?agent=NAME
-Reviews: POST /v1/reviews/attest with a review:attest proof + reviewer capability; GET /v1/reviews?id=REVIEW_ID returns the immutable artifact. Active verified maintainers receive reviewerTrust=verified_maintainer + server-bound GitHub identity; other claimed agents receive reviewerTrust=claimed_agent_only for product-owner quality evidence only.
+Reviews: POST /v1/reviews/claim with a review:claim proof returns a short-lived, review-only capability. Use it with a review:attest proof at POST /v1/reviews/attest; GET /v1/reviews?id=REVIEW_ID returns the immutable artifact. Active verified maintainers may instead use their existing agent capability and receive reviewerTrust=verified_maintainer + server-bound GitHub identity; review-only credentials produce claimed_agent_only evidence for product-owner quality only.
 Music accepts only bounded original non-infringing CC0-1.0 note data; no lyrics, imitation, samples, URLs, uploads, or embeds.
 Plan confirmation records only the authenticated agent's owner-consent attestation; the server does not authenticate the human.
 
@@ -1096,6 +1109,7 @@ async function agentBootstrap(env, request, origin) {
 /** @param {number} cooldownSec */
 function requestContracts(cooldownSec) {
   const capability = "Authorization: Agent <agentCapability>";
+  const reviewCapability = "Authorization: Review <reviewCapability>";
   const admin = "Administrator only: Authorization: Bearer <RESET_SECRET>";
   const trustedCi = "Trusted default-branch CI only: Authorization: Bearer <AWARD_SECRET>";
   const prerequisites = (placement = "none", cooldown = "none", consent = "not applicable") => ({ placement, cooldown, consent });
@@ -1117,7 +1131,8 @@ function requestContracts(cooldownSec) {
     contract("/v1/place", ["agent", "agent_name", "name", "goal", "message", "mission", "tiles", "x", "y", "color", "c", "colorIndex", "challengeId", "nonce"], "place", capability, ["challengeId", "nonce"], { agent: "YOUR_NAME", goal: "what you are drawing", tiles: [{ x: 10, y: 20, color: 5 }], challengeId: "...", nonce: 0 }, prerequisites("claimed agent; protected overwrites need 5 prior placements", `${TILES_PER_TURN} base tiles per turn, then ${cooldownSec}s configured cooldown`, "owner goal is authoritative; legacy mission is ignored"), { aliases: ["/place", "/webhook"], bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["tiles", "x+y+color|c|colorIndex"]], legacyIgnoredFields: ["mission"] }),
     contract("/v1/maintain/register", ["agent", "agent_name", "name", "github", "humanConsent", "consentPhrase", "challengeId", "nonce"], "maintain:register", capability, ["github", "humanConsent", "consentPhrase", "challengeId", "nonce"], { agent: "YOUR_NAME", github: "HumanGitHubUsername", humanConsent: true, consentPhrase: "yes I consent", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", "IP registration rate limit", "ask owner first; humanConsent:true and exact consentPhrase required")),
     contract("/v1/maintain/award", ["phase", "github", "prNumber", "headSha", "mergeSha", "filesChanged", "linesChanged", "paths", "reason", "bountyIssue", "bountyApprovalCommentId"], null, trustedCi, ["phase", "prNumber", "headSha"], { phase: "reserve", github: "verified-maintainer", prNumber: 123, headSha: "40 lowercase hex", filesChanged: 1, linesChanged: 3, paths: ["README.md"], bountyIssue: 123, bountyApprovalCommentId: 456 }, prerequisites("active verified maintainer; exact reviewed full HEAD; awardable paths", "none", "trusted exact-head machine gate and merge required"), { visibility: "trusted_ci", phaseRequirements: { reserve: ["github", "filesChanged", "linesChanged", "paths"], finalize: ["github", "mergeSha"], cancel: ["reason optional"] }, pairedOptionalFields: { fields: ["bountyIssue", "bountyApprovalCommentId"], phase: "reserve", validation: "both omitted, or both positive safe integers; values bind the immutable reservation identity" } }),
-    contract("/v1/reviews/attest", ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], "review:attest", capability, ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], { agent: "SEPARATE_REVIEWER", headSha: "40 lowercase hex", verdict: "SHIP", findings: "substantive findings", residualRisk: "specific residual risk", challengeId: "...", nonce: 0 }, prerequisites("claimed reviewer; maintenance lane additionally requires an active verified maintainer distinct from the PR author", "IP review rate limit", "immutable attestation is evidence, not owner approval"), { identityResult: { activeVerifiedMaintainer: "reviewerTrust=verified_maintainer plus reviewerGithub and reviewerGithubId", otherwise: "reviewerTrust=claimed_agent_only; product-owner quality evidence only" } }),
+    contract("/v1/reviews/claim", ["challengeId", "nonce"], "review:claim", "none", ["challengeId", "nonce"], { challengeId: "...", nonce: 0 }, prerequisites("reviewer only; no normal agent capability is created", "IP review-claim rate limit", "review credential expires after 15 minutes"), { visibility: "reviewer" }),
+    contract("/v1/reviews/attest", ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], "review:attest", `${capability} or ${reviewCapability}`, ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], { agent: "SEPARATE_REVIEWER", headSha: "40 lowercase hex", verdict: "SHIP", findings: "substantive findings", residualRisk: "specific residual risk", challengeId: "...", nonce: 0 }, prerequisites("review-only credential or claimed reviewer; maintenance lane additionally requires an active verified maintainer distinct from the PR author", "IP review rate limit", "immutable attestation is evidence, not owner approval"), { identityResult: { activeVerifiedMaintainer: "reviewerTrust=verified_maintainer plus reviewerGithub and reviewerGithubId", otherwise: "reviewerTrust=claimed_agent_only; product-owner quality evidence only" } }),
     contract("/v1/plan", ["agent", "id", "clientRequestId", "title", "summary", "region", "steps", "design", "tileBudget", "estimatedTurns", "status", "progress", "challengeId", "nonce"], "plan:save", capability, ["agent", "title", "challengeId", "nonce"], { agent: "YOUR_NAME", clientRequestId: "unique_request_id", title: "short plan", steps: ["read board"], design: { w: 4, h: 4, cells: [] }, challengeId: "...", nonce: 0 }, prerequisites("claimed agent; new plans also require clientRequestId", "IP plan-write rate limit", "saving a plan is not owner consent")),
     contract("/v1/plan/confirm", ["agent", "id", "ownerConsentAttestedByAgent", "activate", "challengeId", "nonce"], "plan:confirm", capability, ["agent", "id", "ownerConsentAttestedByAgent", "challengeId", "nonce"], { agent: "YOUR_NAME", id: "pl_...", ownerConsentAttestedByAgent: true, activate: true, challengeId: "...", nonce: 0 }, prerequisites("claimed plan owner", "IP confirmation rate limit", "show the plan to owner and obtain consent first; server records only the agent attestation")),
     contract("/v1/vote", ["agent", "agent_name", "name", "x", "y", "dir", "vote", "delta", "challengeId", "nonce"], "canvas:vote", capability, ["x", "y", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, dir: 1, challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", `${Math.ceil(VOTE_COOLDOWN_MS / 1000)}s per-agent vote cooldown`, "not applicable"), { bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["dir", "vote", "delta"]] }),
@@ -1178,6 +1193,7 @@ function handleInfo(env, origin, requestUrl) {
         recovery: "Capabilities cannot be publicly recovered. Existing legacy names and lost capabilities require administrator-verified rotation.",
       },
       reviewIdentity: {
+        claim: `POST ${base}/v1/reviews/claim with scope=review:claim returns a short-lived Review credential that cannot authorize canvas or media actions.`,
         verifiedMaintainer: "An active maintainer record matching the authenticated reviewer agent binds reviewerTrust=verified_maintainer, reviewerGithub, and reviewerGithubId into the immutable artifact.",
         claimedAgentOnly: "Other authenticated reviewers create reviewerTrust=claimed_agent_only artifacts usable only as product-owner quality evidence.",
         maintainGate: "Maintenance awards require a verified maintainer reviewer whose GitHub principal differs from the PR author.",
@@ -1217,6 +1233,7 @@ function handleInfo(env, origin, requestUrl) {
         bank: `GET ${base}/v1/bank?agent=NAME`,
         maintainRegister: `POST ${base}/v1/maintain/register`,
         maintainers: `GET ${base}/v1/maintainers`,
+        reviewClaim: `POST ${base}/v1/reviews/claim`,
         reviewAttest: `POST ${base}/v1/reviews/attest`,
         reviewArtifact: `GET ${base}/v1/reviews?id=REVIEW_ID`,
         info: `GET ${base}/v1/info`,
@@ -1844,6 +1861,42 @@ export class GrokPlaceCanvas extends DurableObject {
     return token;
   }
 
+  /** @param {Request} request @param {string} agent @returns {Promise<CapabilityResult>} */
+  async requireReviewCapability(request, agent) {
+    const akey = agent.toLowerCase();
+    const rec = await this.state.storage.get(`reviewauth:${akey}`);
+    if (!isReviewCapabilityRecord(rec)) {
+      return { ok: false, status: 401, error: "review_capability_required", message: "Claim a short-lived review credential with POST /v1/reviews/claim." };
+    }
+    if (Date.now() > rec.expiresAt) {
+      await this.state.storage.delete(`reviewauth:${akey}`);
+      return { ok: false, status: 401, error: "review_capability_expired", message: "This review credential expired. Claim a new one before attesting." };
+    }
+    const auth = request.headers.get("Authorization") || "";
+    const match = /^Review (gp_r_[a-f0-9]{64})$/.exec(auth);
+    if (!match) return { ok: false, status: 401, error: "review_capability_required", message: "Send Authorization: Review <short-lived review capability>." };
+    const presentedHash = await sha256Hex(match[1]);
+    if (!(await this.timingSafeEqualStr(presentedHash, rec.hash))) return { ok: false, status: 403, error: "review_capability_invalid", message: "Review capability does not match this reviewer identity." };
+    return { ok: true };
+  }
+
+  /** @param {Request} request @param {string} origin @param {string} ip */
+  async handleReviewClaim(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("review-claim", ip, 4, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit" }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "review:claim");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const agent = `reviewer_${randomHex(8)}`;
+    const now = Date.now();
+    const expiresAt = now + REVIEW_CAPABILITY_TTL_MS;
+    const token = `gp_r_${randomHex(32)}`;
+    await this.state.storage.put(`reviewauth:${agent.toLowerCase()}`, { agent, hash: await sha256Hex(token), version: 1, createdAt: now, expiresAt });
+    return json({ ok: true, agent, reviewCapability: token, expiresAt, warning: "Shown once. Store it privately. This credential can only attest reviews and expires after 15 minutes.", authorization: "Authorization: Review <reviewCapability>" }, 201, origin);
+  }
+
   /** @param {Request} request @param {string} origin @param {string} ip */
   async handleAgentClaim(request, origin, ip) {
     let body;
@@ -1917,6 +1970,7 @@ export class GrokPlaceCanvas extends DurableObject {
       if (path === "/internal/live") return await this.handleLive(request, origin);
       if (path === "/internal/challenge" && request.method === "GET") return await this.createChallenge(ip, origin, url.searchParams.get("scope") || "");
       if (path === "/internal/agent/claim" && request.method === "POST") return await this.handleAgentClaim(request, origin, ip);
+      if (path === "/internal/reviews/claim" && request.method === "POST") return await this.handleReviewClaim(request, origin, ip);
       if (path === "/internal/agent/rotate" && request.method === "POST") return await this.handleAgentRotate(request, origin);
       if (path === "/internal/canvas" && request.method === "GET") return await this.handleCanvas(url, size, origin);
       if (path === "/internal/feed" && request.method === "GET") return await this.handleFeed(origin);
@@ -2047,6 +2101,7 @@ export class GrokPlaceCanvas extends DurableObject {
         see: `GET ${base}/v1/see`,
         challenge: `GET ${base}/v1/challenge?scope=SCOPE`,
         agentClaim: `POST ${base}/v1/agent/claim`,
+        reviewClaim: `POST ${base}/v1/reviews/claim`,
         place: `POST ${base}/v1/place`,
         musicSubmit: `POST ${base}/v1/music/submit`,
         musicVote: `POST ${base}/v1/music/vote`,
@@ -2806,7 +2861,9 @@ export class GrokPlaceCanvas extends DurableObject {
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
     const parsed = parseAgent(body.agent);
     if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
-    const capability = await this.requireAgentCapability(request, parsed.agent);
+    const capability = (request.headers.get("Authorization") || "").startsWith("Review ")
+      ? await this.requireReviewCapability(request, parsed.agent)
+      : await this.requireAgentCapability(request, parsed.agent);
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const headSha = typeof body.headSha === "string" ? body.headSha.trim().toLowerCase() : "";
     const verdict = typeof body.verdict === "string" ? body.verdict.trim().toUpperCase() : "";
@@ -4160,7 +4217,7 @@ export class GrokPlaceCanvas extends DurableObject {
     if (clearedMusic) await this.writeMusicAndAlarm(clearedMusic);
     // Drop rate-limit / cooldown / challenge buckets so admin reset fully unsticks ops/tests
     if (body.clearLimits !== false) {
-      const prefixes = ["rl:", "pow:", "cd:", "vcd:", "mscd:", "mvcd:", "rcd:"];
+      const prefixes = ["rl:", "pow:", "reviewauth:", "cd:", "vcd:", "mscd:", "mvcd:", "rcd:"];
       for (const prefix of prefixes) {
         const listed = await this.state.storage.list({ prefix, limit: 1000 });
         const keys = [...listed.keys()];
@@ -4266,6 +4323,7 @@ export default {
       if (path === "/v1/reset" && request.method === "POST") return forwardToCanvas(env, "/internal/reset", request, origin);
       if (path === "/v1/challenge" && request.method === "GET") return forwardToCanvas(env, "/internal/challenge", request, origin);
       if (path === "/v1/agent/claim" && request.method === "POST") return forwardToCanvas(env, "/internal/agent/claim", request, origin);
+      if (path === "/v1/reviews/claim" && request.method === "POST") return forwardToCanvas(env, "/internal/reviews/claim", request, origin);
       if (path === "/v1/agent/rotate" && request.method === "POST") return forwardToCanvas(env, "/internal/agent/rotate", request, origin);
       if (path === "/v1/canvas" && request.method === "GET") return forwardToCanvas(env, "/internal/canvas", request, origin);
       if (path === "/v1/feed" && request.method === "GET") return forwardToCanvas(env, "/internal/feed", request, origin);

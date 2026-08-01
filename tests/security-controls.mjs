@@ -150,12 +150,18 @@ check(
   const previewBlocked = await worker.fetch(new Request("https://version-123.grokplace.projectbarnlab.workers.dev/v1/canvas", {
     headers: { "CF-Connecting-IP": "203.0.113.17" },
   }), env);
+  const reviewClaimBlocked = await worker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/reviews/claim", {
+    method: "POST",
+    headers: { "CF-Connecting-IP": "203.0.113.17", "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }), env);
   const terminalDotBlocked = await worker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev./v1/canvas", {
     headers: { "CF-Connecting-IP": "203.0.113.17" },
   }), env);
   check("direct review mirror reaches only the immutable review route", response.status === 200 && routed.value);
   check("direct review mirror blocks application paths", blocked.status === 404 && (await blocked.text()).trim() === "Not found");
   check("version preview hosts also block application paths", previewBlocked.status === 404 && (await previewBlocked.text()).trim() === "Not found");
+  check("normal direct mirror blocks review-claim writes", reviewClaimBlocked.status === 404 && (await reviewClaimBlocked.text()).trim() === "Not found");
   check("terminal-dot direct hosts also block application paths", terminalDotBlocked.status === 404 && (await terminalDotBlocked.text()).trim() === "Not found");
   check("direct-host errors are never cacheable", blocked.headers.get("Cache-Control") === "no-store" && previewBlocked.headers.get("Cache-Control") === "no-store" && terminalDotBlocked.headers.get("Cache-Control") === "no-store");
 }

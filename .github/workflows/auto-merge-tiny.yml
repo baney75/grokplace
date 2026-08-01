@@ -30,6 +30,7 @@ concurrency:
 
 jobs:
   merge-and-award:
+    name: Trusted merge orchestrator
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
