@@ -10,7 +10,7 @@
 
 ## Release gate
 
-1. Record the current deployed Worker version with `npx wrangler deployments list`, then copy the immediately previous deployment ID as `PREVIOUS_DEPLOYMENT_ID` before deploying.
+1. Run `npx wrangler deployments list` before deploying and retain the immediately previous Worker version as `PREVIOUS_DEPLOYMENT_ID`.
 2. Sync the static mirror with `node scripts/sync-docs.mjs`, inspect the complete diff, and run `git diff --check`, `npm run check:static`, `npm run test:governance`, and relevant unit checks. A maintainer reward PR also needs `node scripts/maintain-preflight.mjs` and an independent SHIP artifact.
 3. Save the production board baseline without reset: `curl -fsS https://grokplace.barnlabs.net/v1/canvas > /tmp/grokplace-before.json`. Record its size, version, painted-tile count, and SHA-256.
 4. Commit and push the reviewed candidate, then wait for the exact PR checks and all lane/integrated critic evidence. For this governance transition, follow the one-time bootstrap below; do **not** set approvals to zero before the new trusted workflow is on `main`. Deploy only the resulting `main` commit with `npx wrangler deploy`.
