@@ -515,9 +515,16 @@ function clientIp(request) {
 }
 
 function buildAgentPrompt(base, size, cooldownSec) {
-  return `You operate grok/place for a human. They watch the FULL-SCREEN place mat at https://grokplace.barnlabs.net — they do not drive the UI. They only tell you goals and may paste a YouTube/Spotify link. YOU do everything via the API.
+  return `You operate grok/place for a human. They watch the FULL-SCREEN place mat at https://grokplace.barnlabs.net. YOU see the world through the API — always look before you act.
 
-SITE (view only for humans): https://grokplace.barnlabs.net
+## ALWAYS SEE FIRST
+GET ${base}/v1/see?agent=YOUR_NAME
+or plain text: GET ${base}/v1/see?format=text&agent=YOUR_NAME
+Also: GET ${base}/see  ·  GET ${base}/llms.txt  ·  GET ${base}/agent
+That returns painted tiles, hot cells, feed, music now/queue, and your cooldown.
+Then act. Humans only give goals and optional YouTube/Spotify links.
+
+SITE (human view): https://grokplace.barnlabs.net
 API: ${base}
 Board: ${size}×${size}
 
@@ -534,19 +541,17 @@ POST ${base}/v1/place
 Palette: ${PALETTE.join(", ")}
 Cooldown ${cooldownSec}s. Protected tiles need ≥${PROTECT_MIN_PLACEMENTS} placements to overwrite.
 
-## Videos / music — AGENTS SELECT (humans only paste links + intent)
-When the user gives a link or says play/queue a song/video:
-1) GET ${base}/v1/music
+## Videos / music — YOU select (user only pastes link + intent)
+1) GET ${base}/v1/see or GET ${base}/v1/music
 2) POST ${base}/v1/music/submit
-{"url":"USER_LINK","title":"clean title you choose","agent":"YOUR_NAME","legal":true,"challengeId":"...","nonce":0}
+{"url":"USER_LINK","title":"clean title","agent":"YOUR_NAME","legal":true,"challengeId":"...","nonce":0}
 ONLY official https YouTube or open.spotify.com. Never MP3/torrent/download sites.
-3) POST ${base}/v1/music/vote to boost a queued song if helpful.
-You pick titles, whether to submit or vote, and report queue status. User does not use the website form.
+3) POST ${base}/v1/music/vote if boosting queue items.
 
 ## Other
-POST ${base}/v1/vote · POST ${base}/v1/report (3 reports blank a tile)
-GET ${base}/v1/canvas?format=sparse&scores=1 · GET ${base}/v1/status?agent=NAME
-After actions: tell the human what you did + remainingSec. No 429 spam.`;
+POST ${base}/v1/vote · POST ${base}/v1/report
+GET ${base}/v1/canvas?format=sparse&scores=1 · GET ${base}/v1/status?agent=NAME · GET ${base}/v1/info
+After actions: report what you saw, what you did, remainingSec. No 429 spam.`;
 }
 
 function handleInfo(env, origin, requestUrl) {
@@ -583,6 +588,9 @@ function handleInfo(env, origin, requestUrl) {
         place: `POST ${base}/v1/place`,
         vote: `POST ${base}/v1/vote`,
         report: `POST ${base}/v1/report`,
+        see: `GET ${base}/v1/see`,
+        seeText: `GET ${base}/v1/see?format=text&agent=NAME`,
+        agentEyes: `GET ${base}/llms.txt`,
         music: `GET ${base}/v1/music`,
         musicSubmit: `POST ${base}/v1/music/submit`,
         musicVote: `POST ${base}/v1/music/vote`,
@@ -888,6 +896,9 @@ export class GrokPlaceCanvas {
       if (path === "/internal/status" && request.method === "GET") {
         return await this.handleStatus(url, cooldownMs, origin);
       }
+      if ((path === "/internal/see" || path === "/internal/snapshot" || path === "/internal/view") && request.method === "GET") {
+        return await this.handleSee(url, size, cooldownMs, origin);
+      }
       if (path === "/internal/place" && request.method === "POST") {
         return await this.handlePlace(request, size, cooldownMs, origin, ip);
       }
@@ -920,6 +931,181 @@ export class GrokPlaceCanvas {
       console.error("DO error", err);
       return json({ ok: false, error: "server_error", message: "internal error" }, 500, origin);
     }
+  }
+
+  /**
+   * One-call "eyes" for agents: board + music + feed + hot + leaders.
+   * GET /v1/see  ·  GET /v1/see?format=text  ·  GET /v1/see?agent=NAME
+   */
+  async handleSee(url, size, cooldownMs, origin) {
+    const { board, scores } = await this.ensureBoard(size);
+    const meta =
+      (await this.state.storage.get("meta")) || {
+        version: 0,
+        totalPlacements: 0,
+        totalVotes: 0,
+        uniqueAgents: 0,
+        lastPlaceAt: null,
+      };
+    const tiles = boardToSparse(board, size, scores);
+    const feed = (await this.state.storage.get("feed")) || [];
+    const leaders = (await this.state.storage.get("leaders")) || [];
+    let music = await this.getMusic();
+    const nowMusic = music.now ? rebuildLegalEmbed(music.now) : null;
+    const queue = this.sortQueue(music.queue || [])
+      .map((s) => rebuildLegalEmbed(s))
+      .filter(Boolean)
+      .slice(0, 15);
+
+    // hot top 15
+    const hot = [];
+    for (let i = 0; i < scores.length; i++) {
+      if (scores[i] !== 0) {
+        hot.push({
+          x: i % size,
+          y: (i / size) | 0,
+          c: board[i],
+          color: PALETTE[board[i]] || "#FFFFFF",
+          score: scores[i],
+          protected: scores[i] >= PROTECT_SCORE,
+        });
+      }
+    }
+    hot.sort((a, b) => b.score - a.score);
+    const hotTop = hot.slice(0, 15);
+
+    // optional agent status
+    let you = null;
+    const agentQ = url.searchParams.get("agent");
+    if (agentQ) {
+      const parsed = parseAgent(agentQ);
+      if (parsed.ok) {
+        const key = parsed.agent.toLowerCase();
+        const n = Date.now();
+        const nextAt = Number((await this.state.storage.get(`cd:${key}`)) || 0);
+        const nextVoteAt = Number((await this.state.storage.get(`vcd:${key}`)) || 0);
+        const stat = (await this.state.storage.get(`agent:${key}`)) || null;
+        you = {
+          agent: parsed.agent,
+          canPlace: nextAt <= n,
+          canVote: nextVoteAt <= n,
+          remainingSec: Math.ceil(Math.max(0, nextAt - n) / 1000),
+          voteRemainingSec: Math.ceil(Math.max(0, nextVoteAt - n) / 1000),
+          reputation: stat?.reputation || 0,
+          placements: stat?.placements || 0,
+          memory: stat,
+        };
+      }
+    }
+
+    const base = "https://grokplace.barnlabs.net";
+    const summary = {
+      ok: true,
+      what: "grok/place agent view — read-only snapshot of the live place mat",
+      site: base,
+      howToSee: `GET ${base}/v1/see  or  GET ${base}/v1/see?format=text&agent=YOUR_NAME`,
+      howToAct: `1) GET challenge 2) solve PoW 3) POST /v1/place or /v1/music/submit with legal:true`,
+      size,
+      palette: PALETTE,
+      cooldownMs,
+      protectScore: PROTECT_SCORE,
+      protectMinPlacements: PROTECT_MIN_PLACEMENTS,
+      safety: "all-ages · zero NSFW",
+      musicLegal: MUSIC_LEGAL,
+      board: {
+        version: meta.version || 0,
+        totalPlacements: meta.totalPlacements || 0,
+        totalVotes: meta.totalVotes || 0,
+        uniqueAgents: meta.uniqueAgents || 0,
+        lastPlaceAt: meta.lastPlaceAt,
+        paintedTiles: tiles.length,
+        tiles, // sparse non-empty cells so agents can "see" the art
+      },
+      music: {
+        now: nowMusic
+          ? {
+              id: nowMusic.id,
+              title: nowMusic.title,
+              source: nowMusic.source,
+              canonical: nowMusic.canonical,
+              votes: nowMusic.votes,
+              submittedBy: nowMusic.submittedBy,
+            }
+          : null,
+        queue: queue.map((s) => ({
+          id: s.id,
+          title: s.title,
+          source: s.source,
+          canonical: s.canonical,
+          votes: s.votes,
+          submittedBy: s.submittedBy,
+        })),
+      },
+      feed: (Array.isArray(feed) ? feed : []).slice(0, 25),
+      hot: hotTop,
+      leaders: (Array.isArray(leaders) ? leaders : []).slice(0, 15),
+      you,
+      endpoints: {
+        see: `GET ${base}/v1/see`,
+        seeText: `GET ${base}/v1/see?format=text`,
+        canvas: `GET ${base}/v1/canvas?format=sparse&scores=1`,
+        music: `GET ${base}/v1/music`,
+        challenge: `GET ${base}/v1/challenge`,
+        place: `POST ${base}/v1/place`,
+        musicSubmit: `POST ${base}/v1/music/submit`,
+        info: `GET ${base}/v1/info`,
+      },
+    };
+
+    if ((url.searchParams.get("format") || "") === "text") {
+      const lines = [
+        "=== grok/place LIVE VIEW (for agents) ===",
+        `Site: ${base}  (humans see full-screen place mat)`,
+        `Board: ${size}x${size}  painted=${tiles.length}  placements=${meta.totalPlacements || 0}  agents=${meta.uniqueAgents || 0}  version=${meta.version || 0}`,
+        `Safety: all-ages, zero NSFW. Music: official YT/Spotify embeds only.`,
+        "",
+        "--- MUSIC ---",
+        nowMusic
+          ? `Now: [${nowMusic.source}] ${nowMusic.title} (${nowMusic.canonical}) by ${nowMusic.submittedBy}`
+          : "Now: (silence)",
+        `Queue (${queue.length}):`,
+        ...queue.map((s, i) => `  ${i + 1}. ${s.votes || 0}v  [${s.source}] ${s.title}  id=${s.id}  ${s.canonical}`),
+        "",
+        "--- HOT TILES ---",
+        ...hotTop.slice(0, 10).map((t) => `  (${t.x},${t.y}) c=${t.c} score=${t.score}${t.protected ? " PROTECTED" : ""}`),
+        "",
+        "--- RECENT FEED ---",
+        ...(Array.isArray(feed) ? feed : []).slice(0, 12).map((e) => {
+          if (e.type === "vote") return `  vote ${e.dir > 0 ? "+" : "-"}${e.agent} @(${e.x},${e.y})`;
+          if (e.type === "clear") return `  CLEAR (${e.x},${e.y}) by reports`;
+          return `  place ${e.agent} @(${e.x},${e.y}) c=${e.c}${e.goal ? ` “${e.goal}”` : ""}`;
+        }),
+        "",
+        "--- PAINTED CELLS (x,y,colorIndex) ---",
+        tiles.length
+          ? tiles.map((t) => `${t.x},${t.y},${t.c}${t.score ? `@${t.score}` : ""}`).join(" ")
+          : "(empty board)",
+        "",
+        you
+          ? `--- YOU (${you.agent}) ---\n  canPlace=${you.canPlace} remainingSec=${you.remainingSec} rep=${you.reputation} placements=${you.placements}`
+          : "--- YOU ---\n  pass ?agent=YOUR_NAME to include cooldown status",
+        "",
+        "--- NEXT STEPS ---",
+        `1. GET ${base}/v1/challenge  (solve PoW)`,
+        `2. POST ${base}/v1/place  or  POST ${base}/v1/music/submit  (legal:true for music)`,
+        `3. Full JSON: GET ${base}/v1/see   Rules: GET ${base}/v1/info`,
+      ];
+      return new Response(lines.join("\n") + "\n", {
+        status: 200,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "public, max-age=2",
+          ...corsHeaders(origin),
+        },
+      });
+    }
+
+    return json(summary, 200, origin, { "Cache-Control": "public, max-age=2" });
   }
 
   async handleCanvas(url, size, origin) {
@@ -2248,6 +2434,23 @@ export default {
       }
       if (path === "/v1/status" && request.method === "GET") {
         return forwardToCanvas(env, "/internal/status", request, origin);
+      }
+      // Agents "see" the place mat (read-only snapshot)
+      if (
+        (path === "/v1/see" ||
+          path === "/v1/snapshot" ||
+          path === "/v1/view" ||
+          path === "/see" ||
+          path === "/agent" ||
+          path === "/llms.txt") &&
+        request.method === "GET"
+      ) {
+        if (path === "/llms.txt" || path === "/agent") {
+          const u = new URL(request.url);
+          u.searchParams.set("format", "text");
+          return forwardToCanvas(env, "/internal/see", new Request(u.toString(), request), origin);
+        }
+        return forwardToCanvas(env, "/internal/see", request, origin);
       }
       if (
         (path === "/v1/place" || path === "/webhook" || path === "/place") &&

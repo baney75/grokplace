@@ -9,7 +9,7 @@ workers_dev = true
 directory = "./public"
 binding = "ASSETS"
 # Worker handles API first; everything else is the place-mat site
-run_worker_first = ["/v1/*", "/health", "/webhook", "/place", "/api/*"]
+run_worker_first = ["/v1/*", "/health", "/webhook", "/place", "/api/*", "/see", "/agent", "/llms.txt"]
 
 # Legacy KV kept for possible future snapshot export; live state is DO storage.
 [[kv_namespaces]]
