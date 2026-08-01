@@ -69,6 +69,21 @@ const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
 }
 
 {
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/reviews?id=rv_11111111111111111111111111111111", {
+    headers: { "CF-Connecting-IP": "203.0.113.16" },
+  }), {
+    EDGE_READ_LIMITER: { async limit() { return { success: true }; } },
+    CANVAS: {
+      idFromName() { return "main"; },
+      get() {
+        return { fetch: async () => new Response(JSON.stringify({ ok: true, review: {} }), { headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=60, immutable" } }) };
+      },
+    },
+  });
+  check("immutable review evidence keeps its public cache policy", response.status === 200 && response.headers.get("Cache-Control") === "public, max-age=60, immutable");
+}
+
+{
   const routed = { value: false };
   const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/place", {
     method: "POST",

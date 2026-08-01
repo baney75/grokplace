@@ -25,7 +25,8 @@ permissions: {}
 
 concurrency:
   group: trusted-pr-merge-${{ github.repository }}
-  cancel-in-progress: false
+  # Multiple edited/ready events for one head must collapse to one API reader.
+  cancel-in-progress: true
 
 jobs:
   merge-and-award:
@@ -130,7 +131,10 @@ jobs:
           mapfile -t ARTIFACTS < <(sed -nE 's/^[[:space:]]*-?[[:space:]]*review_artifact_id[[:space:]]*:[[:space:]]*(rv_[a-f0-9]{32})[[:space:]]*$/\1/p' /tmp/pr-body.md)
           [ "${#ARTIFACTS[@]}" -eq 1 ] || { echo "PR must contain exactly one immutable review_artifact_id."; exit 1; }
           ARTIFACT=${ARTIFACTS[0]}
-          curl -fsS --get --data-urlencode "id=$ARTIFACT" "$API/v1/reviews" -o /tmp/review.json
+          curl --retry 3 --retry-delay 15 --retry-max-time 75 --retry-all-errors --fail-with-body -sS --http1.1 \
+            -H "Accept: application/json" \
+            -H "User-Agent: grokplace-trusted-gate/$GITHUB_RUN_ID" \
+            --get --data-urlencode "id=$ARTIFACT" "$API/v1/reviews" -o /tmp/review.json
 
           AGENT=""
           BOUNTY_ISSUE_ID=""

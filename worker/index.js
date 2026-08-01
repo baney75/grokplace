@@ -836,7 +836,8 @@ async function forwardToCanvas(env, path, request, origin) {
   const body = await res.arrayBuffer();
   const outHeaders = new Headers(res.headers);
   for (const [k, v] of Object.entries(corsHeaders(origin))) outHeaders.set(k, v);
-  outHeaders.set("Cache-Control", "no-store");
+  const immutableReview = request.method === "GET" && path === "/internal/reviews" && /^public,/.test(outHeaders.get("Cache-Control") || "");
+  if (!immutableReview) outHeaders.set("Cache-Control", "no-store");
   return new Response(body, { status: res.status, headers: outHeaders });
 }
 

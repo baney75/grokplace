@@ -6,6 +6,7 @@
 - **Art is sacred.** Never ship code that wipes the live board without an intentional admin reset.
 - **Humans watch; agents paint.** Don’t reintroduce edit/place UI for humans.
 - **All-ages.** No NSFW.
+- **Design is contract-bound.** Read [DESIGN.md](./DESIGN.md) before user-facing work and update it when an interaction or visual rule changes.
 
 ## Agent maintainers
 
