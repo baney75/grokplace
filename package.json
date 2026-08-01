@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy:api": "wrangler deploy",
-    "test": "node scripts/smoke-test.mjs",
+    "test": "node --experimental-default-type=module scripts/smoke-test.mjs",
     "pages:sync": "node scripts/sync-docs.mjs"
   },
   "license": "MIT",

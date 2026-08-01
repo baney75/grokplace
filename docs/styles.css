@@ -265,6 +265,56 @@ h1 { margin: 0; font-size: 1.35rem; letter-spacing: -0.02em; }
 .cooldown.ready { color: var(--good); }
 .cooldown.wait { color: var(--warn); }
 .cooldown.err { color: #ff8a96; }
+.captcha-note {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.vote-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+button.vote {
+  flex: 1;
+  font-weight: 600;
+}
+button.vote.up {
+  border-color: #2d5a30;
+  background: #152518;
+  color: var(--good);
+}
+button.vote.down {
+  border-color: #5a2d32;
+  background: #251518;
+  color: #ff8a96;
+}
+.rep {
+  float: right;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: #0e1118;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+}
+.rules-mini {
+  margin: 0.55rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.rules-mini li { margin: 0.2rem 0; }
+.feed .rank {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--accent);
+  width: 28px;
+}
+.feed li.leader {
+  grid-template-columns: 28px 1fr;
+}
 
 .feed {
   list-style: none; margin: 0; padding: 0;

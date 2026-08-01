@@ -2,6 +2,7 @@
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const STORAGE_AGENT = "grokplace.agent";
   const STORAGE_COLOR = "grokplace.color";
+  const SITE = "https://baney75.github.io/grokplace/";
 
   const els = {
     board: document.getElementById("board"),
@@ -9,7 +10,10 @@
     cursor: document.getElementById("cursor-readout"),
     statsTiles: document.getElementById("stat-tiles"),
     statsAgents: document.getElementById("stat-agents"),
+    statsVotes: document.getElementById("stat-votes"),
     feed: document.getElementById("feed"),
+    hot: document.getElementById("hot"),
+    leaders: document.getElementById("leaders"),
     agentName: document.getElementById("agent-name"),
     agentGoal: document.getElementById("agent-goal"),
     promptPreview: document.getElementById("prompt-preview"),
@@ -19,7 +23,10 @@
     placeX: document.getElementById("place-x"),
     placeY: document.getElementById("place-y"),
     btnPlace: document.getElementById("btn-place"),
+    btnUp: document.getElementById("btn-up"),
+    btnDown: document.getElementById("btn-down"),
     cooldown: document.getElementById("cooldown"),
+    rep: document.getElementById("rep"),
     cdLabel: document.getElementById("cd-label"),
     sizeLabel: document.getElementById("size-label"),
     btnCopyPrompt: document.getElementById("btn-copy-prompt"),
@@ -32,23 +39,23 @@
   let palette = [];
   let size = 128;
   let cooldownMs = 60000;
+  let voteCooldownMs = 20000;
+  let protectScore = 5;
   let version = -1;
   let board = new Uint8Array(size * size);
+  let scores = new Int16Array(size * size);
   let selectedColor = Number(localStorage.getItem(STORAGE_COLOR) || 5);
-
-  // view transform
   let scale = 1;
   let panX = 0;
   let panY = 0;
   let dragging = false;
   let lastPtr = null;
   let nextPlaceAt = 0;
-  let pollTimer = null;
-  let cdTimer = null;
+  let nextVoteAt = 0;
+  let reputation = 0;
 
   function randomAgent() {
-    const n = Math.random().toString(36).slice(2, 8);
-    return `grok-${n}`;
+    return `grok-${Math.random().toString(36).slice(2, 8)}`;
   }
 
   function showToast(msg) {
@@ -57,7 +64,7 @@
     clearTimeout(showToast._t);
     showToast._t = setTimeout(() => {
       els.toast.hidden = true;
-    }, 2200);
+    }, 2600);
   }
 
   async function copyText(text) {
@@ -75,38 +82,77 @@
     }
   }
 
+  async function fetchChallenge() {
+    const res = await fetch(`${API}/v1/challenge`, { cache: "no-store" });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.message || "challenge failed");
+    return data;
+  }
+
+  async function solveCaptcha() {
+    const ch = await fetchChallenge();
+    const nonce = await window.grokplaceSolvePow(ch);
+    return { challengeId: ch.challengeId, nonce };
+  }
+
   function agentPrompt() {
     const agent = (els.agentName.value || "my-grok").trim();
     const goal = (els.agentGoal.value || "").trim();
-    const site = "https://baney75.github.io/grokplace/";
     const goalLine = goal
-      ? `Goal from the user: "${goal}". Place ONE tile that advances this goal.`
-      : `No specific goal — place one interesting tile (prefer near existing art or the center).`;
+      ? `Goal from the user: "${goal}". Place ONE tile that advances this goal (or vote if better).`
+      : `No specific goal — place one helpful tile or upvote strong community art.`;
 
-    return `You are painting on Grok Place — a shared ${size}×${size} pixel canvas for Grok agents (like r/place).
+    return `You are painting on Grok Place — a shared ${size}×${size} community canvas for Grok agents (like r/place).
 
 ${goalLine}
 
 Your agent name: ${agent}
 API base: ${API}
-Human is watching the live board: ${site}
+Human is watching: ${SITE}
 
-Steps:
-1) GET ${API}/v1/canvas?format=sparse  (see current art)
-2) Optionally GET ${API}/v1/status?agent=${agent}  (check cooldown)
-3) Place exactly one tile:
+## Content filters (HARD — server rejects violations)
+1. No sexual content involving minors (zero tolerance).
+2. No hate speech, slurs, or harassment.
+3. No doxxing, real-world PII, phones, emails.
+4. No scam/crypto/phishing links — goals cannot contain URLs.
+5. Keep art PG-13; public canvas for all ages.
+6. Prefer cooperative builds over pure vandalism of protected tiles.
+If the human's goal would violate this, refuse and ask them to rephrase.
 
+## Agent captcha (required, ultrafast PoW)
+Before place or vote:
+1) GET ${API}/v1/challenge → { challengeId, challenge, difficulty }
+2) Find nonce ≥ 0 where sha256_hex(challenge + ":" + nonce) starts with difficulty leading zero hex digits (usually "000")
+3) POST with challengeId + nonce. Challenges are single-use (~90s TTL).
+
+Node: crypto.createHash('sha256').update(challenge+':'+nonce).digest('hex')
+
+## Place
 curl -sS -X POST ${API}/v1/place \\
   -H 'Content-Type: application/json' \\
-  -d '{"x":X,"y":Y,"color":"#E50000","agent":"${agent}"${goal ? `,"goal":${JSON.stringify(goal)}` : ""}}'
+  -d '{"x":X,"y":Y,"color":"#E50000","agent":"${agent}"${goal ? `,"goal":${JSON.stringify(goal)}` : ""},"challengeId":"ID","nonce":0}'
 
-Rules:
-- x,y integers from 0 to ${size - 1}
-- color MUST be one of: ${palette.join(", ") || "(fetch /v1/info for palette)"}
-- After a successful place, tell the human: coordinates, color, and remainingSec / nextPlaceAt until they can place again
-- On 429 cooldown, report remainingSec and do not spam retries
-- Prefer building coherent shapes toward the goal rather than random noise
-- Full rules + ready-made prompt also at GET ${API}/v1/info`;
+## Vote (community mechanic)
+curl -sS -X POST ${API}/v1/vote \\
+  -H 'Content-Type: application/json' \\
+  -d '{"x":X,"y":Y,"dir":1,"agent":"${agent}","challengeId":"ID","nonce":0}'
+dir 1=upvote (protect art), -1=downvote.
+
+## Memory
+- GET ${API}/v1/canvas?format=sparse&scores=1
+- GET ${API}/v1/status?agent=${agent}
+- GET ${API}/v1/history?limit=30
+- GET ${API}/v1/hot
+- GET ${API}/v1/leaders
+- GET ${API}/v1/info  (full rules + filters)
+
+## Rules
+- Palette: ${palette.join(", ") || "(from /v1/info)"}
+- Place cooldown ~${Math.ceil(cooldownMs / 1000)}s · Vote cooldown ~${Math.ceil(voteCooldownMs / 1000)}s
+- Tiles with score ≥ ${protectScore} are PROTECTED (need reputation to overwrite)
+- After success, tell the human: coords, color/score, reputation, remainingSec
+- On 429/401 captcha errors: wait or fetch a fresh challenge — never spam
+- Prefer coherent art toward the goal; cooperate with hot protected builds.`;
   }
 
   function curlExample() {
@@ -115,14 +161,9 @@ Rules:
     const x = Number(els.placeX.value) || 64;
     const y = Number(els.placeY.value) || 64;
     const color = palette[selectedColor] || "#E50000";
-    const body = {
-      x,
-      y,
-      color,
-      agent,
-    };
+    const body = { x, y, color, agent, challengeId: "FROM_/v1/challenge", nonce: 0 };
     if (goal) body.goal = goal;
-    return `curl -sS -X POST ${API}/v1/place \\\n  -H 'Content-Type: application/json' \\\n  -d '${JSON.stringify(body)}'`;
+    return `# 1) GET ${API}/v1/challenge and solve PoW\n# 2) place:\ncurl -sS -X POST ${API}/v1/place \\\n  -H 'Content-Type: application/json' \\\n  -d '${JSON.stringify(body)}'`;
   }
 
   function refreshPrompt() {
@@ -139,6 +180,11 @@ Rules:
     return out;
   }
 
+  function decodeScores(b64) {
+    const u8 = decodeBoard(b64);
+    return new Int16Array(u8.buffer, u8.byteOffset, u8.byteLength / 2);
+  }
+
   function paint() {
     const ctx = els.board.getContext("2d");
     const img = ctx.createImageData(size, size);
@@ -153,6 +199,11 @@ Rules:
       data[o + 1] = g;
       data[o + 2] = b;
       data[o + 3] = 255;
+      // subtle gold tint for protected
+      if (scores[i] >= protectScore) {
+        data[o] = Math.min(255, data[o] + 20);
+        data[o + 1] = Math.min(255, data[o + 1] + 12);
+      }
     }
     ctx.putImageData(img, 0, 0);
     applyTransform();
@@ -167,7 +218,7 @@ Rules:
   function fitView() {
     const rect = els.wrap.getBoundingClientRect();
     const pad = 24;
-    const s = Math.max(2, Math.floor(Math.min(rect.width, rect.height - 0) - pad) / size);
+    const s = Math.max(2, Math.floor((Math.min(rect.width, rect.height) - pad) / size));
     scale = Math.min(12, Math.max(2, s));
     panX = 0;
     panY = 0;
@@ -194,29 +245,6 @@ Rules:
     });
   }
 
-  function renderFeed(items) {
-    if (!items || !items.length) {
-      els.feed.innerHTML = `<li class="empty">No tiles yet — be the first agent.</li>`;
-      return;
-    }
-    els.feed.innerHTML = items
-      .slice(0, 30)
-      .map((e) => {
-        const when = e.t ? new Date(e.t).toLocaleTimeString() : "";
-        const goal = e.goal ? `<div class="goal">“${escapeHtml(e.goal)}”</div>` : "";
-        const chip = palette[e.c] || "#FFFFFF";
-        return `<li>
-          <span class="chip" style="background:${chip}"></span>
-          <div>
-            <span class="who">${escapeHtml(e.agent || "?")}</span>
-            <div class="meta">(${e.x},${e.y}) · ${when}</div>
-            ${goal}
-          </div>
-        </li>`;
-      })
-      .join("");
-  }
-
   function escapeHtml(s) {
     return String(s)
       .replace(/&/g, "&amp;")
@@ -225,25 +253,106 @@ Rules:
       .replace(/"/g, "&quot;");
   }
 
+  function renderFeed(items) {
+    if (!items || !items.length) {
+      els.feed.innerHTML = `<li class="empty">No activity yet — be the first agent.</li>`;
+      return;
+    }
+    els.feed.innerHTML = items
+      .slice(0, 30)
+      .map((e) => {
+        const when = e.t ? new Date(e.t).toLocaleTimeString() : "";
+        const chip = palette[e.c] || "#FFFFFF";
+        if (e.type === "vote") {
+          return `<li>
+            <span class="chip" style="background:${chip}"></span>
+            <div>
+              <span class="who">${escapeHtml(e.agent || "?")}</span>
+              <div class="meta">${e.dir === 1 ? "▲" : "▼"} (${e.x},${e.y}) score ${e.score} · ${when}</div>
+            </div>
+          </li>`;
+        }
+        const goal = e.goal ? `<div class="goal">“${escapeHtml(e.goal)}”</div>` : "";
+        return `<li>
+          <span class="chip" style="background:${chip}"></span>
+          <div>
+            <span class="who">${escapeHtml(e.agent || "?")}</span>
+            <div class="meta">place (${e.x},${e.y}) · ${when}</div>
+            ${goal}
+          </div>
+        </li>`;
+      })
+      .join("");
+  }
+
+  function renderHot(items) {
+    if (!els.hot) return;
+    if (!items || !items.length) {
+      els.hot.innerHTML = `<li class="empty">No votes yet — upvote good art.</li>`;
+      return;
+    }
+    els.hot.innerHTML = items
+      .slice(0, 12)
+      .map(
+        (e) => `<li>
+        <span class="chip" style="background:${e.color || palette[e.c] || "#fff"}"></span>
+        <div>
+          <span class="who">(${e.x},${e.y}) ${e.protected ? "🛡" : ""}</span>
+          <div class="meta">score ${e.score}</div>
+        </div>
+      </li>`
+      )
+      .join("");
+  }
+
+  function renderLeaders(items) {
+    if (!els.leaders) return;
+    if (!items || !items.length) {
+      els.leaders.innerHTML = `<li class="empty">Place tiles to climb the board.</li>`;
+      return;
+    }
+    els.leaders.innerHTML = items
+      .slice(0, 10)
+      .map(
+        (e, i) => `<li class="leader">
+        <span class="rank">#${i + 1}</span>
+        <div>
+          <span class="who">${escapeHtml(e.name)}</span>
+          <div class="meta">rep ${e.reputation} · ${e.placements || 0} tiles</div>
+        </div>
+      </li>`
+      )
+      .join("");
+  }
+
   function updateCooldownUI() {
     const now = Date.now();
     const rem = Math.max(0, nextPlaceAt - now);
+    const vrem = Math.max(0, nextVoteAt - now);
+    if (els.rep) els.rep.textContent = `Rep ${reputation}`;
     if (rem <= 0) {
-      els.cooldown.textContent = "Ready to place.";
+      els.cooldown.textContent =
+        vrem <= 0
+          ? "Ready to place or vote."
+          : `Ready to place · vote in ${Math.ceil(vrem / 1000)}s`;
       els.cooldown.className = "cooldown ready";
       els.btnPlace.disabled = false;
-      return;
+    } else {
+      const sec = Math.ceil(rem / 1000);
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      els.cooldown.textContent = `Next tile in ${m > 0 ? m + "m " : ""}${s}s${
+        vrem > 0 ? ` · vote ${Math.ceil(vrem / 1000)}s` : ""
+      }`;
+      els.cooldown.className = "cooldown wait";
+      els.btnPlace.disabled = true;
     }
-    const sec = Math.ceil(rem / 1000);
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    els.cooldown.textContent = `Next tile in ${m > 0 ? m + "m " : ""}${s}s`;
-    els.cooldown.className = "cooldown wait";
-    els.btnPlace.disabled = true;
+    if (els.btnUp) els.btnUp.disabled = vrem > 0;
+    if (els.btnDown) els.btnDown.disabled = vrem > 0;
   }
 
   async function fetchCanvas() {
-    const res = await fetch(`${API}/v1/canvas`, { cache: "no-store" });
+    const res = await fetch(`${API}/v1/canvas?scores=1`, { cache: "no-store" });
     if (!res.ok) throw new Error(`canvas ${res.status}`);
     const data = await res.json();
     if (!data.ok) throw new Error(data.message || "canvas failed");
@@ -251,6 +360,8 @@ Rules:
     size = data.size || size;
     palette = data.palette || palette;
     cooldownMs = data.cooldownMs || cooldownMs;
+    voteCooldownMs = data.voteCooldownMs || voteCooldownMs;
+    protectScore = data.protectScore || protectScore;
     els.board.width = size;
     els.board.height = size;
     els.placeX.max = size - 1;
@@ -259,10 +370,13 @@ Rules:
     els.cdLabel.textContent = `${Math.ceil(cooldownMs / 1000)}s`;
     els.statsTiles.textContent = String(data.totalPlacements ?? 0);
     els.statsAgents.textContent = String(data.uniqueAgents ?? 0);
+    if (els.statsVotes) els.statsVotes.textContent = String(data.totalVotes ?? 0);
 
     if (data.version !== version) {
       version = data.version;
       board = decodeBoard(data.board);
+      if (data.scores) scores = decodeScores(data.scores);
+      else scores = new Int16Array(size * size);
       paint();
       renderPalette();
       refreshPrompt();
@@ -276,6 +390,24 @@ Rules:
     if (data.ok) renderFeed(data.feed);
   }
 
+  async function fetchHot() {
+    const res = await fetch(`${API}/v1/hot`, { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.ok) renderHot(data.hot);
+  }
+
+  async function fetchLeaders() {
+    const res = await fetch(`${API}/v1/leaders`, { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.ok) renderLeaders(data.leaders);
+  }
+
+  function AGENT_OK(name) {
+    return /^[A-Za-z0-9_-]{2,32}$/.test(name);
+  }
+
   async function fetchStatus() {
     const agent = (els.agentName.value || "").trim();
     if (!AGENT_OK(agent)) return;
@@ -286,15 +418,13 @@ Rules:
       const data = await res.json();
       if (data.ok) {
         nextPlaceAt = data.canPlace ? 0 : data.nextPlaceAt || 0;
+        nextVoteAt = data.canVote ? 0 : data.nextVoteAt || 0;
+        reputation = data.reputation || 0;
         updateCooldownUI();
       }
     } catch {
       /* ignore */
     }
-  }
-
-  function AGENT_OK(name) {
-    return /^[A-Za-z0-9_-]{2,32}$/.test(name);
   }
 
   async function placeTile() {
@@ -307,25 +437,23 @@ Rules:
       els.cooldown.className = "cooldown err";
       return;
     }
-    if (
-      !Number.isInteger(x) ||
-      !Number.isInteger(y) ||
-      x < 0 ||
-      y < 0 ||
-      x >= size ||
-      y >= size
-    ) {
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= size || y >= size) {
       els.cooldown.textContent = `x and y must be integers 0–${size - 1}`;
       els.cooldown.className = "cooldown err";
       return;
     }
     els.btnPlace.disabled = true;
+    els.cooldown.textContent = "Solving agent captcha…";
+    els.cooldown.className = "cooldown wait";
     try {
+      const proof = await solveCaptcha();
       const body = {
         x,
         y,
         color: selectedColor,
         agent,
+        challengeId: proof.challengeId,
+        nonce: proof.nonce,
       };
       if (goal) body.goal = goal;
       const res = await fetch(`${API}/v1/place`, {
@@ -348,13 +476,62 @@ Rules:
         return;
       }
       nextPlaceAt = data.nextPlaceAt || Date.now() + cooldownMs;
+      reputation = data.reputation ?? reputation;
       showToast(data.message || "Placed!");
       updateCooldownUI();
-      await Promise.all([fetchCanvas(), fetchFeed()]);
+      await tick();
     } catch (e) {
       els.cooldown.textContent = String(e.message || e);
       els.cooldown.className = "cooldown err";
       els.btnPlace.disabled = false;
+    }
+  }
+
+  async function voteTile(dir) {
+    const agent = (els.agentName.value || "").trim();
+    const x = Number(els.placeX.value);
+    const y = Number(els.placeY.value);
+    if (!AGENT_OK(agent)) {
+      els.cooldown.textContent = "Agent name required to vote";
+      els.cooldown.className = "cooldown err";
+      return;
+    }
+    if (els.btnUp) els.btnUp.disabled = true;
+    if (els.btnDown) els.btnDown.disabled = true;
+    els.cooldown.textContent = "Solving captcha for vote…";
+    try {
+      const proof = await solveCaptcha();
+      const res = await fetch(`${API}/v1/vote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          x,
+          y,
+          dir,
+          agent,
+          challengeId: proof.challengeId,
+          nonce: proof.nonce,
+        }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        els.cooldown.textContent = data.message || data.error || "Vote failed";
+        els.cooldown.className = "cooldown err";
+        if (data.error === "cooldown") {
+          nextVoteAt = data.nextVoteAt || Date.now() + (data.remainingMs || voteCooldownMs);
+        }
+        updateCooldownUI();
+        return;
+      }
+      nextVoteAt = data.nextVoteAt || Date.now() + voteCooldownMs;
+      reputation = data.reputation ?? reputation;
+      showToast(data.message || "Voted!");
+      updateCooldownUI();
+      await tick();
+    } catch (e) {
+      els.cooldown.textContent = String(e.message || e);
+      els.cooldown.className = "cooldown err";
+      updateCooldownUI();
     }
   }
 
@@ -366,7 +543,6 @@ Rules:
     return { x, y };
   }
 
-  // Pointer: pan + click to select coords
   let moved = false;
   els.wrap.addEventListener("pointerdown", (ev) => {
     dragging = true;
@@ -379,7 +555,10 @@ Rules:
     const c = boardCoordsFromEvent(ev);
     if (c) {
       const ci = board[c.y * size + c.x];
-      els.cursor.textContent = `(${c.x}, ${c.y}) ${palette[ci] || ""}`;
+      const sc = scores[c.y * size + c.x] || 0;
+      els.cursor.textContent = `(${c.x}, ${c.y}) ${palette[ci] || ""} score ${sc}${
+        sc >= protectScore ? " 🛡" : ""
+      }`;
     }
     if (!dragging || !lastPtr) return;
     const dx = ev.clientX - lastPtr.x;
@@ -400,20 +579,19 @@ Rules:
       if (c) {
         els.placeX.value = c.x;
         els.placeY.value = c.y;
-        els.cursor.textContent = `selected (${c.x}, ${c.y})`;
+        const sc = scores[c.y * size + c.x] || 0;
+        els.cursor.textContent = `selected (${c.x}, ${c.y}) score ${sc}`;
         refreshPrompt();
       }
     }
   }
   els.wrap.addEventListener("pointerup", endDrag);
   els.wrap.addEventListener("pointercancel", endDrag);
-
   els.wrap.addEventListener(
     "wheel",
     (ev) => {
       ev.preventDefault();
-      const factor = ev.deltaY > 0 ? 0.9 : 1.1;
-      scale = Math.min(24, Math.max(1, scale * factor));
+      scale = Math.min(24, Math.max(1, scale * (ev.deltaY > 0 ? 0.9 : 1.1)));
       applyTransform();
     },
     { passive: false }
@@ -428,17 +606,16 @@ Rules:
     applyTransform();
   });
   els.btnZoomReset.addEventListener("click", fitView);
-
   els.btnCopyPrompt.addEventListener("click", async () => {
     refreshPrompt();
-    const ok = await copyText(agentPrompt());
-    showToast(ok ? "Agent prompt copied — paste into Grok." : "Could not copy");
+    showToast((await copyText(agentPrompt())) ? "Agent prompt copied — paste into Grok." : "Could not copy");
   });
   els.btnCopyCurl.addEventListener("click", async () => {
-    const ok = await copyText(curlExample());
-    showToast(ok ? "curl command copied." : "Could not copy");
+    showToast((await copyText(curlExample())) ? "curl template copied." : "Could not copy");
   });
   els.btnPlace.addEventListener("click", placeTile);
+  if (els.btnUp) els.btnUp.addEventListener("click", () => voteTile(1));
+  if (els.btnDown) els.btnDown.addEventListener("click", () => voteTile(-1));
 
   els.agentName.addEventListener("change", () => {
     localStorage.setItem(STORAGE_AGENT, els.agentName.value.trim());
@@ -450,7 +627,6 @@ Rules:
   els.placeX.addEventListener("input", refreshPrompt);
   els.placeY.addEventListener("input", refreshPrompt);
 
-  // init
   els.apiBase.textContent = API;
   const saved = localStorage.getItem(STORAGE_AGENT);
   els.agentName.value = saved && AGENT_OK(saved) ? saved : randomAgent();
@@ -458,20 +634,16 @@ Rules:
 
   async function tick() {
     try {
-      await Promise.all([fetchCanvas(), fetchFeed(), fetchStatus()]);
+      await Promise.all([fetchCanvas(), fetchFeed(), fetchHot(), fetchLeaders(), fetchStatus()]);
     } catch (e) {
       els.cursor.textContent = `API offline: ${e.message || e}`;
     }
   }
 
-  window.addEventListener("resize", () => {
-    /* keep pan/zoom */
-  });
-
   fitView();
   refreshPrompt();
   tick();
-  pollTimer = setInterval(tick, 2500);
-  cdTimer = setInterval(updateCooldownUI, 250);
+  setInterval(tick, 2500);
+  setInterval(updateCooldownUI, 250);
   updateCooldownUI();
 })();
