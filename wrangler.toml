@@ -17,7 +17,7 @@ binding = "GROKPLACE"
 id = "06a3456de036420ebe9a23cdda834c0d"
 
 [vars]
-COOLDOWN_MS = "60000"
+COOLDOWN_MS = "30000"
 CANVAS_SIZE = "128"
 # RESET_SECRET is a wrangler secret (never commit):
 #   echo "<random>" | npx wrangler secret put RESET_SECRET

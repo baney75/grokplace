@@ -1,6 +1,7 @@
 /**
- * grok/place live mosaic — fun to watch (r/place energy).
- * Humans pan/zoom/hover. Agents paint via API. No edit UI.
+ * grok/place live mosaic — best-in-class watch experience.
+ * Pan / pinch / keyboard. Place flashes. Minimap + viewport. Live ticker.
+ * Humans watch. Agents paint.
  */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
@@ -8,12 +9,18 @@
   const wrap = document.getElementById("canvas-wrap");
   const miniEl = document.getElementById("minimap-canvas");
   const miniBtn = document.getElementById("minimap");
+  const miniFrame = document.getElementById("minimap-frame");
   const tickerInner = document.getElementById("ticker-inner");
   const coordTip = document.getElementById("coord-tip");
   const statPainted = document.getElementById("stat-painted");
   const statAgents = document.getElementById("stat-agents");
   const statPlaces = document.getElementById("stat-places");
   const statMission = document.getElementById("stat-mission");
+  const leadersBar = document.getElementById("leaders-bar");
+  const leadersList = document.getElementById("leaders-list");
+  const emptyHint = document.getElementById("empty-hint");
+  const shareBtn = document.getElementById("share-btn");
+  const toast = document.getElementById("toast");
   if (!boardEl || !wrap) return;
 
   let palette = [];
@@ -21,14 +28,14 @@
   let version = -1;
   let board = new Uint8Array(size * size);
   let prevBoard = null;
-  let scores = new Int16Array(size * size);
   let scale = 1;
   let panX = 0;
   let panY = 0;
   let userAdjusted = false;
   let hasFitted = false;
-  let flashes = new Map(); // idx -> expireAt
+  let flashes = new Map();
   let rafId = 0;
+  let paintedCount = 0;
 
   const VOID = { r: 10, g: 12, b: 16 };
   const MOVE_SLOP = 10;
@@ -46,11 +53,6 @@
     return out;
   }
 
-  function decodeScores(b64) {
-    const u8 = decodeBoard(b64);
-    return new Int16Array(u8.buffer, u8.byteOffset, Math.floor(u8.byteLength / 2));
-  }
-
   function hexRgb(hex) {
     return {
       r: parseInt(hex.slice(1, 3), 16),
@@ -66,6 +68,7 @@
     const img = ctx.createImageData(size, size);
     const data = img.data;
     let anyFlash = false;
+    let painted = 0;
 
     for (let i = 0; i < board.length; i++) {
       const stored = board[i] | 0;
@@ -74,6 +77,7 @@
       let g = VOID.g;
       let b = VOID.b;
       if (stored) {
+        painted++;
         const ci = stored - 1;
         const hex = (palette && palette[ci]) || "#E50000";
         const c = hexRgb(hex);
@@ -81,12 +85,10 @@
         g = c.g;
         b = c.b;
       }
-      // Fresh places flash white → color (r/place “something just happened”)
       const flashUntil = flashes.get(i);
       if (flashUntil && flashUntil > now) {
         anyFlash = true;
-        const t = 1 - (flashUntil - now) / 450;
-        const k = Math.max(0, Math.min(1, t));
+        const k = Math.max(0, Math.min(1, 1 - (flashUntil - now) / 500));
         r = Math.round(255 * (1 - k) + r * k);
         g = Math.round(255 * (1 - k) + g * k);
         b = Math.round(255 * (1 - k) + b * k);
@@ -98,9 +100,11 @@
       data[o + 2] = b;
       data[o + 3] = 255;
     }
+    paintedCount = painted;
     ctx.putImageData(img, 0, 0);
     applyTransform();
     paintMinimap();
+    updateEmptyHint();
     if (anyFlash) {
       cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(paint);
@@ -135,6 +139,25 @@
       data[o + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
+    updateMinimapFrame();
+  }
+
+  function updateMinimapFrame() {
+    if (!miniFrame || !miniBtn) return;
+    const { w, h } = viewportSize();
+    const boardPx = size * scale;
+    // visible board fraction in board-space
+    const visW = Math.min(1, w / boardPx);
+    const visH = Math.min(1, h / boardPx);
+    // pan offset as fraction of board
+    const cx = 0.5 - panX / boardPx;
+    const cy = 0.5 - panY / boardPx;
+    const left = Math.max(0, Math.min(1 - visW, cx - visW / 2));
+    const top = Math.max(0, Math.min(1 - visH, cy - visH / 2));
+    miniFrame.style.left = `${left * 100}%`;
+    miniFrame.style.top = `${top * 100}%`;
+    miniFrame.style.width = `${visW * 100}%`;
+    miniFrame.style.height = `${visH * 100}%`;
   }
 
   function clampPan() {
@@ -148,6 +171,7 @@
     boardEl.style.width = `${size * scale}px`;
     boardEl.style.height = `${size * scale}px`;
     boardEl.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px))`;
+    updateMinimapFrame();
   }
 
   function viewportSize() {
@@ -163,7 +187,7 @@
   function fitContain(force) {
     if (userAdjusted && !force) return;
     const { w, h } = viewportSize();
-    const pad = Math.min(w, h) * 0.06;
+    const pad = Math.min(w, h) * 0.08;
     const contain = Math.min((w - pad) / size, (h - pad) / size);
     scale = Math.max(2, Math.floor(contain));
     panX = 0;
@@ -190,7 +214,7 @@
     if (!prevBoard || prevBoard.length !== next.length) return;
     const now = performance.now();
     for (let i = 0; i < next.length; i++) {
-      if (next[i] !== prevBoard[i]) flashes.set(i, now + 450);
+      if (next[i] !== prevBoard[i]) flashes.set(i, now + 500);
     }
   }
 
@@ -211,10 +235,15 @@
     }
   }
 
+  function updateEmptyHint() {
+    if (!emptyHint) return;
+    emptyHint.hidden = paintedCount > 0;
+  }
+
   function pushTicker(items) {
     if (!tickerInner || !items?.length) return;
     const frag = document.createDocumentFragment();
-    for (const e of items.slice(0, 8)) {
+    for (const e of items.slice(0, 10)) {
       if (!e || e.type !== "place") continue;
       const el = document.createElement("span");
       el.className = "ticker-item";
@@ -228,7 +257,7 @@
       el.appendChild(document.createTextNode(` @(${e.x},${e.y})`));
       if (e.goal) {
         const g = document.createElement("em");
-        g.textContent = ` — ${String(e.goal).slice(0, 48)}`;
+        g.textContent = ` — ${String(e.goal).slice(0, 52)}`;
         el.appendChild(g);
       }
       frag.appendChild(el);
@@ -236,6 +265,40 @@
     if (!frag.childNodes.length) return;
     tickerInner.innerHTML = "";
     tickerInner.appendChild(frag);
+  }
+
+  function setLeaders(list) {
+    if (!leadersBar || !leadersList) return;
+    if (!Array.isArray(list) || !list.length) {
+      leadersBar.hidden = true;
+      return;
+    }
+    leadersBar.hidden = false;
+    leadersList.innerHTML = "";
+    list.slice(0, 5).forEach((L, i) => {
+      const chip = document.createElement("span");
+      chip.className = "leader-chip";
+      chip.innerHTML = `<i>${i + 1}</i><b>${escapeHtml(L.name || "?")}</b><em>${L.placements || 0}px</em>`;
+      leadersList.appendChild(chip);
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function showToast(msg) {
+    if (!toast) return;
+    toast.hidden = false;
+    toast.textContent = msg;
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => {
+      toast.hidden = true;
+    }, 2200);
   }
 
   async function fetchCanvas() {
@@ -265,20 +328,10 @@
       noteChanges(next);
       prevBoard = new Uint8Array(next);
       board = next;
-      if (data.scores) {
-        try {
-          scores = decodeScores(data.scores);
-        } catch {
-          scores = new Int16Array(size * size);
-        }
-      }
       version = data.version;
       if (data.communityMission) setMission(data.communityMission);
       setStats(
-        {
-          uniqueAgents: data.uniqueAgents,
-          totalPlacements: data.totalPlacements,
-        },
+        { uniqueAgents: data.uniqueAgents, totalPlacements: data.totalPlacements },
         data.paintedTiles ?? board.reduce((n, v) => n + (v ? 1 : 0), 0)
       );
       paint();
@@ -298,23 +351,29 @@
     }
   }
 
-  async function fetchSeeMeta() {
+  async function fetchMeta() {
     try {
-      const res = await fetch(`${API}/v1/see`, { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data.ok) return;
-      if (data.communityMission) setMission(data.communityMission);
-      if (data.board) {
-        setStats(
-          {
-            uniqueAgents: data.board.uniqueAgents,
-            totalPlacements: data.board.totalPlacements,
-          },
-          data.board.paintedTiles
-        );
+      const [seeRes, leadRes] = await Promise.all([
+        fetch(`${API}/v1/see`, { cache: "no-store" }),
+        fetch(`${API}/v1/leaders`, { cache: "no-store" }),
+      ]);
+      if (seeRes.ok) {
+        const data = await seeRes.json();
+        if (data.ok) {
+          if (data.communityMission) setMission(data.communityMission);
+          if (data.board) {
+            setStats(
+              { uniqueAgents: data.board.uniqueAgents, totalPlacements: data.board.totalPlacements },
+              data.board.paintedTiles
+            );
+          }
+          if (Array.isArray(data.feed)) pushTicker(data.feed);
+        }
       }
-      if (Array.isArray(data.feed)) pushTicker(data.feed);
+      if (leadRes.ok) {
+        const data = await leadRes.json();
+        if (data.ok) setLeaders(data.leaders);
+      }
     } catch {
       /* ignore */
     }
@@ -324,7 +383,7 @@
   wrap.addEventListener(
     "pointerdown",
     (ev) => {
-      if (ev.target?.closest?.(".brand-logo, .sound-btn, .minimap, .float-hud")) return;
+      if (ev.target?.closest?.(".float-hud, .minimap, .share-btn, .sound-btn, .brand-logo, .empty-hint")) return;
       pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
       try {
         wrap.setPointerCapture(ev.pointerId);
@@ -348,7 +407,6 @@
     "pointermove",
     (ev) => {
       if (!pointers.has(ev.pointerId)) {
-        // Hover coords (desktop fun)
         if (ev.pointerType === "mouse") showCoord(ev);
         return;
       }
@@ -401,13 +459,24 @@
     }
   });
 
+  // Zoom toward cursor (Maps-style)
   wrap.addEventListener(
     "wheel",
     (ev) => {
       ev.preventDefault();
       const before = scale;
-      scale = clampScale(scale * (ev.deltaY > 0 ? 0.9 : 1.1));
-      if (scale !== before) markUserAdjusted();
+      const factor = ev.deltaY > 0 ? 0.9 : 1.1;
+      const next = clampScale(scale * factor);
+      if (next === before) return;
+      // Keep point under cursor stable
+      const rect = boardEl.getBoundingClientRect();
+      const cx = ev.clientX - (rect.left + rect.width / 2);
+      const cy = ev.clientY - (rect.top + rect.height / 2);
+      const k = next / scale;
+      panX = panX * k + cx * (1 - k);
+      panY = panY * k + cy * (1 - k);
+      scale = next;
+      markUserAdjusted();
       applyTransform();
     },
     { passive: false }
@@ -439,15 +508,49 @@
     }
     const idx = p.y * size + p.x;
     const stored = board[idx] | 0;
-    const ci = stored ? stored - 1 : null;
-    const hex = ci != null ? palette[ci] || "?" : "empty";
+    const hex = stored ? palette[stored - 1] || "?" : "empty";
     coordTip.hidden = false;
     coordTip.textContent = `(${p.x}, ${p.y}) · ${hex}`;
-    coordTip.style.left = `${ev.clientX + 14}px`;
-    coordTip.style.top = `${ev.clientY + 14}px`;
+    coordTip.style.left = `${Math.min(ev.clientX + 14, window.innerWidth - 140)}px`;
+    coordTip.style.top = `${Math.min(ev.clientY + 14, window.innerHeight - 40)}px`;
   }
 
-  // Logo = reset overview
+  // Keyboard power-user controls
+  window.addEventListener("keydown", (ev) => {
+    if (ev.target && /input|textarea|select/i.test(ev.target.tagName)) return;
+    const step = Math.max(24, size * scale * 0.08);
+    let handled = true;
+    if (ev.key === "+" || ev.key === "=") {
+      scale = clampScale(scale * 1.15);
+      markUserAdjusted();
+    } else if (ev.key === "-" || ev.key === "_") {
+      scale = clampScale(scale * 0.87);
+      markUserAdjusted();
+    } else if (ev.key === "ArrowLeft") {
+      panX += step;
+      markUserAdjusted();
+    } else if (ev.key === "ArrowRight") {
+      panX -= step;
+      markUserAdjusted();
+    } else if (ev.key === "ArrowUp") {
+      panY += step;
+      markUserAdjusted();
+    } else if (ev.key === "ArrowDown") {
+      panY -= step;
+      markUserAdjusted();
+    } else if (ev.key === "r" || ev.key === "R" || ev.key === "0") {
+      userAdjusted = false;
+      fitContain(true);
+      return;
+    } else {
+      handled = false;
+    }
+    if (handled) {
+      ev.preventDefault();
+      applyTransform();
+    }
+  });
+
   document.getElementById("brand-logo")?.addEventListener("click", (ev) => {
     ev.preventDefault();
     userAdjusted = false;
@@ -460,8 +563,26 @@
     fitContain(true);
   });
 
+  // Invite agent — one-click share (the product loop)
+  shareBtn?.addEventListener("click", async () => {
+    const text = `${API} — place tiles to make something legendary (see /llms.txt)`;
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("Invite copied — paste it to your agent");
+      if (shareBtn.querySelector(".share-label")) {
+        shareBtn.querySelector(".share-label").textContent = "Copied!";
+        setTimeout(() => {
+          shareBtn.querySelector(".share-label").textContent = "Invite agent";
+        }, 1600);
+      }
+    } catch {
+      showToast(text);
+    }
+  });
+
   window.addEventListener("resize", () => {
     if (!userAdjusted) fitContain(true);
+    else applyTransform();
   });
   window.addEventListener("orientationchange", () => {
     setTimeout(() => {
@@ -471,6 +592,7 @@
   if (window.visualViewport) {
     window.visualViewport.addEventListener("resize", () => {
       if (!userAdjusted) fitContain(true);
+      else applyTransform();
     });
   }
 
@@ -478,7 +600,7 @@
   fetchCanvas().catch(() => {
     document.title = "grok/place · reconnecting…";
   });
-  fetchSeeMeta();
+  fetchMeta();
   fetchFeed();
 
   setInterval(() => {
@@ -487,9 +609,9 @@
         if (document.title.includes("reconnecting")) document.title = "grok/place · live mosaic";
       })
       .catch(() => {});
-  }, 2000);
-  setInterval(fetchFeed, 4000);
-  setInterval(fetchSeeMeta, 8000);
+  }, 1400);
+  setInterval(fetchFeed, 3500);
+  setInterval(fetchMeta, 7000);
 
   window.grokplaceFitView = () => {
     userAdjusted = false;
