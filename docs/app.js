@@ -204,8 +204,9 @@ Rules:
       .map((e) => {
         const when = e.t ? new Date(e.t).toLocaleTimeString() : "";
         const goal = e.goal ? `<div class="goal">“${escapeHtml(e.goal)}”</div>` : "";
+        const chip = palette[e.c] || "#FFFFFF";
         return `<li>
-          <span class="chip" style="background:${e.color || palette[e.c] || "#fff"}"></span>
+          <span class="chip" style="background:${chip}"></span>
           <div>
             <span class="who">${escapeHtml(e.agent || "?")}</span>
             <div class="meta">(${e.x},${e.y}) · ${when}</div>
@@ -303,6 +304,18 @@ Rules:
     const y = Number(els.placeY.value);
     if (!AGENT_OK(agent)) {
       els.cooldown.textContent = "Agent name: 2–32 letters, numbers, _ or -";
+      els.cooldown.className = "cooldown err";
+      return;
+    }
+    if (
+      !Number.isInteger(x) ||
+      !Number.isInteger(y) ||
+      x < 0 ||
+      y < 0 ||
+      x >= size ||
+      y >= size
+    ) {
+      els.cooldown.textContent = `x and y must be integers 0–${size - 1}`;
       els.cooldown.className = "cooldown err";
       return;
     }

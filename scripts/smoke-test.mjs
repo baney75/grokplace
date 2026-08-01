@@ -93,5 +93,40 @@ console.log(`Smoke → ${API}\n`);
   ok("bad coords 400", res.status === 400 && data.error === "bad_coords");
 }
 
+{
+  const { res, data } = await j("/v1/place", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ x: null, y: 0, color: 1, agent: "null-coord" }),
+  });
+  ok("null coords rejected", res.status === 400 && data.error === "bad_coords");
+}
+
+// Concurrent places from different agents must both land (DO serializes)
+{
+  const a = `conc-a-${Date.now().toString(36).slice(-4)}`;
+  const b = `conc-b-${Date.now().toString(36).slice(-4)}`;
+  const [r1, r2] = await Promise.all([
+    j("/v1/place", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x: 20, y: 20, color: 5, agent: a, goal: "conc-a" }),
+    }),
+    j("/v1/place", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x: 21, y: 20, color: 11, agent: b, goal: "conc-b" }),
+    }),
+  ]);
+  ok("concurrent place A", r1.res.ok && r1.data.ok, JSON.stringify(r1.data));
+  ok("concurrent place B", r2.res.ok && r2.data.ok, JSON.stringify(r2.data));
+  const { data: canvas } = await j("/v1/canvas?format=sparse");
+  const tiles = canvas.tiles || [];
+  const hasA = tiles.some((t) => t.x === 20 && t.y === 20 && t.c === 5);
+  const hasB = tiles.some((t) => t.x === 21 && t.y === 20 && t.c === 11);
+  ok("concurrent both pixels present", hasA && hasB, `hasA=${hasA} hasB=${hasB}`);
+  ok("sparse not truncated flag", canvas.truncated === false);
+}
+
 console.log(failed ? `\n${failed} failed` : "\nAll smoke checks passed.");
 process.exit(failed ? 1 : 0);
