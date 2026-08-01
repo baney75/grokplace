@@ -49,7 +49,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Resolve exact candidate and publish pending trusted review
+      - name: Resolve exact candidate and publish pending merge gate
         id: candidate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -78,10 +78,10 @@ jobs:
           [ -n "$RUN_HEAD" ] || RUN_HEAD="$HEAD"
           [ "$HEAD" = "$RUN_HEAD" ] || { echo "PR head differs from the successful PR quality run."; exit 1; }
           DETAILS_URL="https://github.com/$REPO/actions/runs/$GITHUB_RUN_ID"
-          EXTERNAL_ID="trusted-review:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$PR:$HEAD"
+          EXTERNAL_ID="trusted-merge:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$PR:$HEAD"
           STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          CHECK_ID=$(gh api --method POST "repos/$REPO/check-runs" -f name="Trusted agent review" -f head_sha="$HEAD" -f status="in_progress" -f started_at="$STARTED_AT" -f details_url="$DETAILS_URL" -f external_id="$EXTERNAL_ID" --jq '.id')
-          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Trusted check-run ID was not returned."; exit 1; }
+          CHECK_ID=$(gh api --method POST "repos/$REPO/check-runs" -f name="merge-and-award" -f head_sha="$HEAD" -f status="in_progress" -f started_at="$STARTED_AT" -f details_url="$DETAILS_URL" -f external_id="$EXTERNAL_ID" --jq '.id')
+          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Exact-head merge gate check-run ID was not returned."; exit 1; }
           {
             echo "pr=$PR"
             echo "head=$HEAD"
@@ -239,7 +239,7 @@ jobs:
           curl --retry 5 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/reserve.json
           jq -e '.ok == true and (.reserved == true or .already == true)' /tmp/reserve.json >/dev/null
 
-      - name: Publish successful trusted agent review
+      - name: Publish successful exact-head merge gate
         id: trusted_success
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -249,16 +249,16 @@ jobs:
           CHECK_ID: ${{ steps.candidate.outputs.check_id }}
         run: |
           set -euo pipefail
-          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "Trusted check identity is invalid."; exit 1; }
+          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "Exact-head merge gate identity is invalid."; exit 1; }
           CURRENT=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
           [ "$CURRENT" = "$HEAD" ] || { echo "PR head changed before trusted success."; exit 1; }
           gh api "repos/$REPO/check-runs/$CHECK_ID" > /tmp/trusted-check.json
-          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368 and .status == "in_progress"' /tmp/trusted-check.json >/dev/null
+          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "merge-and-award" and .app.id == 15368 and .status == "in_progress"' /tmp/trusted-check.json >/dev/null
           COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="success" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted agent review passed' -f 'output[summary]=Exact-head reviewer, lane, bounty, and reservation gates passed.' > /tmp/trusted-success.json
-          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368 and .status == "completed" and .conclusion == "success"' /tmp/trusted-success.json >/dev/null
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="success" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted merge gate passed' -f 'output[summary]=Exact-head reviewer, lane, bounty, and reservation gates passed.' > /tmp/trusted-success.json
+          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "merge-and-award" and .app.id == 15368 and .status == "completed" and .conclusion == "success"' /tmp/trusted-success.json >/dev/null
 
-      - name: Publish failed trusted agent review
+      - name: Publish failed exact-head merge gate
         if: ${{ always() && steps.candidate.outputs.check_id != '' && steps.trusted_success.outcome != 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -267,12 +267,12 @@ jobs:
           CHECK_ID: ${{ steps.candidate.outputs.check_id }}
         run: |
           set -euo pipefail
-          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "Trusted failure check identity is invalid."; exit 1; }
+          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "Exact-head merge gate failure identity is invalid."; exit 1; }
           gh api "repos/$REPO/check-runs/$CHECK_ID" > /tmp/trusted-check.json
-          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368' /tmp/trusted-check.json >/dev/null
+          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "merge-and-award" and .app.id == 15368' /tmp/trusted-check.json >/dev/null
           COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="failure" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted agent review failed' -f 'output[summary]=The exact-head separate-agent artifact or lane validation failed; merge remains blocked. See the job log for the rejected gate.' > /tmp/trusted-failure.json
-          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368 and .status == "completed" and .conclusion == "failure"' /tmp/trusted-failure.json >/dev/null
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="failure" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted merge gate failed' -f 'output[summary]=The exact-head separate-agent artifact or lane validation failed; merge remains blocked. See the job log for the rejected gate.' > /tmp/trusted-failure.json
+          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "merge-and-award" and .app.id == 15368 and .status == "completed" and .conclusion == "failure"' /tmp/trusted-failure.json >/dev/null
 
       - name: Merge the exact eligible head
         id: merge
