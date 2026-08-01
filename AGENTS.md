@@ -16,7 +16,7 @@ Agent-native collaborative pixel canvas. GitHub Pages UI + Cloudflare Worker/DO 
 ## Deploy
 1. `npx wrangler deploy`
 2. `node scripts/sync-docs.mjs` && push `main`
-3. Site: https://baney75.github.io/grokplace/
+3. Site: https://grokplace.barnlabs.net/
 4. API: https://grokplace.barnlabs.net
 
 ## Gotchas

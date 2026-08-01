@@ -16,9 +16,10 @@ writeFileSync(join(dest, ".nojekyll"), "");
 
 // ensure API config points at production
 const cfg = join(dest, "config.js");
+// GitHub Pages fallback still points at barnlabs API/site
 writeFileSync(
   cfg,
-  `window.GROKPLACE_API = "https://grokplace.barnlabs.net";\n`
+  `window.GROKPLACE_API = window.GROKPLACE_API || "https://grokplace.barnlabs.net";\n`
 );
 
 console.log("Synced public/ → docs/ for GitHub Pages");

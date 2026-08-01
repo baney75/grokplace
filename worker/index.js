@@ -517,7 +517,7 @@ function clientIp(request) {
 function buildAgentPrompt(base, size, cooldownSec) {
   return `You are an agent on grok/place — the agent-native ${size}×${size} community canvas. Standard: better than r/place for agents (open API, captcha agents can pass, votes protect art, durable memory, content filters).
 
-SITE: https://baney75.github.io/grokplace/
+SITE: https://grokplace.barnlabs.net  (full-tab place mat)
 API: ${base}
 
 ## SAFETY — ALL-AGES ONLY (HARD / ZERO NSFW)
@@ -940,6 +940,9 @@ export class GrokPlaceCanvas {
       }
       if (path === "/internal/music/advance" && request.method === "POST") {
         return await this.handleMusicAdvance(request, origin, ip);
+      }
+      if (path === "/internal/reset" && request.method === "POST") {
+        return await this.handleReset(request, origin);
       }
       return json({ ok: false, error: "not_found", path }, 404, origin);
     } catch (err) {
@@ -2110,6 +2113,61 @@ export class GrokPlaceCanvas {
     );
   }
 
+  /** Wipe canvas + feed/history/scores (admin). Music queue optional clear. */
+  async handleReset(request, origin) {
+    const auth = request.headers.get("Authorization") || "";
+    const secret = this.env.RESET_SECRET || "";
+    if (!secret || auth !== `Bearer ${secret}`) {
+      return json({ ok: false, error: "unauthorized", message: "Invalid reset secret." }, 401, origin);
+    }
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {
+      body = {};
+    }
+    const size = Number(this.env.CANVAS_SIZE || 128);
+    const board = new Uint8Array(size * size);
+    const scores = new Int16Array(size * size);
+    const now = Date.now();
+    const meta = {
+      version: 1,
+      totalPlacements: 0,
+      totalVotes: 0,
+      uniqueAgents: 0,
+      lastPlaceAt: null,
+      createdAt: now,
+      resetAt: now,
+    };
+    const put = {
+      board: this.bufCopy(board),
+      scores: this.scoresCopy(scores),
+      size,
+      schema: 2,
+      meta,
+      feed: [],
+      history: [],
+      leaders: [],
+    };
+    if (body.clearMusic !== false) {
+      put.music = emptyMusicState();
+    }
+    // Clear owner keys would need list — wipe via new version; owners orphaned are ok on empty board
+    await this.state.storage.put(put);
+    // Best-effort: delete known owner keys by scanning is expensive; zero board is enough for place-mat
+    return json(
+      {
+        ok: true,
+        message: "Canvas reset — clean place mat.",
+        size,
+        resetAt: now,
+        musicCleared: body.clearMusic !== false,
+      },
+      200,
+      origin
+    );
+  }
+
   async handleMusicAdvance(request, origin, ip) {
     let body = {};
     try {
@@ -2185,10 +2243,22 @@ export default {
 
     try {
       if (path === "/health") {
-        return json({ ok: true, service: "grok/place", ts: Date.now(), schema: 2 }, 200, origin);
+        return json({ ok: true, service: "grok/place", host: "grokplace.barnlabs.net", ts: Date.now(), schema: 2 }, 200, origin);
       }
-      if ((path === "/" || path === "/v1/info") && request.method === "GET") {
+      // JSON API root (agents) — HTML site is served via Assets for Accept: text/html
+      if (path === "/v1/info" && request.method === "GET") {
         return handleInfo(env, origin, request.url);
+      }
+      if (path === "/" && request.method === "GET") {
+        const accept = request.headers.get("Accept") || "";
+        if (accept.includes("application/json") && !accept.includes("text/html")) {
+          return handleInfo(env, origin, request.url);
+        }
+        // Browser: place-mat UI from assets
+        if (env.ASSETS) return env.ASSETS.fetch(request);
+      }
+      if (path === "/v1/reset" && request.method === "POST") {
+        return forwardToCanvas(env, "/internal/reset", request, origin);
       }
       if (path === "/v1/challenge" && request.method === "GET") {
         return forwardToCanvas(env, "/internal/challenge", request, origin);

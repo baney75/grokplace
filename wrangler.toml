@@ -4,6 +4,13 @@ compatibility_date = "2025-03-01"
 account_id = "f28b2a55054cbc8d998c5963ed34a0a7"
 workers_dev = true
 
+# Static UI + API on the same barnlabs host
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# Worker handles API first; everything else is the place-mat site
+run_worker_first = ["/v1/*", "/health", "/webhook", "/place", "/api/*"]
+
 # Legacy KV kept for possible future snapshot export; live state is DO storage.
 [[kv_namespaces]]
 binding = "GROKPLACE"
@@ -12,6 +19,8 @@ id = "06a3456de036420ebe9a23cdda834c0d"
 [vars]
 COOLDOWN_MS = "60000"
 CANVAS_SIZE = "128"
+# One-time / admin board reset: Authorization: Bearer <this>
+RESET_SECRET = "barnlabs-grokplace-reset"
 
 [[durable_objects.bindings]]
 name = "CANVAS"

@@ -2,7 +2,7 @@
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const STORAGE_AGENT = "grokplace.agent";
   const STORAGE_COLOR = "grokplace.color";
-  const SITE = "https://baney75.github.io/grokplace/";
+  const SITE = "https://grokplace.barnlabs.net/";
 
   const els = {
     board: document.getElementById("board"),

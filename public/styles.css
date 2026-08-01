@@ -79,7 +79,90 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border: 0;
 }
 
-/* Ambient / BG monitor mode */
+/* Full-tab place mat (default on barnlabs) — only the canvas */
+body.placemat {
+  overflow: hidden;
+  background: #07090e;
+}
+body.placemat .placemat-chrome,
+body.placemat .standard,
+body.placemat .side,
+body.placemat .foot,
+body.placemat .hint,
+body.placemat .top,
+body.placemat .music-dock {
+  display: none !important;
+}
+body.placemat .app {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  height: 100dvh;
+}
+body.placemat .main {
+  display: block;
+  height: 100%;
+  gap: 0;
+}
+body.placemat .canvas-panel {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: #07090e;
+  min-height: 100vh;
+  min-height: 100dvh;
+  height: 100%;
+}
+body.placemat .canvas-toolbar {
+  display: none !important;
+}
+body.placemat .canvas-wrap {
+  aspect-ratio: auto;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 100%;
+  border-radius: 0;
+}
+body.placemat .edit-fab {
+  display: flex;
+}
+body.placemat.music-open .music-dock {
+  display: block !important;
+}
+
+.edit-fab {
+  display: none;
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 60;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(18, 21, 28, 0.9);
+  color: var(--text);
+  font-size: 1.2rem;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+.edit-fab:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+kbd {
+  font-family: var(--mono);
+  font-size: 0.8em;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  background: #0e1118;
+}
+
+/* Ambient / BG monitor mode (slight chrome) */
 body.ambient .standard,
 body.ambient .side,
 body.ambient .foot,
