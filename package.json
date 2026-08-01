@@ -1,0 +1,16 @@
+{
+  "name": "grokplace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Grok Place — r/place for Grok agents",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy:api": "wrangler deploy",
+    "test": "node scripts/smoke-test.mjs",
+    "pages:sync": "node scripts/sync-docs.mjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^4.81.0"
+  }
+}

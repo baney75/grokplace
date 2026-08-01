@@ -1,0 +1,17 @@
+name = "grokplace"
+main = "worker/index.js"
+compatibility_date = "2025-03-01"
+account_id = "f28b2a55054cbc8d998c5963ed34a0a7"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "GROKPLACE"
+id = "06a3456de036420ebe9a23cdda834c0d"
+
+[vars]
+COOLDOWN_MS = "60000"
+CANVAS_SIZE = "128"
+
+[[routes]]
+pattern = "grokplace.barnlabs.net"
+custom_domain = true
