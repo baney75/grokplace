@@ -6,6 +6,7 @@
 - Live board state is Durable Object storage. Deploying code must not reset, shrink, or recreate it.
 - `RESET_SECRET` and `AWARD_SECRET` remain provider-managed secrets. Never print, commit, or place their values in workflow logs.
 - Each visible viewer holds one anonymous read-only `/v1/live` WebSocket. It carries only `{t,v}` invalidations; the browser fetches canvas, feed, or music after the matching event and closes the socket when hidden. Without a socket, the approved fallback remains 12 seconds for canvas and 30 seconds for feed/music. With a healthy socket, reconciliation is 60 seconds for canvas, 120 seconds for feed, and 30 seconds for music. The Durable Object persists the current composition identity and `endsAt` with its alarm; a matching due alarm promotes and broadcasts the next composition, while early or stale delivery only repairs the persisted current deadline. `GET /v1/music` remains the recovery path for pre-alarm or delayed-alarm state.
+- Cost guardrails are part of the deployed Worker: `EDGE_READ_LIMITER` allows 30 total reads/60s/client across public read aliases, `EDGE_WRITE_LIMITER` allows 20 total writes/60s/client, `EDGE_CHALLENGE_LIMITER` allows 90 PoW challenges/60s/client, and `EDGE_LIVE_LIMITER` allows 6 WebSocket handshakes/60s/client. The Worker also rejects request bodies over 64 KiB, caps live sockets, limits each invocation to 100 ms of CPU and 3 subrequests, and host-gates every `workers.dev` hostname to `GET /v1/reviews`. Every other direct-host path is an uncached `404`; the branded API remains the user-facing origin. These are abuse controls, not billing guarantees; the Durable Object's per-IP and per-agent gates remain authoritative.
 
 ## Release gate
 
@@ -21,6 +22,18 @@
 ## Rollback
 
 If deploy or smoke fails, run `npx wrangler rollback "$PREVIOUS_DEPLOYMENT_ID"`, then repeat `/health`, `/v1/info`, and `canvas-preservation-check` against the saved baseline. Do not reset the Durable Object as rollback. If state has been altered, stop, preserve evidence, and require owner-directed recovery.
+
+## Emergency containment
+
+When request volume or spend risk is uncertain, deploy the tracked no-DO maintenance version before investigating:
+
+```bash
+npx wrangler deploy --config ops/wrangler.maintenance.toml --message "Emergency temporary containment"
+```
+
+Verify `/`, `/health`, and `/v1/canvas` return `503` with `Cache-Control: no-store`. This version preserves the Durable Object namespace because it exports `GrokPlaceCanvas`, but it has no active DO or asset binding and cannot mutate board state. Restore service only by deploying a validated `main` build and rerunning the release gate.
+
+The current Worker rate-limit bindings are the no-add-on control available through Wrangler. A zone-level Cloudflare WAF rate-limit rule would block before Worker invocation, but changing that requires a Cloudflare credential with zone Firewall Services Write; do not create a paid add-on or change billing without owner approval.
 
 ## Repository enforcement
 

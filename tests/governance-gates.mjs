@@ -55,6 +55,9 @@ const adversarialGuide = readFileSync(join(root, "ADVERSARIAL.md"), "utf8");
 const runbook = readFileSync(join(root, "RUNBOOK.md"), "utf8");
 const reviewArtifactCheck = readFileSync(join(root, "scripts/review-artifact-check.mjs"), "utf8");
 const workerSource = readFileSync(join(root, "worker/index.js"), "utf8");
+const wranglerConfig = readFileSync(join(root, "wrangler.toml"), "utf8");
+check("Worker caching stays enabled behind explicit response policies", /\[cache\]\s+enabled\s*=\s*true/.test(wranglerConfig));
+check("Worker execution has bounded CPU and subrequests", /\[limits\]\s+cpu_ms\s*=\s*100\s+subrequests\s*=\s*3/.test(wranglerConfig));
 check("privileged workflow uses workflow_run", /workflow_run:/.test(mergeWorkflow) && !/pull_request_target:/.test(mergeWorkflow));
 check("trusted merge is triggered only by successful PR quality", /workflows:\s*\[PR quality\]/.test(mergeWorkflow) && /workflow_run\.conclusion == 'success'/.test(mergeWorkflow) && /workflow_run\.event == 'pull_request'/.test(mergeWorkflow));
 check("obsolete human approval signal is removed", !existsSync(join(root, ".github/workflows/maintain-approval-signal.yml")) && !/Maintain approval signal|pull_request_review/.test(mergeWorkflow));
@@ -65,9 +68,18 @@ check("PR quality runs reviewer-identity regressions", /npm run test:review-iden
 check("PR quality runs realtime regressions after reviewer identity", qualityWorkflow.indexOf("npm run test:review-identity") < qualityWorkflow.indexOf("npm run test:realtime"));
 check("secret-path guard permits deletion of a forbidden legacy file", /git diff --name-status/.test(qualityWorkflow) && /\$1 !~ \/\^D\//.test(qualityWorkflow) && /files-present-after-pr\.txt/.test(qualityWorkflow));
 check("trusted PR workflow runs the path-aware secret diff scanner", /git diff[^\n]+\| node scripts\/credential-diff-scan\.mjs/.test(qualityWorkflow));
-check("trusted merge workflow is serialized", /group:\s*trusted-pr-merge-\$\{\{ github\.repository \}\}/.test(mergeWorkflow) && /cancel-in-progress:\s*false/.test(mergeWorkflow));
+check("trusted merge workflow coalesces stale runs per PR", /group:\s*trusted-pr-merge-/.test(mergeWorkflow) && /github\.event_name == 'workflow_run'/.test(mergeWorkflow) && /format\('run-\{0\}', github\.run_id\)/.test(mergeWorkflow) && /cancel-in-progress:\s*true/.test(mergeWorkflow));
 check("merge refuses a bank that cannot accept the full award", /\.bank\.bonusTiles >= 0 and \.bank\.bonusTiles <= 190/.test(mergeWorkflow));
-check("trusted workflow resolves the immutable review artifact", /\/v1\/reviews/.test(mergeWorkflow) && /review-artifact-check\.mjs/.test(mergeWorkflow));
+check("trusted workflow resolves the immutable review artifact", /review-artifact/.test(mergeWorkflow) && /review-artifact-check\.mjs/.test(mergeWorkflow));
+check(
+  "trusted workflow separates the read-only review mirror from live maintainer state",
+  /REVIEW_API:\s*https:\/\/grokplace\.projectbarnlab\.workers\.dev/.test(mergeWorkflow) &&
+    /APP_API:\s*https:\/\/grokplace\.barnlabs\.net/.test(mergeWorkflow) &&
+    /"\$REVIEW_API\/v1\/reviews"/.test(mergeWorkflow) &&
+    /"\$APP_API\/v1\/maintainers"/.test(mergeWorkflow) &&
+    /"\$APP_API\/v1\/bank"/.test(mergeWorkflow) &&
+    !/"\$REVIEW_API\/v1\/(?:maintainers|bank)"/.test(mergeWorkflow)
+);
 check("owner-authored PRs always enter product lane before path classification", /if \[ "\$AUTHOR" = "baney75" \]; then\s+LANE=product\s+elif jq -r '\.\[\]\.filename' \/tmp\/files\.json \| node scripts\/maintain-path-check\.mjs[\s\S]*then\s+LANE=maintain/.test(mergeWorkflow));
 check("non-owner PRs fail closed outside the maintain allowlist", /Non-owner PRs are eligible only for the allowlisted maintenance lane\."\s+exit 1/.test(mergeWorkflow) && /jq -r '\.\[\]\.filename' \/tmp\/files\.json \| node scripts\/maintain-path-check\.mjs/.test(mergeWorkflow));
 check("product lane is owner-authored and names one real implementer agent", /\[ "\$AUTHOR" = "baney75" \]/.test(mergeWorkflow) && /exactly one implementer_agent field/.test(mergeWorkflow) && /PASTE_IMPLEMENTER_AGENT_HERE/.test(mergeWorkflow) && /--mode product-owner[\s\S]*--implementer-agent "\$IMPLEMENTER_AGENT"/.test(mergeWorkflow));
@@ -88,6 +100,11 @@ check("trusted success binds exact check ID, head, app, and current PR head", /C
 check("failed validation always publishes exact-head trusted failure", /Publish failed trusted agent review[\s\S]*if: \$\{\{ always\(\)[\s\S]*steps\.trusted_success\.outcome != 'success'[\s\S]*\.head_sha == \$head and \.name == "Trusted agent review" and \.app\.id == 15368[\s\S]*conclusion="failure"/.test(mergeWorkflow));
 check("untrusted PR workflow cannot publish the trusted review check", !/Trusted agent review/.test(qualityWorkflow));
 check("merge atomically requires the reserved head SHA", /gh pr merge "\$PR" --repo "\$REPO" --squash --delete-branch --match-head-commit "\$HEAD"/.test(mergeWorkflow));
+check("trusted merge enables exact-head GitHub auto-merge with a bounded observation", /gh pr merge "\$PR" --repo "\$REPO" --squash --delete-branch --match-head-commit "\$HEAD" --auto[\s\S]*for attempt in \{1\.\.20\}[\s\S]*sleep 3[\s\S]*echo "merged=false"/.test(mergeWorkflow));
+check("completed auto-merges report the exact successful observation", /if jq -e --arg head "\$HEAD" '[\s\S]*echo "merged=true" >> "\$GITHUB_OUTPUT"[\s\S]*exit 0/.test(mergeWorkflow));
+check("queued maintenance merges defer award finalization to durable reconciliation", /Exact-head auto-merge is enabled; durable reconciliation will finalize a maintenance award[\s\S]*Auto-merge is still pending; reconciliation will finalize this maintenance award/.test(mergeWorkflow));
+check("maintenance awards finalize only after observed merge or durable reconciliation", /\[ "\$\{\{ steps\.merge\.outputs\.merged \}\}" = "true" \][\s\S]*phase:"finalize"[\s\S]*reconcile-reservations[\s\S]*phase:"finalize"/.test(mergeWorkflow));
+check("pending maintenance auto-merges exit before any award finalization", /\[ "\$\{\{ steps\.merge\.outputs\.merged \}\}" = "true" \] \|\| \{[\s\S]*exit 0[\s\S]*\}[\s\S]*MERGE_SHA=\$\(gh api[\s\S]*phase:"finalize"/.test(mergeWorkflow));
 check("bounty creation has no circular owner-comment field", !/\bid:\s*owner\b/.test(bountyForm) && /After creation[\s\S]*BOUNTY APPROVED/.test(bountyForm));
 check("PR template makes the optional bounty pair explicit", /- bounty_issue:\s*NONE/.test(prTemplate) && /- bounty_approval_comment:\s*NONE/.test(prTemplate));
 check("PR template exposes exactly one implementer-agent field", (prTemplate.match(/^- implementer_agent:/gm) || []).length === 1 && /PASTE_IMPLEMENTER_AGENT_HERE/.test(prTemplate));

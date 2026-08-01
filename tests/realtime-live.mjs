@@ -101,11 +101,11 @@ const canvas = new GrokPlaceCanvas(state, {});
 {
   const saturatedCanvas = new GrokPlaceCanvas({
     storage: new MemoryStorage(),
-    getWebSockets() { return Array.from({ length: 1000 }, () => socket); },
+    getWebSockets() { return Array.from({ length: 256 }, () => socket); },
   }, {});
   const response = await saturatedCanvas.handleLive(new Request("https://test/internal/live", { headers: { Upgrade: "websocket" } }), "*");
   const data = await response.json();
-  check("live socket cap rejects the 1,001st connection before acceptance", response.status === 503 && response.headers.get("Retry-After") === "1" && data.error === "live_capacity", JSON.stringify(data));
+  check("live socket cap rejects the 257th connection before acceptance", response.status === 503 && response.headers.get("Retry-After") === "1" && data.error === "live_capacity", JSON.stringify(data));
 }
 
 canvas.broadcastLive(["canvas", "activity", "music", "unknown"], 23);
@@ -208,8 +208,20 @@ function song(id, title) {
   check("a stale alarm cannot skip the persisted replacement", (await staleStorage.get("music")).now?.id === "replacement" && repaired?.compositionId === "replacement" && repaired.endsAt === 2_000 && staleStorage.alarmAt === 2_000 && staleMessages.length === 0, JSON.stringify({ repaired, alarmAt: staleStorage.alarmAt, staleMessages }));
 }
 
-if (typeof globalThis.WebSocketPair === "function") {
-  const accepted = [];
+const accepted = [];
+const previousWebSocketPair = globalThis.WebSocketPair;
+const previousResponse = globalThis.Response;
+globalThis.WebSocketPair = class {
+  constructor() {
+    this.client = { kind: "client" };
+    this.server = { send() {}, close() {} };
+  }
+};
+globalThis.Response = function ResponseMock(body, init = {}) {
+  if (init.status === 101) return { status: 101, headers: new Headers(init.headers), webSocket: init.webSocket };
+  return new previousResponse(body, init);
+};
+try {
   const liveState = {
     storage: new MemoryStorage({ meta: { version: 9 } }),
     acceptWebSocket(server) { accepted.push(server); },
@@ -217,9 +229,11 @@ if (typeof globalThis.WebSocketPair === "function") {
   };
   const liveCanvas = new GrokPlaceCanvas(liveState, {});
   const response = await liveCanvas.handleLive(new Request("https://test/internal/live", { headers: { Upgrade: "websocket" } }), "*");
-  check("runtime WebSocketPair upgrade accepts the server socket", response.status === 101 && accepted.length === 1, `status=${response.status} accepted=${accepted.length}`);
-} else {
-  check("WebSocketPair acceptance test is skipped in the Node-only unit runtime", true);
+  check("WebSocketPair upgrade accepts the server socket", response.status === 101 && accepted.length === 1, `status=${response.status} accepted=${accepted.length}`);
+} finally {
+  if (previousWebSocketPair) globalThis.WebSocketPair = previousWebSocketPair;
+  else delete globalThis.WebSocketPair;
+  globalThis.Response = previousResponse;
 }
 
 process.exitCode = failed ? 1 : 0;

@@ -28,7 +28,7 @@ const FEATURE_VOTE_CD_MS = 20_000;
 const BOARD_SCHEMA = 3;
 const LIVE_EVENT_TYPES = new Set(["ready", "canvas", "activity", "music"]);
 const LIVE_EVENT_MAX_CHARS = 96;
-const LIVE_SOCKET_MAX = 1000;
+const LIVE_SOCKET_MAX = 256;
 
 // 32-color canvas palette (indices 0–15 preserved; 16–31 add depth)
 const PALETTE = [
@@ -111,6 +111,9 @@ const IP_PLACE_LIMIT = 80;
 const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
 const IP_NEW_AGENTS_LIMIT = 8;
+const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
+const WORKERS_DEV_SUFFIX = ".workers.dev";
+const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health", "/see"]);
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 const COLOR_HEX_RE = /^#?[0-9A-Fa-f]{6}$/;
 const REPORT_THRESHOLD = 3;
@@ -182,6 +185,15 @@ function corsHeaders(origin) {
     "Access-Control-Allow-Headers": "Content-Type, X-Agent-Name, Authorization",
     "Access-Control-Max-Age": "86400",
     "Access-Control-Expose-Headers": "X-Cooldown-Remaining, X-Next-Place-At",
+    "Vary": "Origin",
+  };
+}
+
+function securityHeaders() {
+  return {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), geolocation=(), microphone=()",
   };
 }
 
@@ -191,6 +203,7 @@ function json(data, status, origin, extraHeaders = {}) {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
+      ...securityHeaders(),
       ...corsHeaders(origin),
       ...extraHeaders,
     },
@@ -479,6 +492,33 @@ function clientIp(request) {
   );
 }
 
+async function edgeRateLimit(env, bindingName, request, bucket) {
+  const limiter = env?.[bindingName];
+  if (!limiter || typeof limiter.limit !== "function") return { ok: true, configured: false };
+  // Rate Limit binding keys are capped at 64 bytes. Hash both dimensions so
+  // long IPv6 addresses and challenge scopes cannot fail open or fail closed.
+  const key = (await sha256Hex(`${clientIp(request)}:${bucket}`)).slice(0, 32);
+  try {
+    const result = await limiter.limit({ key });
+    return { ok: result?.success !== false, configured: true };
+  } catch (error) {
+    // A configured edge guard must fail closed if its provider call errors.
+    console.error("edge rate limiter unavailable", bindingName, error?.message || error);
+    return { ok: false, configured: true, unavailable: true };
+  }
+}
+
+function edgeRateLimitResponse(origin, policy, unavailable = false) {
+  return json(
+    unavailable
+      ? { ok: false, error: "rate_limiter_unavailable", message: "Request protection is temporarily unavailable. Retry shortly." }
+      : { ok: false, error: "rate_limited", message: "Too many requests. Retry shortly." },
+    unavailable ? 503 : 429,
+    origin,
+    { "Cache-Control": "no-store", "Retry-After": unavailable ? "30" : "60", "X-RateLimit-Policy": policy }
+  );
+}
+
 function buildAgentPrompt(base, size, cooldownSec) {
   const contractExamples = requestContracts(cooldownSec)
     .map((contract) => {
@@ -557,13 +597,15 @@ function wantsBrowserMosaic(request) {
   return true;
 }
 
-function plainText(body, origin, status = 200) {
+function plainText(body, origin, status = 200, extraHeaders = {}) {
   return new Response(body.endsWith("\n") ? body : body + "\n", {
     status,
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
-      "Cache-Control": "public, max-age=2",
+      "Cache-Control": "no-store",
+      ...securityHeaders(),
       ...corsHeaders(origin),
+      ...extraHeaders,
     },
   });
 }
@@ -609,7 +651,7 @@ async function agentBootstrap(env, request, origin) {
       },
       200,
       origin,
-      { "Cache-Control": "public, max-age=2" }
+      { "Cache-Control": "no-store", "Vary": "Origin, Accept, User-Agent" }
     );
   }
 
@@ -622,7 +664,7 @@ async function agentBootstrap(env, request, origin) {
     "",
     "Next: claim an identity, then GET /v1/challenge?scope=place → authenticated POST /v1/place. Humans cannot help with controls.",
   ].join("\n");
-  return plainText(text, origin);
+  return plainText(text, origin, 200, { "Cache-Control": "no-store", "Vary": "Origin, Accept, User-Agent" });
 }
 
 function requestContracts(cooldownSec) {
@@ -767,7 +809,8 @@ function handleInfo(env, origin, requestUrl) {
       agentPrompt: buildAgentPrompt(base, size, cooldownSec),
     },
     200,
-    origin
+    origin,
+    { "Cache-Control": "public, max-age=300" }
   );
 }
 
@@ -776,9 +819,8 @@ function stubId(env) {
 }
 
 async function forwardToCanvas(env, path, request, origin) {
-  const id = stubId(env);
-  const stub = env.CANVAS.get(id);
   const url = new URL(request.url);
+  if (url.hostname.endsWith(WORKERS_DEV_SUFFIX)) url.hostname = "grokplace.barnlabs.net";
   url.pathname = path;
   const headers = new Headers(request.headers);
   headers.set("X-Forwarded-Origin", origin || "*");
@@ -787,14 +829,50 @@ async function forwardToCanvas(env, path, request, origin) {
   headers.set("X-Client-IP", clientIp(request));
   const init = { method: request.method, headers };
   if (request.method !== "GET" && request.method !== "HEAD") {
-    init.body = await request.arrayBuffer();
+    const body = await readBodyLimited(request, EDGE_REQUEST_BODY_MAX_BYTES);
+    if (body === null) {
+      return json({ ok: false, error: "request_too_large", message: "Request body exceeds the 64 KiB API limit." }, 413, origin, { "Retry-After": "60" });
+    }
+    init.body = body;
   }
+  const id = stubId(env);
+  const stub = env.CANVAS.get(id);
   const res = await stub.fetch(url.toString(), init);
   const body = await res.arrayBuffer();
   const outHeaders = new Headers(res.headers);
   for (const [k, v] of Object.entries(corsHeaders(origin))) outHeaders.set(k, v);
-  outHeaders.set("Cache-Control", "no-store");
+  const immutableReview = request.method === "GET" && path === "/internal/reviews" && /^public,/.test(outHeaders.get("Cache-Control") || "");
+  if (!immutableReview) outHeaders.set("Cache-Control", "no-store");
   return new Response(body, { status: res.status, headers: outHeaders });
+}
+
+async function readBodyLimited(request, maxBytes) {
+  if (!request.body) return new ArrayBuffer(0);
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("request body too large");
+        return null;
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
 }
 
 /**
@@ -3403,8 +3481,54 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders(origin) });
+    const isApiSurface = path.startsWith("/v1/") || EDGE_READ_PATHS.has(path) || path === "/place" || path === "/webhook";
+    const method = request.method.toUpperCase();
+    // GitHub-hosted runners can be denied by the branded zone's edge policy.
+    // Keep the alternate workers.dev origin read-only and path-scoped so it
+    // cannot become a bypass for the application or mutation controls.
+    if (url.hostname.endsWith(WORKERS_DEV_SUFFIX) && !(method === "GET" && path === "/v1/reviews")) {
+      return plainText("Not found", origin, 404);
+    }
+    if (method === "OPTIONS") {
+      const limited = await edgeRateLimit(env, "EDGE_READ_LIMITER", request, "read");
+      if (!limited.ok) return edgeRateLimitResponse(origin, "30/60s per client", limited.unavailable);
+      return new Response(null, {
+        status: 204,
+        headers: {
+          ...corsHeaders(origin),
+          ...securityHeaders(),
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+
+    if (isApiSurface) {
+      const live = path === "/v1/live";
+      const challenge = path === "/v1/challenge";
+      const bindingName = live
+        ? "EDGE_LIVE_LIMITER"
+        : challenge
+          ? "EDGE_CHALLENGE_LIMITER"
+          : method === "GET"
+            ? "EDGE_READ_LIMITER"
+            : "EDGE_WRITE_LIMITER";
+      const policy = live ? "6/60s per client" : challenge ? "90/60s per client" : method === "GET" ? "30/60s per client" : "20/60s per client";
+      const bucket = live
+        ? "live"
+        : challenge
+          ? "challenge"
+          : method === "GET"
+            ? "read"
+            : "write";
+      const limited = await edgeRateLimit(env, bindingName, request, bucket);
+      if (!limited.ok) return edgeRateLimitResponse(origin, policy, limited.unavailable);
+    }
+
+    if (method !== "GET" && method !== "HEAD") {
+      const length = Number(request.headers.get("Content-Length"));
+      if (Number.isFinite(length) && length > EDGE_REQUEST_BODY_MAX_BYTES) {
+        return json({ ok: false, error: "request_too_large", message: "Request body exceeds the 64 KiB API limit." }, 413, origin, { "Retry-After": "60" });
+      }
     }
 
     try {
@@ -3420,7 +3544,7 @@ export default {
           agentBootstrap: "GET /llms.txt or curl / — full playbook + live board",
           ts: Date.now(),
           schema: 3,
-        }, 200, origin);
+        }, 200, origin, { "Cache-Control": "public, max-age=5" });
       }
       if (path === "/v1/info" && request.method === "GET") {
         return handleInfo(env, origin, request.url);

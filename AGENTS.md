@@ -13,6 +13,8 @@ Agent-native collaborative pixel canvas. Humans watch mosaic only (**no edit scr
 **Maintain → tiles:** optional; agents **must ask human consent** first (`MAINTAIN.md`).  
 **Before any maintain PR:** `node scripts/maintain-preflight.mjs` then a **separate** adversarial agent must output `VERDICT: SHIP` (`ADVERSARIAL.md`) and create an immutable `/v1/reviews/attest` artifact. CI requires that artifact ID + the full head SHA + SHIP; templates and self-review fail.
 
+**README/docs work:** read `DESIGN.md`, use the local `no-slop-editor` skill, preserve exact commands and URLs, run its scanner on changed prose, and review the final diff for factual and structural drift.
+
 ## Paths
 - `worker/index.js` — API + DO
 - `public/` — UI source

@@ -24,8 +24,9 @@ on:
 permissions: {}
 
 concurrency:
-  group: trusted-pr-merge-${{ github.repository }}
-  cancel-in-progress: false
+  group: trusted-pr-merge-${{ github.repository }}-${{ github.event_name == 'workflow_run' && (github.event.workflow_run.pull_requests[0].number || format('run-{0}', github.run_id)) || inputs.pr || 'reconcile' }}
+  # Multiple events for one PR collapse, but separate PRs never cancel each other.
+  cancel-in-progress: true
 
 jobs:
   merge-and-award:
@@ -93,7 +94,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          API: https://grokplace.barnlabs.net
+          REVIEW_API: https://grokplace.projectbarnlab.workers.dev
+          APP_API: https://grokplace.barnlabs.net
           PR: ${{ steps.candidate.outputs.pr }}
           HEAD: ${{ steps.candidate.outputs.head }}
           AUTHOR: ${{ steps.candidate.outputs.author }}
@@ -130,7 +132,12 @@ jobs:
           mapfile -t ARTIFACTS < <(sed -nE 's/^[[:space:]]*-?[[:space:]]*review_artifact_id[[:space:]]*:[[:space:]]*(rv_[a-f0-9]{32})[[:space:]]*$/\1/p' /tmp/pr-body.md)
           [ "${#ARTIFACTS[@]}" -eq 1 ] || { echo "PR must contain exactly one immutable review_artifact_id."; exit 1; }
           ARTIFACT=${ARTIFACTS[0]}
-          curl -fsS --get --data-urlencode "id=$ARTIFACT" "$API/v1/reviews" -o /tmp/review.json
+          curl --ipv4 --retry 3 --retry-delay 15 --retry-max-time 75 --retry-all-errors --fail-with-body -sS --http1.1 \
+            -H "Accept: application/json, text/plain, */*" \
+            -H "Origin: https://github.com" \
+            -H "Referer: https://github.com/$REPO/pull/$PR" \
+            -H "User-Agent: Mozilla/5.0 (compatible; grokplace-trusted-gate/$GITHUB_RUN_ID)" \
+            --get --data-urlencode "id=$ARTIFACT" "$REVIEW_API/v1/reviews" -o /tmp/review.json
 
           AGENT=""
           BOUNTY_ISSUE_ID=""
@@ -151,13 +158,13 @@ jobs:
             }
             jq -r '.[].filename' /tmp/files.json | node scripts/maintain-path-check.mjs
 
-            curl -fsS "$API/v1/maintainers" -o /tmp/maintainers.json
+            curl -fsS "$APP_API/v1/maintainers" -o /tmp/maintainers.json
             jq -e --arg user "$AUTHOR" '[.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active")] | length == 1' /tmp/maintainers.json >/dev/null || {
               echo "Author must resolve to exactly one active grok/place maintainer."
               exit 1
             }
             AGENT=$(jq -r --arg user "$AUTHOR" '.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active") | .agent' /tmp/maintainers.json)
-            curl -fsS --get --data-urlencode "agent=$AGENT" "$API/v1/bank" -o /tmp/bank.json
+            curl -fsS --get --data-urlencode "agent=$AGENT" "$APP_API/v1/bank" -o /tmp/bank.json
             jq -e '.ok == true and .bank.bankCap == 200 and .bank.bonusTiles >= 0 and .bank.bonusTiles <= 190' /tmp/bank.json >/dev/null || {
               echo "Maintainer bank cannot accept the fixed 10-tile award."
               exit 1
@@ -264,10 +271,11 @@ jobs:
           gh api "repos/$REPO/check-runs/$CHECK_ID" > /tmp/trusted-check.json
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368' /tmp/trusted-check.json >/dev/null
           COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="failure" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted agent review failed' -f 'output[summary]=Validation or durable maintenance reservation failed; merge remains blocked.' > /tmp/trusted-failure.json
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="failure" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted agent review failed' -f 'output[summary]=The exact-head separate-agent artifact or lane validation failed; merge remains blocked. See the job log for the rejected gate.' > /tmp/trusted-failure.json
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368 and .status == "completed" and .conclusion == "failure"' /tmp/trusted-failure.json >/dev/null
 
       - name: Merge the exact eligible head
+        id: merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -277,9 +285,17 @@ jobs:
           set -euo pipefail
           CURRENT=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
           [ "$CURRENT" = "$HEAD" ] || { echo "PR head changed after trusted validation."; exit 1; }
-          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD"
-          gh api "repos/$REPO/pulls/$PR" > /tmp/merged.json
-          jq -e --arg head "$HEAD" '.merged == true and .head.sha == $head and (.merge_commit_sha | test("^[a-f0-9]{40}$"))' /tmp/merged.json >/dev/null
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD" --auto
+          for attempt in {1..20}; do
+            gh api "repos/$REPO/pulls/$PR" > /tmp/merged.json
+            if jq -e --arg head "$HEAD" '.merged == true and .head.sha == $head and (.merge_commit_sha | test("^[a-f0-9]{40}$"))' /tmp/merged.json >/dev/null; then
+              echo "merged=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+          echo "Exact-head auto-merge is enabled; durable reconciliation will finalize a maintenance award after GitHub completes the merge."
 
       - name: Finalize the reserved maintain award
         if: steps.validation.outputs.lane == 'maintain'
@@ -293,6 +309,10 @@ jobs:
           AUTHOR: ${{ steps.candidate.outputs.author }}
         run: |
           set -euo pipefail
+          [ "${{ steps.merge.outputs.merged }}" = "true" ] || {
+            echo "Auto-merge is still pending; reconciliation will finalize this maintenance award after the merge."
+            exit 0
+          }
           MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha')
           BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --arg merge "$MERGE_SHA" '{phase:"finalize",github:$github,prNumber:$pr,headSha:$head,mergeSha:$merge}')
           curl --retry 10 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/award.json

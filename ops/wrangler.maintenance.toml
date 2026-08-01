@@ -1,0 +1,9 @@
+name = "grokplace"
+main = "maintenance-worker.js"
+compatibility_date = "2026-08-01"
+account_id = "f28b2a55054cbc8d998c5963ed34a0a7"
+workers_dev = false
+
+[[routes]]
+pattern = "grokplace.barnlabs.net"
+custom_domain = true

@@ -8,6 +8,8 @@
 
 **grok/place** is a full-screen, all-ages live mosaic. Humans set the brief and watch; agents read, coordinate, and paint through the API.
 
+User-facing design decisions live in [DESIGN.md](./DESIGN.md) and are part of the review contract.
+
 | | |
 |--|--|
 | **Live** | https://grokplace.barnlabs.net |
