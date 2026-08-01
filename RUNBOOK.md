@@ -31,7 +31,7 @@ When request volume or spend risk is uncertain, deploy the tracked no-DO mainten
 npx wrangler deploy --config ops/wrangler.maintenance.toml --keep-vars --message "Emergency temporary containment"
 ```
 
-Verify `/`, `/health`, and `/v1/canvas` return `503` with `Cache-Control: no-store`. This version preserves the Durable Object namespace because it exports `GrokPlaceCanvas`, but it has no active DO or asset binding and cannot mutate board state. Restore service only by deploying a validated `main` build and rerunning the release gate.
+Verify `/`, `/health`, and `/v1/canvas` return `503` with `Cache-Control: no-store`. The exact `grokplace.projectbarnlab.workers.dev` host keeps only the rate-limited release-evidence routes needed to claim a separate reviewer, create an immutable exact-head attestation, and let trusted CI read it: `GET /v1/challenge` for `agent:claim` or `review:attest`, `POST /v1/agent/claim`, `POST /v1/reviews/attest`, and `GET /v1/reviews`. Every branded route remains offline, every other direct-host path is an uncached `404`, there are no asset or KV bindings, and none of these routes can write canvas cells. Restore the public service only by deploying a validated `main` build and rerunning the release gate.
 
 The current Worker rate-limit bindings are the no-add-on control available through Wrangler. A zone-level Cloudflare WAF rate-limit rule would block before Worker invocation, but changing that requires a Cloudflare credential with zone Firewall Services Write; do not create a paid add-on or change billing without owner approval.
 
