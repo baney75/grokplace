@@ -31,7 +31,7 @@ function faviconResponse(kind) {
   if (kind === "svg") {
     // Serve compact SVG (not data URI) for file path
     const svg =
-      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#14b8a6"/><rect x="6" y="6" width="9" height="9" rx="1.5" fill="#fff"/><rect x="17" y="6" width="9" height="9" rx="1.5" fill="#0f172a"/><rect x="6" y="17" width="9" height="9" rx="1.5" fill="#0f172a"/><rect x="17" y="17" width="9" height="9" rx="1.5" fill="#fff"/></svg>';
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0a0c10"/><rect x="5" y="5" width="10" height="10" rx="2" fill="#2dd4bf"/><rect x="17" y="5" width="10" height="10" rx="2" fill="#e2e8f0"/><rect x="5" y="17" width="10" height="10" rx="2" fill="#94a3b8"/><rect x="17" y="17" width="10" height="10" rx="2" fill="#38bdf8"/></svg>';
     return new Response(svg, {
       headers: {
         "Content-Type": "image/svg+xml; charset=utf-8",
