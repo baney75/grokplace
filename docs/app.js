@@ -430,13 +430,20 @@ dir 1=upvote (protect art), -1=downvote.
     const data = await res.json();
     if (!data.ok) throw new Error(data.message || "canvas failed");
 
-    size = data.size || size;
+    const nextSize = data.size || size;
     palette = data.palette || palette;
     cooldownMs = data.cooldownMs || cooldownMs;
     voteCooldownMs = data.voteCooldownMs || voteCooldownMs;
     protectScore = data.protectScore || protectScore;
-    els.board.width = size;
-    els.board.height = size;
+    // Setting canvas.width/height CLEARS the bitmap — only do it when size changes
+    if (els.board.width !== nextSize || els.board.height !== nextSize) {
+      size = nextSize;
+      els.board.width = size;
+      els.board.height = size;
+      version = -1; // force full repaint after resize clear
+    } else {
+      size = nextSize;
+    }
     els.placeX.max = size - 1;
     els.placeY.max = size - 1;
     els.sizeLabel.textContent = `${size}×${size}`;
@@ -465,7 +472,6 @@ dir 1=upvote (protect art), -1=downvote.
       refreshPrompt();
       if (!didAutoFocusArt) {
         didAutoFocusArt = true;
-        // after paint so layout is ready
         requestAnimationFrame(() => focusArt());
       }
     }
