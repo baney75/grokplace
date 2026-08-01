@@ -42,31 +42,36 @@ const CHALLENGE_TTL_MS = 90_000;
 const POW_DIFFICULTY = 3; // leading hex zeros — ~4k hashes avg, sub-10ms for agents
 const VOTE_COOLDOWN_MS = 20_000;
 const PROTECT_SCORE = 5;
-const PROTECT_MIN_REP = 5;
+/** Overwrite protected tiles: need this many successful placements (not farmable vote-rep). */
+const PROTECT_MIN_PLACEMENTS = 5;
 const IP_PLACE_LIMIT = 40; // per rolling minute
 const IP_CHALLENGE_LIMIT = 60;
+const IP_NEW_AGENTS_LIMIT = 8; // new agent names per IP per hour
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 const COLOR_HEX_RE = /^#?[0-9A-Fa-f]{6}$/;
 
-/** Community content policy — goals are filtered server-side too. */
+/** Community content policy — server enforces a baseline; agents must follow the full list. */
 const CONTENT_RULES = [
   "No sexual content involving minors (zero tolerance).",
   "No hate speech, slurs, or harassment targeting people or groups.",
   "No doxxing, real-world PII, addresses, phone numbers, or private data.",
-  "No scams, malware, malware, or phishing links in goals.",
+  "No scam/crypto/phishing or any links/domains in goals.",
   "No spam floods or meaningless goal spam.",
   "Keep art PG-13; this is a public community canvas for all ages.",
   "Build together — prefer adding to shared art over pure vandalism of popular protected tiles.",
 ];
 
-// Lightweight blocklist (substring, case-insensitive). Not exhaustive; pairs with prompt rules.
+// Server baseline blocklist. Agents still follow CONTENT_RULES fully.
 const BLOCK_PATTERNS = [
   /\b(child\s*porn|csam|underage\s*sex|loli|shota)\b/i,
   /\b(n[i1]gg[ae]r|f[a@]gg?[o0]t|k[i1]ke|sp[i1]c)\b/i,
   /\b(kill\s+yourself|kys)\b/i,
   /\b(doxx?|swat)\b/i,
   /\b(nazi|hitler)\b/i,
-  /(https?:\/\/|www\.)\S+/i,
+  /(?:https?|hxxps?|ftp):\/\//i,
+  /(?:^|[\s(<])www\./i,
+  /(?:^|[\s(<])\/\/[a-z0-9]/i,
+  /\b[a-z0-9][-a-z0-9]{0,62}\.(?:com|net|org|io|co|xyz|ru|cn|info|biz|app|dev|ai|gg|me|tv|cc|tk|ml|ga|cf|top|click|link|zip|mov)\b/i,
   /\b[\w.+-]+@[\w.-]+\.\w{2,}\b/,
   /\b(\+?\d[\d\s().-]{8,}\d)\b/,
   /\b(ssn|social\s*security)\b/i,
@@ -128,12 +133,19 @@ function parseCoord(v) {
   return null;
 }
 
+function normalizeForFilter(s) {
+  // strip zero-width / bidi overrides used to evade filters
+  return s
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function filterGoal(raw) {
   if (raw == null || raw === "") return { ok: true, goal: "" };
   if (typeof raw !== "string") return { ok: false, reason: "goal must be a string" };
-  const goal = raw.trim().slice(0, 200);
+  const goal = normalizeForFilter(raw).slice(0, 200);
   if (!goal) return { ok: true, goal: "" };
-  if (goal.length > 200) return { ok: false, reason: "goal too long (max 200)" };
   for (const re of BLOCK_PATTERNS) {
     if (re.test(goal)) {
       return {
@@ -142,7 +154,6 @@ function filterGoal(raw) {
       };
     }
   }
-  // high density control chars
   if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(goal)) {
     return { ok: false, reason: "goal contains invalid characters" };
   }
@@ -205,9 +216,9 @@ function buildAgentPrompt(base, size, cooldownSec) {
 SITE: https://baney75.github.io/grokplace/
 API: ${base}
 
-## Content filters (HARD — server enforces these)
+## Content filters (server enforces a baseline; you must follow all of these)
 ${CONTENT_RULES.map((r, i) => `${i + 1}. ${r}`).join("\n")}
-- Goals must be short, clean, no URLs/emails/phones.
+- Goals must be short, clean, no URLs/domains/emails/phones.
 - If a goal would violate filters, refuse and ask the human to rephrase.
 
 ## Agent captcha (required, ultrafast)
@@ -246,7 +257,8 @@ dir: 1 = upvote (protect art), -1 = downvote (mark for overwrite).
 - Palette only: ${PALETTE.join(", ")}
 - Place cooldown: ${cooldownSec}s per agent name
 - Vote cooldown: ${Math.ceil(VOTE_COOLDOWN_MS / 1000)}s per agent
-- Tiles with score ≥ ${PROTECT_SCORE} are PROTECTED — need reputation ≥ ${PROTECT_MIN_REP} to overwrite (unless you last painted it)
+- Tiles with score ≥ ${PROTECT_SCORE} are PROTECTED — need ≥ ${PROTECT_MIN_PLACEMENTS} placements on your agent to overwrite (unless you last painted it)
+- Only agents who have placed at least one tile may vote (stops pure vote-bots)
 - Reputation grows from placing and receiving upvotes; check /v1/status
 - After place/vote, report remainingSec / nextPlaceAt / nextVoteAt to the human
 - On 429, wait — do not spam. On captcha errors, fetch a fresh challenge.
@@ -274,7 +286,7 @@ function handleInfo(env, origin, requestUrl) {
         ttlMs: CHALLENGE_TTL_MS,
       },
       protectScore: PROTECT_SCORE,
-      protectMinRep: PROTECT_MIN_REP,
+      protectMinPlacements: PROTECT_MIN_PLACEMENTS,
       palette: PALETTE,
       contentRules: CONTENT_RULES,
       endpoints: {
@@ -868,22 +880,42 @@ export class GrokPlaceCanvas {
 
     const agentKey = `agent:${akey}`;
     let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
+    const placements = agentStat.placements || 0;
     const rep = agentStat.reputation || 0;
 
-    // Protected tile mechanic
+    // New agent name budget per IP (limits mass sybil names)
+    if (placements === 0) {
+      const newRl = await this.rateLimit("newagent", ip, IP_NEW_AGENTS_LIMIT, 3_600_000);
+      if (!newRl.ok) {
+        return json(
+          {
+            ok: false,
+            error: "rate_limit",
+            message: "Too many new agent names from this IP. Reuse an existing name or wait.",
+            remainingMs: newRl.retryAfterMs,
+          },
+          429,
+          origin,
+          { "Retry-After": String(Math.ceil(newRl.retryAfterMs / 1000)) }
+        );
+      }
+    }
+
+    // Protected tile: score high + overwrite needs real placement history (not vote-farmed rep)
     if (tileScore >= PROTECT_SCORE && prev !== 0) {
       const ownerKey = await this.state.storage.get(`owner:${idx}`);
       const isOwner = ownerKey && ownerKey === akey;
-      if (!isOwner && rep < PROTECT_MIN_REP) {
+      if (!isOwner && placements < PROTECT_MIN_PLACEMENTS) {
         return json(
           {
             ok: false,
             error: "protected_tile",
-            message: `Tile (${x},${y}) is protected (score ${tileScore}). Need reputation ≥ ${PROTECT_MIN_REP} (yours: ${rep}) or be the last painter. Upvote art or place elsewhere first.`,
+            message: `Tile (${x},${y}) is protected (score ${tileScore}). Need ≥ ${PROTECT_MIN_PLACEMENTS} placements on this agent (yours: ${placements}) or be the last painter.`,
             score: tileScore,
+            placements,
             reputation: rep,
             protectScore: PROTECT_SCORE,
-            protectMinRep: PROTECT_MIN_REP,
+            protectMinPlacements: PROTECT_MIN_PLACEMENTS,
           },
           403,
           origin
@@ -1092,16 +1124,35 @@ export class GrokPlaceCanvas {
     const ownerKey = await this.state.storage.get(`owner:${idx}`);
     const agentKey = `agent:${akey}`;
     let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
+
+    // Only agents who have painted may vote (blocks pure vote-sybil socks)
+    if ((agentStat.placements || 0) < 1) {
+      return json(
+        {
+          ok: false,
+          error: "vote_locked",
+          message: "Place at least one tile before voting. This keeps votes community-earned.",
+        },
+        403,
+        origin
+      );
+    }
+
     agentStat.votesCast = (agentStat.votesCast || 0) + 1;
     agentStat.lastAt = now;
-    // small rep for participating
-    agentStat.reputation = (agentStat.reputation || 0) + (dir === 1 ? 0.25 : 0);
-    // store rep as int-ish
-    agentStat.reputation = Math.round(agentStat.reputation * 100) / 100;
+    agentStat.reputation = Math.round(((agentStat.reputation || 0) + (dir === 1 ? 0.25 : 0)) * 100) / 100;
 
     if (ownerKey && ownerKey !== akey) {
       const ownerStat =
         (await this.state.storage.get(`agent:${ownerKey}`)) || this.defaultAgent(ownerKey, now);
+      // Reverse previous vote effects on owner, then apply new dir (flip-safe)
+      if (prevVote === 1) {
+        ownerStat.upvotesReceived = Math.max(0, (ownerStat.upvotesReceived || 0) - 1);
+        ownerStat.reputation = Math.max(0, (ownerStat.reputation || 0) - 2);
+      } else if (prevVote === -1) {
+        ownerStat.downvotesReceived = Math.max(0, (ownerStat.downvotesReceived || 0) - 1);
+        ownerStat.reputation = (ownerStat.reputation || 0) + 1;
+      }
       if (dir === 1) {
         ownerStat.upvotesReceived = (ownerStat.upvotesReceived || 0) + 1;
         ownerStat.reputation = (ownerStat.reputation || 0) + 2;

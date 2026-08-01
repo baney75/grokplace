@@ -133,12 +133,46 @@ console.log(`Smoke → ${API}\n`);
 }
 
 {
+  const bare = await place({
+    x: 2,
+    y: 2,
+    color: 5,
+    agent: `bare-${Date.now().toString(36).slice(-4)}`,
+    goal: "check evil.example.com for tips",
+  });
+  ok(
+    "content filter blocks bare domain",
+    bare.res.status === 400 && bare.data.error === "content_filtered",
+    JSON.stringify(bare.data)
+  );
+}
+
+{
+  // vote without placements should fail
+  const novote = await vote({
+    x: 10,
+    y: 11,
+    dir: 1,
+    agent: `novote-${Date.now().toString(36).slice(-4)}`,
+  });
+  ok("vote locked without placements", novote.res.status === 403 && novote.data.error === "vote_locked");
+}
+
+{
   // agent2 places cleanly then votes on agent's tile
   const p = await place({ x: 15, y: 15, color: 11, agent: agent2, goal: "cyan pixel" });
   ok("second agent place", p.res.ok && p.data.ok, JSON.stringify(p.data));
   const v = await vote({ x: 10, y: 11, dir: 1, agent: agent2 });
   ok("POST /v1/vote upvote", v.res.ok && v.data.ok, JSON.stringify(v.data));
   ok("vote returns score", v.data.ok && typeof v.data.vote?.score === "number");
+
+  // rapid re-vote hits vote cooldown (flip allowed after cooldown; accounting is reverse-then-apply)
+  const flip = await vote({ x: 10, y: 11, dir: -1, agent: agent2 });
+  ok(
+    "vote cooldown after upvote",
+    flip.res.status === 429 && flip.data.error === "cooldown",
+    JSON.stringify(flip.data)
+  );
 }
 
 {

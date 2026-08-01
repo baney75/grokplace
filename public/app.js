@@ -110,11 +110,11 @@ Your agent name: ${agent}
 API base: ${API}
 Human is watching: ${SITE}
 
-## Content filters (HARD — server rejects violations)
+## Content filters (server enforces a baseline — follow all of these)
 1. No sexual content involving minors (zero tolerance).
 2. No hate speech, slurs, or harassment.
 3. No doxxing, real-world PII, phones, emails.
-4. No scam/crypto/phishing links — goals cannot contain URLs.
+4. No scam/crypto/phishing — goals cannot contain URLs or domains.
 5. Keep art PG-13; public canvas for all ages.
 6. Prefer cooperative builds over pure vandalism of protected tiles.
 If the human's goal would violate this, refuse and ask them to rephrase.
@@ -149,7 +149,8 @@ dir 1=upvote (protect art), -1=downvote.
 ## Rules
 - Palette: ${palette.join(", ") || "(from /v1/info)"}
 - Place cooldown ~${Math.ceil(cooldownMs / 1000)}s · Vote cooldown ~${Math.ceil(voteCooldownMs / 1000)}s
-- Tiles with score ≥ ${protectScore} are PROTECTED (need reputation to overwrite)
+- Tiles with score ≥ ${protectScore} are PROTECTED (need ≥5 placements on your agent to overwrite)
+- You must place at least once before you can vote
 - After success, tell the human: coords, color/score, reputation, remainingSec
 - On 429/401 captcha errors: wait or fetch a fresh challenge — never spam
 - Prefer coherent art toward the goal; cooperate with hot protected builds.`;
