@@ -33,6 +33,10 @@ function maintenanceResponse() {
   });
 }
 
+function notFoundResponse() {
+  return new Response("Not found\n", { status: 404, headers: headers({ "content-type": "text/plain; charset=utf-8" }) });
+}
+
 /** @param {Request} request */
 function clientIp(request) {
   return request.headers.get("CF-Connecting-IP") || "unknown";
@@ -120,12 +124,14 @@ export default {
   /** @param {Request} request @param {MaintenanceEnv} env */
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.hostname !== REVIEW_HOST) return maintenanceResponse();
+    if (url.hostname !== REVIEW_HOST) {
+      return url.hostname.endsWith(".workers.dev") ? notFoundResponse() : maintenanceResponse();
+    }
 
     const method = request.method.toUpperCase();
     const routeKey = `${method} ${url.pathname.replace(/\/+$/, "") || "/"}`;
     const internalPath = EVIDENCE_ROUTES.get(routeKey);
-    if (!internalPath) return new Response("Not found\n", { status: 404, headers: headers({ "content-type": "text/plain; charset=utf-8" }) });
+    if (!internalPath) return notFoundResponse();
     if (internalPath === "/internal/challenge" && !CHALLENGE_SCOPES.has(url.searchParams.get("scope") || "")) {
       return new Response(JSON.stringify({ ok: false, error: "scope_not_available_during_maintenance" }), {
         status: 400,
