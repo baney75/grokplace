@@ -1,6 +1,7 @@
 /**
- * grok/place ambient music — legal YouTube iframe API + Spotify embeds only.
- * Designed for fullscreen BG monitors and background tabs.
+ * grok/place ambient music — LEGAL playback only.
+ * Official YouTube IFrame API + Spotify open.spotify.com/embed widgets.
+ * Never download, rehost, proxy, or load pirate/mirror URLs.
  */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
@@ -24,8 +25,33 @@
     ytHost: document.getElementById("yt-player"),
     spHost: document.getElementById("sp-player"),
     legal: document.getElementById("music-legal"),
+    legalAck: document.getElementById("music-legal-ack"),
     agent: document.getElementById("agent-name"),
   };
+
+  /** Defense-in-depth: only load iframes from official embed hosts we rebuild ourselves */
+  function isLegalEmbedUrl(url, source) {
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "https:") return false;
+      if (source === "youtube") {
+        return (
+          (u.hostname === "www.youtube.com" || u.hostname === "youtube.com") &&
+          u.pathname.startsWith("/embed/") &&
+          /^\/embed\/[\w-]{11}$/.test(u.pathname)
+        );
+      }
+      if (source === "spotify") {
+        return (
+          u.hostname === "open.spotify.com" &&
+          /^\/embed\/(track|album|playlist|episode)\/[a-zA-Z0-9]{10,32}$/.test(u.pathname)
+        );
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
 
   if (!els.dock) return;
 
@@ -107,13 +133,20 @@
   }
 
   function mountYoutube(track) {
+    if (!track || track.source !== "youtube" || !/^[\w-]{11}$/.test(track.ref || "")) {
+      toast("Blocked non-legal YouTube reference");
+      return;
+    }
+    // Always rebuild embed URL client-side (never trust arbitrary src)
+    const embedUrl = `https://www.youtube.com/embed/${track.ref}?enablejsapi=1&rel=0&modestbranding=1&playsinline=1`;
+    if (!isLegalEmbedUrl(embedUrl, "youtube")) return;
+
     loadYtApi();
     if (els.spHost) els.spHost.hidden = true;
     if (els.ytHost) els.ytHost.hidden = false;
     if (!window.YT || !window.YT.Player) {
-      // API not ready — placeholder iframe (still legal official embed)
       if (els.ytHost) {
-        els.ytHost.innerHTML = `<iframe title="YouTube" src="${track.embedUrl}&autoplay=1&mute=${
+        els.ytHost.innerHTML = `<iframe title="YouTube official embed" src="${embedUrl}&autoplay=1&mute=${
           muted ? 1 : 0
         }" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>`;
       }
@@ -125,6 +158,7 @@
     els.ytHost.appendChild(div);
     ytPlayer = new window.YT.Player("yt-player-inner", {
       videoId: track.ref,
+      host: "https://www.youtube.com",
       playerVars: {
         autoplay: 1,
         rel: 0,
@@ -144,12 +178,10 @@
           }
         },
         onStateChange: (e) => {
-          // 0 = ended
-          if (e.data === 0) {
-            advance("ended");
-          }
+          if (e.data === 0) advance("ended");
         },
         onError: () => {
+          // Rights/region blocks etc. — skip, do not try mirrors
           advance("ended");
         },
       },
@@ -157,6 +189,17 @@
   }
 
   function mountSpotify(track) {
+    if (!track || track.source !== "spotify") return;
+    const parts = String(track.ref || "").split("/");
+    const kind = parts[0];
+    const id = parts[1];
+    if (!["track", "album", "playlist", "episode"].includes(kind) || !/^[a-zA-Z0-9]{10,32}$/.test(id || "")) {
+      toast("Blocked non-legal Spotify reference");
+      return;
+    }
+    const embedUrl = `https://open.spotify.com/embed/${kind}/${id}?utm_source=generator&theme=0`;
+    if (!isLegalEmbedUrl(embedUrl, "spotify")) return;
+
     if (els.ytHost) els.ytHost.hidden = true;
     if (ytPlayer && typeof ytPlayer.destroy === "function") {
       try {
@@ -168,8 +211,8 @@
     }
     if (!els.spHost) return;
     els.spHost.hidden = false;
-    // Official Spotify embed — user may need one click to start (browser policy)
-    els.spHost.innerHTML = `<iframe title="Spotify" style="border-radius:12px" src="${track.embedUrl}" width="100%" height="152" frameBorder="0" allowfullscreen allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>`;
+    // Official Spotify embed widget only
+    els.spHost.innerHTML = `<iframe title="Spotify official embed" style="border-radius:12px" src="${embedUrl}" width="100%" height="152" frameBorder="0" allowfullscreen allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>`;
   }
 
   function renderNow(track) {
@@ -254,6 +297,10 @@
       toast("Set an agent name first (sidebar).");
       return;
     }
+    if (els.legalAck && !els.legalAck.checked) {
+      toast("Confirm the legal checkbox: official YouTube/Spotify only.");
+      return;
+    }
     if (els.btnSubmit) els.btnSubmit.disabled = true;
     try {
       const proof = await solveCaptcha();
@@ -264,6 +311,8 @@
           url,
           title,
           agent,
+          legal: true,
+          legalAck: true,
           challengeId: proof.challengeId,
           nonce: proof.nonce,
         }),
@@ -383,7 +432,7 @@
 
   if (els.legal) {
     els.legal.textContent =
-      "Legal: official YouTube & Spotify embeds only. We never download or rehost audio.";
+      "LEGAL: Official YouTube embed + Spotify embed widgets only. No downloads, rehosting, proxies, or pirate links. Rights stay with the platforms and rights-holders.";
   }
 
   setMuted(muted);

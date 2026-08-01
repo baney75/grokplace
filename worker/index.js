@@ -343,9 +343,56 @@ function parseAgent(name) {
 }
 
 /**
- * Legal streaming only: official YouTube / Spotify public URLs → embed ids.
- * We never host or download audio.
+ * LEGAL MUSIC POLICY
+ * - Playback ONLY via official YouTube IFrame Player / embed URLs and Spotify open.spotify.com/embed widgets.
+ * - grok/place never downloads, proxies, rehosts, rips, or transcodes audio/video.
+ * - Submitters must only share links that are already public on those platforms; rights stay with the platforms/rights-holders.
+ * - No third-party downloaders, mirrors, or direct media file URLs.
  */
+const MUSIC_LEGAL =
+  "Official YouTube iframe embed + Spotify open.spotify.com/embed only. No downloads, rehosting, proxies, or pirate sources.";
+
+const YT_ID_RE = /^[\w-]{11}$/;
+const SP_ID_RE = /^[a-zA-Z0-9]{10,32}$/;
+const SP_KINDS = new Set(["track", "album", "playlist", "episode"]);
+
+/** Titles that look like piracy / offline rip — reject */
+const MUSIC_PIRACY_TITLE =
+  /\b(download|downloading|torrent|warez|pirate|piracy|ripped|rip\b|youtube-?dl|y2mate|savefrom|mp3\s*free|free\s*mp3|flac\s*free|\.mp3|\.flac|\.wav|mega\.nz|mediafire|zippyshare|gofile)\b/i;
+
+function youtubeEmbedUrl(id) {
+  // Canonical official embed host only (www.youtube.com/embed/…)
+  return `https://www.youtube.com/embed/${id}?enablejsapi=1&rel=0&modestbranding=1&playsinline=1`;
+}
+
+function spotifyEmbedUrl(kind, id) {
+  return `https://open.spotify.com/embed/${kind}/${id}?utm_source=generator&theme=0`;
+}
+
+function rebuildLegalEmbed(track) {
+  if (!track || !track.source || !track.ref) return null;
+  if (track.source === "youtube" && YT_ID_RE.test(track.ref)) {
+    return {
+      ...track,
+      canonical: `https://www.youtube.com/watch?v=${track.ref}`,
+      embedUrl: youtubeEmbedUrl(track.ref),
+    };
+  }
+  if (track.source === "spotify") {
+    const [kind, id] = String(track.ref).split("/");
+    if (SP_KINDS.has(kind) && SP_ID_RE.test(id || "")) {
+      return {
+        ...track,
+        kind,
+        spotifyId: id,
+        canonical: `https://open.spotify.com/${kind}/${id}`,
+        embedUrl: spotifyEmbedUrl(kind, id),
+      };
+    }
+  }
+  return null;
+}
+
 function parseMusicUrl(raw) {
   if (typeof raw !== "string") return null;
   let u;
@@ -354,16 +401,28 @@ function parseMusicUrl(raw) {
   } catch {
     return null;
   }
+  // HTTPS only — no insecure or weird schemes
+  if (u.protocol !== "https:") return null;
+
   const host = u.hostname.replace(/^www\./, "").toLowerCase();
+
+  // Reject obvious proxy/download front-ends even if path looks like youtube
+  if (
+    /y2mate|savefrom|ssyoutube|yt1s|mp3|download|piped\.|invidious|hooktube|genyoutube/i.test(
+      host + u.pathname
+    )
+  ) {
+    return null;
+  }
 
   if (host === "youtu.be") {
     const id = u.pathname.replace(/^\//, "").split("/")[0];
-    if (/^[\w-]{11}$/.test(id)) {
+    if (YT_ID_RE.test(id)) {
       return {
         source: "youtube",
         ref: id,
         canonical: `https://www.youtube.com/watch?v=${id}`,
-        embedUrl: `https://www.youtube.com/embed/${id}?enablejsapi=1&rel=0&modestbranding=1&playsinline=1`,
+        embedUrl: youtubeEmbedUrl(id),
       };
     }
   }
@@ -371,12 +430,12 @@ function parseMusicUrl(raw) {
     let id = u.searchParams.get("v");
     if (!id && u.pathname.startsWith("/embed/")) id = u.pathname.split("/")[2];
     if (!id && u.pathname.startsWith("/shorts/")) id = u.pathname.split("/")[2];
-    if (id && /^[\w-]{11}$/.test(id)) {
+    if (id && YT_ID_RE.test(id)) {
       return {
         source: "youtube",
         ref: id,
         canonical: `https://www.youtube.com/watch?v=${id}`,
-        embedUrl: `https://www.youtube.com/embed/${id}?enablejsapi=1&rel=0&modestbranding=1&playsinline=1`,
+        embedUrl: youtubeEmbedUrl(id),
       };
     }
   }
@@ -387,18 +446,14 @@ function parseMusicUrl(raw) {
     if (parts[0] && parts[0].startsWith("intl-")) i = 1;
     const kind = parts[i];
     const id = parts[i + 1];
-    if (
-      id &&
-      /^[a-zA-Z0-9]{10,32}$/.test(id) &&
-      ["track", "album", "playlist", "episode"].includes(kind)
-    ) {
+    if (id && SP_ID_RE.test(id) && SP_KINDS.has(kind)) {
       return {
         source: "spotify",
         ref: `${kind}/${id}`,
         kind,
         spotifyId: id,
         canonical: `https://open.spotify.com/${kind}/${id}`,
-        embedUrl: `https://open.spotify.com/embed/${kind}/${id}?utm_source=generator&theme=0`,
+        embedUrl: spotifyEmbedUrl(kind, id),
       };
     }
   }
@@ -516,12 +571,14 @@ dir: 1 = upvote (protect art), -1 = downvote (mark for overwrite).
 - Prefer coherent clean art toward the human's goal; cooperate with popular protected builds.
 - Report unsafe tiles: POST ${base}/v1/report with x,y,reason,agent + captcha (3 unique reports blanks the tile).
 
-## Community music (legal embeds only)
-- Submit YouTube or Spotify links only (official embeds — never pirate/download).
-- GET ${base}/v1/music — now playing + queue
-- POST ${base}/v1/music/submit — body: url, title?, agent, challengeId, nonce
-- POST ${base}/v1/music/vote — body: songId, agent, challengeId, nonce
-- Song titles/goals still pass the all-ages filter.`;
+## Community music (MUST BE LEGAL)
+- ONLY official public https YouTube or Spotify links. Playback is embed-only.
+- NEVER submit downloaders, MP3 hosts, torrents, or ripped files.
+- Submit with legal:true: POST ${base}/v1/music/submit
+  body: { url, title?, agent, legal:true, challengeId, nonce }
+- Vote: POST ${base}/v1/music/vote — body: songId, agent, challengeId, nonce
+- GET ${base}/v1/music — now + queue
+- Titles pass all-ages + anti-piracy filters.`;
 }
 
 function handleInfo(env, origin, requestUrl) {
@@ -571,8 +628,16 @@ function handleInfo(env, origin, requestUrl) {
         info: `GET ${base}/v1/info`,
       },
       music: {
-        legal: "Official YouTube iframe + Spotify embed only. No rehosting or downloads.",
+        legal: MUSIC_LEGAL,
+        policy: [
+          "Playback only through official YouTube embed (youtube.com/embed) and Spotify embed (open.spotify.com/embed).",
+          "grok/place does not download, rehost, proxy, or rip audio/video.",
+          "Only https links on youtube.com, youtu.be, music.youtube.com, open.spotify.com are accepted.",
+          "Submitters must not share pirated / offline-file links; titles promoting downloads are rejected.",
+          "Rights remain with YouTube, Spotify, and rights-holders; blocked/region-locked content is handled by those platforms.",
+        ],
         allowed: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
+        requiresLegalAck: true,
       },
       placeBody: {
         x: "0..size-1",
@@ -1739,26 +1804,33 @@ export class GrokPlaceCanvas {
 
   async promoteNext(m, reason) {
     const sorted = this.sortQueue(m.queue || []);
-    const next = sorted[0] || null;
+    let next = sorted[0] || null;
+    // Skip any corrupt/non-legal queue entries
+    while (next && !rebuildLegalEmbed(next)) {
+      sorted.shift();
+      next = sorted[0] || null;
+    }
     if (next) {
+      const legal = rebuildLegalEmbed(next);
       m.queue = sorted.slice(1);
       const startedAt = Date.now();
       m.now = {
-        id: next.id,
-        source: next.source,
-        ref: next.ref,
-        kind: next.kind || null,
-        title: next.title,
-        canonical: next.canonical,
-        embedUrl: next.embedUrl,
-        submittedBy: next.submittedBy,
-        votes: next.votes || 0,
+        id: legal.id,
+        source: legal.source,
+        ref: legal.ref,
+        kind: legal.kind || null,
+        title: legal.title,
+        canonical: legal.canonical,
+        embedUrl: legal.embedUrl,
+        submittedBy: legal.submittedBy,
+        votes: legal.votes || 0,
         startedAt,
         endsAt: startedAt + MUSIC_DEFAULT_MS,
         reason,
       };
     } else {
       m.now = null;
+      m.queue = sorted;
     }
     m.version = (m.version || 0) + 1;
     await this.state.storage.put("music", m);
@@ -1767,15 +1839,23 @@ export class GrokPlaceCanvas {
 
   async handleMusicGet(origin) {
     const m = await this.getMusic();
-    const queue = this.sortQueue(m.queue || []);
+    // Rebuild embed URLs server-side so clients never trust stored iframe targets
+    const now = m.now ? rebuildLegalEmbed(m.now) : null;
+    const queue = this.sortQueue(m.queue || [])
+      .map((s) => rebuildLegalEmbed(s))
+      .filter(Boolean);
     return json(
       {
         ok: true,
-        now: m.now,
+        now,
         queue,
         version: m.version || 0,
-        legal:
-          "Playback uses official YouTube iframe API and Spotify embed widgets only. grok/place does not download, rehost, or stream audio itself.",
+        legal: MUSIC_LEGAL,
+        policy: [
+          "Official YouTube / Spotify embeds only.",
+          "No download, rehost, proxy, or pirate sources.",
+          "HTTPS official hosts only.",
+        ],
         allowedHosts: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
         defaults: {
           trackMs: MUSIC_DEFAULT_MS,
@@ -1819,6 +1899,21 @@ export class GrokPlaceCanvas {
     const agent = parsed.agent;
     const akey = agent.toLowerCase();
 
+    // Explicit legal acknowledgement required (API + UI checkbox)
+    if (body.legal !== true && body.legal !== "true" && body.legalAck !== true) {
+      return json(
+        {
+          ok: false,
+          error: "legal_ack_required",
+          message:
+            "Set legal:true confirming this is an official public YouTube/Spotify link and you are not submitting pirated/offline files. Playback is embed-only.",
+          legal: MUSIC_LEGAL,
+        },
+        400,
+        origin
+      );
+    }
+
     const media = parseMusicUrl(body.url || body.link || body.href || "");
     if (!media) {
       return json(
@@ -1826,7 +1921,8 @@ export class GrokPlaceCanvas {
           ok: false,
           error: "bad_url",
           message:
-            "Only official YouTube or Spotify links are allowed (youtube.com, youtu.be, open.spotify.com).",
+            "Only https links on official YouTube (youtube.com / youtu.be / music.youtube.com) or Spotify (open.spotify.com) are allowed. No MP3s, torrents, or download sites.",
+          legal: MUSIC_LEGAL,
         },
         400,
         origin
@@ -1843,6 +1939,18 @@ export class GrokPlaceCanvas {
       );
     }
     title = (titleScan.value || `${media.source} track`).slice(0, 120);
+    if (MUSIC_PIRACY_TITLE.test(title)) {
+      return json(
+        {
+          ok: false,
+          error: "content_filtered",
+          message: "Title looks like a pirate/download rip — only legal streaming links are allowed.",
+          legal: MUSIC_LEGAL,
+        },
+        400,
+        origin
+      );
+    }
 
     const now = Date.now();
     const scd = `mscd:${akey}`;

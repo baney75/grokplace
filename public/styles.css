@@ -197,6 +197,20 @@ body.ambient .canvas-wrap {
   font-size: 0.85rem;
   color: var(--muted);
 }
+.legal-check {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin: 0.55rem 0 0.75rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+.legal-check input {
+  margin-top: 0.2rem;
+  accent-color: var(--good);
+}
+.legal-check span { line-height: 1.35; }
 .music-q-head {
   margin: 0.9rem 0 0.45rem;
   font-size: 0.92rem;

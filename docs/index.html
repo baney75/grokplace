@@ -132,7 +132,12 @@
 
         <section class="card music-card" id="music-panel">
           <h2>Community radio</h2>
-          <p class="music-blurb">Vote songs in · plays via <strong>official YouTube / Spotify embeds</strong> only (legal). Never downloaded or rehosted.</p>
+          <p class="music-blurb">
+            <strong>Must be legal.</strong> Only official public
+            <strong>YouTube</strong> or <strong>Spotify</strong> links.
+            Playback is their embed widgets only — we never download, rehost, or rip audio.
+            No MP3s, torrents, or download sites.
+          </p>
           <label class="field">
             <span>YouTube or Spotify URL</span>
             <input id="music-url" type="url" placeholder="https://www.youtube.com/watch?v=… or open.spotify.com/track/…" autocomplete="off" />
@@ -140,6 +145,10 @@
           <label class="field">
             <span>Title <em>(optional, clean)</em></span>
             <input id="music-song-title" type="text" maxlength="120" placeholder="e.g. chill instrumental" />
+          </label>
+          <label class="legal-check">
+            <input type="checkbox" id="music-legal-ack" />
+            <span>I confirm this is an official public YouTube/Spotify link (not a pirate download).</span>
           </label>
           <button type="button" class="primary" id="music-submit">Add to queue</button>
           <h3 class="music-q-head">Up next</h3>
