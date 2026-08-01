@@ -18,6 +18,7 @@ import {
   FAVICON_PNG_B64,
   FAVICON_PNG_DATA_URI,
   FAVICON_SVG_DATA_URI,
+  FAVICON_ICO_DATA_URI,
 } from "./favicon-embed.js";
 
 function b64ToBytes(b64) {
@@ -27,13 +28,13 @@ function b64ToBytes(b64) {
   return out;
 }
 
-const FAVICON_CACHE = "public, max-age=86400, stale-while-revalidate=604800";
-const FAVICON_VER = "5"; // bump when mark changes — cache-bust query on HTML links
+const FAVICON_CACHE = "public, max-age=3600, must-revalidate";
+const FAVICON_VER = "6"; // bump when mark changes — cache-bust query on HTML links
 
 function faviconResponse(kind) {
   if (kind === "svg") {
     const svg =
-      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0a0c10"/><rect x="0.5" y="0.5" width="31" height="31" rx="6.5" fill="none" stroke="#2dd4bf" stroke-opacity="0.45"/><rect x="5" y="5" width="10" height="10" rx="2" fill="#2dd4bf"/><rect x="17" y="5" width="10" height="10" rx="2" fill="#e2e8f0"/><rect x="5" y="17" width="10" height="10" rx="2" fill="#94a3b8"/><rect x="17" y="17" width="10" height="10" rx="2" fill="#38bdf8"/></svg>';
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#080a0e"/><rect x="5" y="5" width="10" height="10" rx="2" fill="#2dd4bf"/><rect x="17" y="5" width="10" height="10" rx="2" fill="#f8fafc"/><rect x="5" y="17" width="10" height="10" rx="2" fill="#94a3b8"/><rect x="17" y="17" width="10" height="10" rx="2" fill="#38bdf8"/></svg>';
     return new Response(svg, {
       headers: {
         "Content-Type": "image/svg+xml; charset=utf-8",
@@ -57,16 +58,28 @@ function faviconResponse(kind) {
   });
 }
 
-/** Icon <link> tags — data-URI first so the tab mark paints even if asset fetch lags. */
+/**
+ * Icon tags for the tab mark.
+ * Order matters: classic ICO (data + absolute /favicon.ico) first — Chrome/Arc/Safari
+ * often ignore SVG/PNG data URIs and default to a blank document glyph.
+ */
 function faviconHeadLinks() {
+  const base = "https://grokplace.barnlabs.net";
   return [
-    `<link rel="icon" href="${FAVICON_SVG_DATA_URI}" type="image/svg+xml" />`,
+    // 1) Inline classic ICO — paints even if every network request fails
+    `<link rel="icon" href="${FAVICON_ICO_DATA_URI}" sizes="16x16 32x32 48x48" type="image/x-icon" />`,
+    `<link rel="shortcut icon" href="${FAVICON_ICO_DATA_URI}" type="image/x-icon" />`,
+    // 2) Absolute root favicon (browsers + Arc cache this path hard)
+    `<link rel="icon" href="${base}/favicon.ico?v=${FAVICON_VER}" sizes="any" type="image/x-icon" />`,
+    `<link rel="shortcut icon" href="${base}/favicon.ico?v=${FAVICON_VER}" type="image/x-icon" />`,
+    // 3) PNG + SVG fallbacks (absolute + inline)
     `<link rel="icon" href="${FAVICON_PNG_DATA_URI}" type="image/png" sizes="32x32" />`,
-    `<link rel="icon" href="/favicon.ico?v=${FAVICON_VER}" sizes="any" type="image/x-icon" />`,
-    `<link rel="shortcut icon" href="/favicon.ico?v=${FAVICON_VER}" type="image/x-icon" />`,
-    `<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=${FAVICON_VER}" />`,
-    `<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=${FAVICON_VER}" sizes="180x180" />`,
-    `<link rel="manifest" href="/site.webmanifest?v=${FAVICON_VER}" />`,
+    `<link rel="icon" type="image/png" sizes="32x32" href="${base}/favicon-32.png?v=${FAVICON_VER}" />`,
+    `<link rel="icon" href="${FAVICON_SVG_DATA_URI}" type="image/svg+xml" />`,
+    `<link rel="apple-touch-icon" href="${base}/apple-touch-icon.png?v=${FAVICON_VER}" sizes="180x180" />`,
+    `<meta name="msapplication-TileColor" content="#0a0c10" />`,
+    `<meta name="msapplication-TileImage" content="${base}/icon-192.png?v=${FAVICON_VER}" />`,
+    `<link rel="manifest" href="${base}/site.webmanifest?v=${FAVICON_VER}" />`,
   ].join("\n  ");
 }
 
@@ -2561,7 +2574,8 @@ export default {
             status: 200,
             headers: {
               "Content-Type": "text/html; charset=utf-8",
-              "Cache-Control": "public, max-age=60",
+              // No-store so tab icon link tags always refresh (browsers cache favicons hard)
+              "Cache-Control": "no-store, max-age=0, must-revalidate",
               ...corsHeaders(origin),
             },
           });
