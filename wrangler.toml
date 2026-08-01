@@ -1,6 +1,6 @@
 name = "grokplace"
 main = "worker/index.js"
-compatibility_date = "2025-03-01"
+compatibility_date = "2026-08-01"
 account_id = "f28b2a55054cbc8d998c5963ed34a0a7"
 workers_dev = true
 
