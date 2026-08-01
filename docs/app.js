@@ -190,36 +190,39 @@ dir 1=upvote (protect art), -1=downvote.
   }
 
   function paint() {
-    const ctx = els.board.getContext("2d", { alpha: true });
-    // clear so empty cells show the dark checker behind the canvas
+    // Never pass options to getContext — re-calling with different attrs returns null in some engines
+    const ctx = els.board.getContext("2d");
+    if (!ctx || !board || !board.length) return;
+    // Void: transparent so the dark checker shows; painted cells opaque
     ctx.clearRect(0, 0, size, size);
     const img = ctx.createImageData(size, size);
     const data = img.data;
+    let painted = 0;
     for (let i = 0; i < board.length; i++) {
-      const o = i * 4;
-      const ci = board[i];
-      // Unpainted (0) stays transparent so the void checker shows — art pops
-      if (!ci) {
-        data[o + 3] = 0;
-        continue;
-      }
-      const hex = palette[ci] || "#FFFFFF";
+      const ci = board[i] | 0;
+      if (!ci) continue;
+      const hex = (palette && palette[ci]) || "#E50000";
       let r = parseInt(hex.slice(1, 3), 16);
       let g = parseInt(hex.slice(3, 5), 16);
       let b = parseInt(hex.slice(5, 7), 16);
-      // subtle gold tint for protected
-      if (scores[i] >= protectScore) {
+      if (scores && scores[i] >= protectScore) {
         r = Math.min(255, r + 28);
         g = Math.min(255, g + 18);
         b = Math.min(255, Math.floor(b * 0.85));
       }
+      const o = i * 4;
       data[o] = r;
       data[o + 1] = g;
       data[o + 2] = b;
       data[o + 3] = 255;
+      painted++;
     }
     ctx.putImageData(img, 0, 0);
     applyTransform();
+    if (painted === 0 && board.length) {
+      // defensive: should not happen when API has tiles
+      console.warn("grok/place: board decode painted 0 cells");
+    }
   }
 
   function applyTransform() {
@@ -443,16 +446,27 @@ dir 1=upvote (protect art), -1=downvote.
     if (els.statsVotes) els.statsVotes.textContent = String(data.totalVotes ?? 0);
 
     if (data.version !== version) {
+      if (!data.board) throw new Error("canvas missing board payload");
+      const next = decodeBoard(data.board);
+      if (next.length !== size * size) throw new Error("board size mismatch");
+      board = next;
+      if (data.scores) {
+        try {
+          scores = decodeScores(data.scores);
+        } catch {
+          scores = new Int16Array(size * size);
+        }
+      } else {
+        scores = new Int16Array(size * size);
+      }
       version = data.version;
-      board = decodeBoard(data.board);
-      if (data.scores) scores = decodeScores(data.scores);
-      else scores = new Int16Array(size * size);
       paint();
       renderPalette();
       refreshPrompt();
       if (!didAutoFocusArt) {
         didAutoFocusArt = true;
-        focusArt();
+        // after paint so layout is ready
+        requestAnimationFrame(() => focusArt());
       }
     }
   }
