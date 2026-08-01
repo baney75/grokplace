@@ -52,6 +52,56 @@ result = await award({ phase: "finalize", github: "owner", prNumber: 42, headSha
 check("identical finalize replay is idempotent", result.response.ok && result.data.already === true, JSON.stringify(result.data));
 result = await award({ phase: "finalize", github: "owner", prNumber: 42, headSha, mergeSha: "3".repeat(40) });
 check("conflicting merge SHA replay is rejected", result.response.status === 409 && result.data.error === "award_identity_conflict", JSON.stringify(result.data));
+
+const bountyStorage = new MemoryStorage({
+  maintainers: [{ github: "owner", agent: "agent-one", status: "active", awards: 0, bonusTilesEarned: 0 }],
+  "agent:agent-one": { name: "agent-one", bonusTiles: 0, placements: 1 },
+});
+const bountyCanvas = new GrokPlaceCanvas({ storage: bountyStorage }, { AWARD_SECRET: "test-award-secret" });
+async function bountyAward(body) {
+  const request = new Request("https://test/internal/maintain/award", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer test-award-secret" }, body: JSON.stringify(body) });
+  const response = await bountyCanvas.handleMaintainAward(request, "*");
+  return { response, data: await response.json() };
+}
+const bountyIdentity = {
+  phase: "reserve",
+  github: "owner",
+  prNumber: 701,
+  headSha: "7".repeat(40),
+  filesChanged: 1,
+  linesChanged: 3,
+  paths: ["README.md"],
+  bountyIssue: 77,
+  bountyApprovalCommentId: 8001,
+};
+result = await bountyAward({ ...bountyIdentity, bountyApprovalCommentId: undefined });
+check("bounty reservation requires both issue and owner approval identifiers", result.response.status === 400 && result.data.error === "bounty_evidence_pair_required", JSON.stringify(result.data));
+result = await bountyAward({ ...bountyIdentity, bountyIssue: "77" });
+check("bounty identifiers must be positive safe integers", result.response.status === 400 && result.data.error === "bad_bounty_evidence", JSON.stringify(result.data));
+result = await bountyAward(bountyIdentity);
+const firstBountyReservation = result.data.reservation;
+let bountyPointer = await bountyStorage.get("award:bounty:77");
+check("bounty reservation atomically records an exact durable issue binding", result.response.status === 201 && firstBountyReservation?.bountyIssue === 77 && bountyPointer?.reservationKey === "award:reservation:701:" + "7".repeat(40) && bountyPointer?.status === "reserved", JSON.stringify({ response: result.data, pointer: bountyPointer }));
+result = await bountyAward(bountyIdentity);
+check("exact bounty reservation replay is idempotent", result.response.ok && result.data.already === true && result.data.reserved === true, JSON.stringify(result.data));
+result = await bountyAward({ ...bountyIdentity, bountyApprovalCommentId: 8002 });
+check("a changed owner approval cannot alter a bound bounty reservation", result.response.status === 409 && result.data.error === "award_identity_conflict", JSON.stringify(result.data));
+result = await bountyAward({ ...bountyIdentity, prNumber: 702, headSha: "8".repeat(40) });
+check("one bounty cannot be reserved by a different PR or head", result.response.status === 409 && result.data.error === "bounty_claim_conflict", JSON.stringify(result.data));
+result = await bountyAward({ phase: "cancel", prNumber: 701, headSha: "7".repeat(40), reason: "PR closed" });
+bountyPointer = await bountyStorage.get("award:bounty:77");
+check("cancelling a bounty reservation preserves its audit record and releases the binding", result.response.ok && result.data.cancelled === true && result.data.reservation?.bountyIssue === 77 && bountyPointer?.status === "released", JSON.stringify({ response: result.data, pointer: bountyPointer }));
+const reclaimedBountyIdentity = { ...bountyIdentity, prNumber: 702, headSha: "8".repeat(40) };
+result = await bountyAward(reclaimedBountyIdentity);
+check("a released bounty can be reclaimed by a new exact reservation", result.response.status === 201 && result.data.reservation?.prNumber === 702, JSON.stringify(result.data));
+result = await bountyAward({ phase: "finalize", github: "owner", prNumber: 702, headSha: "8".repeat(40), mergeSha: "9".repeat(40) });
+bountyPointer = await bountyStorage.get("award:bounty:77");
+const finalizedBounty = await bountyStorage.get("award:pr:702");
+check("bounty finalization atomically records the award and immutable issue binding", result.response.ok && result.data.awarded === 10 && finalizedBounty?.bountyIssue === 77 && bountyPointer?.status === "awarded" && bountyPointer?.mergeSha === "9".repeat(40), JSON.stringify({ response: result.data, pointer: bountyPointer, award: finalizedBounty }));
+result = await bountyAward({ phase: "finalize", github: "owner", prNumber: 702, headSha: "8".repeat(40), mergeSha: "9".repeat(40) });
+check("exact bounty finalization replay is idempotent", result.response.ok && result.data.already === true && result.data.reservation?.bountyIssue === 77, JSON.stringify(result.data));
+result = await bountyAward({ ...bountyIdentity, prNumber: 703, headSha: "a".repeat(40) });
+check("an awarded bounty cannot be claimed again", result.response.status === 409 && result.data.error === "bounty_claim_conflict", JSON.stringify(result.data));
 await storage.put("agent:agent-one", { name: "agent-one", bonusTiles: 195, placements: 1 });
 result = await award({ ...identity, prNumber: 43, headSha: "4".repeat(40) });
 check("reservation refuses partial or overflowing awards", result.response.status === 429 && result.data.error === "bank_cap", JSON.stringify(result.data));

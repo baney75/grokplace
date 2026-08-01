@@ -29,6 +29,8 @@ jobs:
           npm run test:frontend
           npm run test:governance
           npm run test:award
+          npm run test:review-identity
+          npm run test:realtime
 
       - name: Classify paths + secret scan
         id: cls

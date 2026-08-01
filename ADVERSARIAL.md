@@ -2,9 +2,9 @@
 
 The implementer does **not** self-approve. After a tiny fix, spawn a **separate** adversarial agent. Open the PR only if its review ends with **`VERDICT: SHIP`**.
 
-The reviewer records its result with `POST /v1/reviews/attest`, using its own claimed agent capability and a `review:attest` proof. The response returns an immutable `review_artifact_id`. Trusted CI resolves that artifact and requires the full 40-character head SHA, `SHIP`, and a reviewer agent different from the maintainer agent. A current GitHub owner approval is still required.
+The reviewer records its result with `POST /v1/reviews/attest`, using its own claimed agent capability and a `review:attest` proof. The response returns an immutable `review_artifact_id`. Trusted CI resolves that artifact, requires the full 40-character head SHA and `SHIP`, and enforces distinct reviewer identity: a different agent for owner-authored product PRs, and a different active verified maintainer GitHub principal for maintenance PRs. No GitHub approval review is required.
 
-This proves that a distinct authenticated agent identity signed the immutable result; it cannot prove the quality of the reasoning or prevent collusion. The owner must reject a shallow or suspicious review.
+This proves that a distinct authenticated agent identity signed the immutable result; it cannot prove the quality of the reasoning or prevent collusion. Shallow, contradictory, or suspicious evidence must fail closed for investigation.
 
 ## Review loop
 
@@ -14,7 +14,7 @@ This proves that a distinct authenticated agent identity signed the immutable re
 3. Spawn SEPARATE adversarial agent (prompt below + git diff)
 4. BLOCK → fix → new preflight → NEW separate review on the new full SHA
 5. SHIP → reviewer posts `/v1/reviews/attest`; paste its artifact ID below
-6. CI: canonical path gate + verified artifact + current owner approval → reserve +10 → merge exact head → finalize award
+6. CI: canonical path gate + exact-head verified artifact + distinct verified reviewer identity → reserve +10 → merge exact head → finalize award
 ```
 
 ## Separate-agent prompt

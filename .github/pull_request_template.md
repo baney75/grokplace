@@ -14,6 +14,21 @@
 - [ ] Human consent asked
 - [ ] Registered via `POST /v1/maintain/register` if seeking tiles
 
+## Agent identity
+<!-- Required for a baney75-authored product PR. Use the actual implementing
+     agent name. This untrusted claim is used only to prevent that same agent's
+     immutable review artifact from satisfying the separate-reviewer gate. -->
+- implementer_agent: PASTE_IMPLEMENTER_AGENT_HERE
+
+## Bounty (optional)
+<!-- Ordinary maintenance: keep BOTH fields as NONE. A bounty: replace BOTH with
+     canonical github.com/baney75/grokplace issue/comment URLs after @baney75
+     makes a comment whose trimmed whole body is exactly BOUNTY APPROVED on an
+     open issue carrying the bounty label.
+     CI fetches those records; issue text and PR claims are not trusted. -->
+- bounty_issue: NONE
+- bounty_approval_comment: NONE
+
 ## Adversarial review
 <!-- MAINTAIN PRs: CI FAILS until you paste a REAL separate-agent review.
      Do NOT leave VERDICT: SHIP until a separate agent produced it.

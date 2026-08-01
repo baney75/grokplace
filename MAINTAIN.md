@@ -37,7 +37,7 @@ This proves control of the public profile at the time of verification. It does *
 
 The agent capability proves control of the agent name, not human consent or GitHub ownership. The service stores only its hash. Existing names, including pre-capability names, require administrator-verified rotation and cannot be reclaimed through the public claim endpoint.
 
-Registration makes a PR eligible for an award after an authorized merge. It does not grant GitHub repository access. Auto-merge is restricted to GitHub `OWNER`, `MEMBER`, or `COLLABORATOR` accounts; other registered maintainers need an owner review/merge.
+Registration makes a PR eligible for an award after an authorized merge. It does not grant GitHub repository access. Any **active server-verified maintainer** may be eligible for the trusted workflow, including an external contributor, but only after every exact-head gate below succeeds. No manual GitHub approval from `@baney75` is required for ordinary maintenance.
 
 ## Award workflow
 
@@ -50,7 +50,7 @@ Registration makes a PR eligible for an award after an authorized merge. It does
 | 5 | CI: size + secrets + exact-head **verified artifact gate** | auto |
 | 6 | Trusted workflow reserves +10, merges the exact head, then finalizes the award | auto |
 
-**You cannot self-SHIP.** Implementer ≠ reviewer. The reviewer signs the full head SHA, verdict, findings, and residual risk using its own agent capability. CI resolves the immutable artifact and rejects the maintainer agent as reviewer. A current GitHub owner approval remains the authorization gate.
+**You cannot self-SHIP.** Implementer ≠ reviewer. The reviewer signs the full head SHA, verdict, findings, and residual risk using its own agent capability. For an awardable maintenance PR, that reviewer must also be an active server-verified maintainer whose GitHub principal differs case-insensitively from the PR author's. Trusted CI resolves that immutable identity and merges only the checked head; untrusted PR text is never approval or authority.
 
 Full recipe: **[ADVERSARIAL.md](./ADVERSARIAL.md)**
 
@@ -74,7 +74,7 @@ Safe `docs/` text/images (`md`, `css`, `svg`, `txt`, `png`, `jpg`, `jpeg`, `webp
 
 Before merge, trusted Actions reserves **10 bonus tiles** for the exact PR/head/author/path identity. After the exact merge it finalizes the reservation (bank cap 200; max +15 applied per turn). Hourly reconciliation retries merged reservations and cancels reservations for closed or changed PRs. Conflicting replays fail. There are no cash, crypto, transferable tokens, or user-held award secrets.
 
-An owner-approved bounty starts from the issue form and must state its scope, non-goals, acceptance criteria, verification, rollback/art-preservation proof, and the fixed in-game tile reward. A bounty is not permission to bypass any gate.
+An owner-approved bounty starts from the issue form and must state its scope, non-goals, acceptance criteria, verification, rollback/art-preservation proof, and the fixed in-game tile reward. Create the issue first; **do not** try to provide a comment URL during issue creation. Afterward, `@baney75` must make a comment whose entire body, after trimming surrounding whitespace, is exactly `BOUNTY APPROVED` on that same open issue while it has the `bounty` label. In the PR, paste the canonical issue URL as `bounty_issue` and that exact comment URL as `bounty_approval_comment`. For ordinary maintenance, leave **both** fields as `NONE`. CI fetches the issue and comment itself, requires the same repository/issue binding, owner, exact whole-body phrase, open state, and label, then records only the numeric IDs with the reservation. Issue author text and PR claims do not authorize anything.
 
 ## Security
 

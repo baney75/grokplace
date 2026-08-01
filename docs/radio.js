@@ -12,13 +12,21 @@
   let nowTrack = null;
   let context = null;
   let masterGain = null;
-  let endTimer = 0;
   let pollTimer = 0;
   let musicRequest = null;
-  let advanceRequest = null;
   let pollingStopped = false;
+  let pollingPaused = Boolean(document.hidden);
   let refreshAfterPoll = false;
+  let musicFailures = 0;
+  let liveConnected = false;
+  let musicReadThisVisibility = false;
   const voices = new Set();
+  // Disconnected viewers retain the critic-reviewed 12/min fallback budget.
+  const MUSIC_POLL_MS = 30_000;
+  const MUSIC_BACKOFF_MAX_MS = 120_000;
+  // GET /v1/music also promotes an expired track, so this must cover the
+  // shortest valid composition even while the invalidation socket is healthy.
+  const LIVE_MUSIC_RECONCILE_MS = 30_000;
 
   function noteFrequency(note) {
     if (typeof note !== "string" || !NOTE_RE.test(note)) return null;
@@ -73,8 +81,6 @@
   }
 
   function clearPlayback() {
-    clearTimeout(endTimer);
-    endTimer = 0;
     for (const voice of [...voices]) releaseVoice(voice, true);
   }
 
@@ -108,7 +114,7 @@
     if (!composition || !Number.isFinite(startedAt) || !Number.isFinite(endsAt) || endsAt <= startedAt) return;
     const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
     const remaining = (endsAt - Date.now()) / 1000;
-    if (remaining <= 0) { advance(); return; }
+    if (remaining <= 0) return;
     const stepSeconds = 60 / composition.bpm / 4;
     const audioOrigin = context.currentTime + 0.025;
     for (const note of composition.notes) {
@@ -119,29 +125,50 @@
       if (audibleEnd <= audibleStart) continue;
       scheduleVoice(note, composition.waveform, audioOrigin + Math.max(0, noteStart - elapsed), audibleEnd - audibleStart);
     }
-    endTimer = setTimeout(advance, Math.max(0, endsAt - Date.now() - 75));
   }
 
   async function fetchMusic(signal) {
     const response = await fetch(`${API}/v1/music`, { cache: "no-store", signal });
-    if (!response.ok) return;
+    if (!response.ok) throw new Error(`music ${response.status}`);
     const data = await response.json();
     if (!data?.ok) return;
     const next = data.now || null;
     const changed = next?.id !== nowTrack?.id || next?.startedAt !== nowTrack?.startedAt;
     nowTrack = next;
+    musicReadThisVisibility = true;
     if (changed) scheduleTrack(nowTrack);
   }
 
   function scheduleMusicPoll(delay) {
-    if (pollingStopped) return;
+    if (!isPollingActive()) return;
     clearTimeout(pollTimer);
-    pollTimer = setTimeout(pollMusic, delay);
+    pollTimer = setTimeout(() => {
+      pollTimer = 0;
+      void pollMusic();
+    }, delay);
+  }
+
+  function isPollingActive() {
+    return !pollingStopped && !pollingPaused && !document.hidden;
+  }
+
+  function musicBackoffDelay() {
+    const base = liveConnected ? LIVE_MUSIC_RECONCILE_MS : MUSIC_POLL_MS;
+    return Math.min(MUSIC_BACKOFF_MAX_MS, base * (2 ** Math.min(musicFailures, 2)));
+  }
+
+  function refreshMusicNow() {
+    if (!isPollingActive()) return;
+    if (musicRequest) {
+      refreshAfterPoll = true;
+      return;
+    }
+    scheduleMusicPoll(0);
   }
 
   async function pollMusic() {
     pollTimer = 0;
-    if (pollingStopped) return;
+    if (!isPollingActive()) return;
     if (musicRequest) {
       refreshAfterPoll = true;
       return;
@@ -150,37 +177,16 @@
     musicRequest = controller;
     try {
       await fetchMusic(controller.signal);
-    } catch {
-      /* Radio failure must not affect the canvas. */
+      musicFailures = 0;
+    } catch (error) {
+      if (error?.name !== "AbortError") musicFailures++;
     } finally {
       if (musicRequest === controller) musicRequest = null;
-      const delay = refreshAfterPoll ? 0 : 4000;
-      refreshAfterPoll = false;
-      scheduleMusicPoll(delay);
-    }
-  }
-
-  async function advance() {
-    if (!nowTrack || advanceRequest || pollingStopped) return;
-    const compositionId = nowTrack.id;
-    const controller = new AbortController();
-    advanceRequest = controller;
-    try {
-      const response = await fetch(`${API}/v1/music/advance`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ compositionId, advanceToken: nowTrack.advanceToken }), signal: controller.signal });
-      const data = await response.json().catch(() => null);
-      if (response.ok && data?.ok) {
-        nowTrack = data.now || null;
-        scheduleTrack(nowTrack);
+      if (isPollingActive()) {
+        const delay = refreshAfterPoll ? 0 : musicBackoffDelay();
+        refreshAfterPoll = false;
+        scheduleMusicPoll(delay);
       }
-      // A delayed timer may race server auto-promotion and receive stale; reconcile now.
-      refreshAfterPoll = true;
-      scheduleMusicPoll(0);
-    } catch {
-      refreshAfterPoll = true;
-      scheduleMusicPoll(0);
-    }
-    finally {
-      if (advanceRequest === controller) advanceRequest = null;
     }
   }
 
@@ -213,14 +219,44 @@
   window.grokplaceSetMuted = setMuted;
   window.grokplaceEnableSound = () => setMuted(false);
   syncSoundUi();
-  scheduleMusicPoll(0);
+  window.addEventListener("grokplace:live", (event) => {
+    const type = event?.detail?.t;
+    if (type === "connected") {
+      liveConnected = true;
+      return;
+    }
+    if (type === "disconnected") {
+      liveConnected = false;
+      refreshMusicNow();
+      return;
+    }
+    if (type === "ready") {
+      if (!musicReadThisVisibility && !musicRequest) refreshMusicNow();
+      return;
+    }
+    if (type === "music") refreshMusicNow();
+  });
+  refreshMusicNow();
 
-  window.addEventListener("pagehide", () => {
-    pollingStopped = true;
+  function pausePolling() {
+    pollingPaused = true;
+    refreshAfterPoll = false;
+    musicReadThisVisibility = false;
     clearTimeout(pollTimer);
     pollTimer = 0;
     musicRequest?.abort();
-    advanceRequest?.abort();
+  }
+
+  function resumePolling() {
+    if (pollingStopped || document.hidden || !pollingPaused) return;
+    pollingPaused = false;
+    if (!muted && nowTrack) scheduleTrack(nowTrack);
+    refreshMusicNow();
+  }
+
+  window.addEventListener("pagehide", () => {
+    pollingStopped = true;
+    pausePolling();
     clearPlayback();
     try { masterGain?.disconnect(); } catch { /* already disconnected */ }
     context?.close?.().catch(() => {});
@@ -230,7 +266,11 @@
   window.addEventListener("pageshow", (event) => {
     if (!event.persisted) return;
     pollingStopped = false;
-    if (!muted && nowTrack) scheduleTrack(nowTrack);
-    scheduleMusicPoll(0);
+    resumePolling();
   });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) pausePolling();
+    else resumePolling();
+  });
+  window.addEventListener("focus", resumePolling);
 })();

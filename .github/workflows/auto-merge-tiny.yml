@@ -1,9 +1,9 @@
 # Trusted default-branch gate. It never checks out pull-request code.
-name: Auto-merge and award tiny maintainer PRs
+name: Trusted agent-reviewed PR merge and maintain awards
 
 on:
   workflow_run:
-    workflows: [PR quality, Maintain approval signal]
+    workflows: [PR quality]
     types: [completed]
   schedule:
     - cron: "17 * * * *"
@@ -24,7 +24,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: maintain-awards-${{ github.repository }}
+  group: trusted-pr-merge-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -32,13 +32,14 @@ jobs:
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
-       (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_review')) ||
+       github.event.workflow_run.event == 'pull_request') ||
       (github.event_name == 'workflow_dispatch' && inputs.action == 'merge')
     runs-on: ubuntu-latest
     permissions:
       actions: read
-      checks: read
+      checks: write
       contents: write
+      issues: read
       pull-requests: write
     steps:
       - name: Check out trusted gate code
@@ -47,12 +48,11 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Revalidate exact head, maintainer, paths, review artifact, approval, and checks
+      - name: Resolve exact candidate and publish pending trusted review
         id: candidate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          API: https://grokplace.barnlabs.net
         run: |
           set -euo pipefail
           if [ "$GITHUB_EVENT_NAME" = "workflow_run" ]; then
@@ -73,66 +73,201 @@ jobs:
           gh api "repos/$REPO/pulls/$PR" > /tmp/pr.json
           HEAD=$(jq -r '.head.sha' /tmp/pr.json)
           AUTHOR=$(jq -r '.user.login' /tmp/pr.json)
-          ASSOCIATION=$(jq -r '.author_association' /tmp/pr.json)
+          [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "PR head is not a full SHA."; exit 1; }
           [ -n "$RUN_HEAD" ] || RUN_HEAD="$HEAD"
-          [ "$HEAD" = "$RUN_HEAD" ] || { echo "PR head differs from the triggering review/check run."; exit 1; }
-          jq -e '.draft == false and .state == "open" and .base.ref == "main"' /tmp/pr.json >/dev/null
-          case "$ASSOCIATION" in OWNER|MEMBER|COLLABORATOR) ;; *) echo "Author is not repository-authorized."; exit 1 ;; esac
-
-          curl -fsS "$API/v1/maintainers" -o /tmp/maintainers.json
-          AGENT=$(jq -r --arg user "$AUTHOR" '.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active") | .agent' /tmp/maintainers.json | head -n 1)
-          [ -n "$AGENT" ] || { echo "Author is not an active grok/place maintainer."; exit 1; }
-          curl -fsS --get --data-urlencode "agent=$AGENT" "$API/v1/bank" -o /tmp/bank.json
-          jq -e '.ok == true and .bank.bankCap == 200 and .bank.bonusTiles >= 0 and .bank.bonusTiles <= 190' /tmp/bank.json >/dev/null || {
-            echo "Maintainer bank cannot accept the fixed 10-tile award."
-            exit 1
-          }
-
-          gh api "repos/$REPO/pulls/$PR/files?per_page=100" > /tmp/files.json
-          jq -e 'length >= 1 and length <= 3 and ((map(.changes) | add) >= 1 and (map(.changes) | add) <= 40)' /tmp/files.json >/dev/null
-          jq -r '.[].filename' /tmp/files.json | node scripts/maintain-path-check.mjs
-
-          jq -r '.body // ""' /tmp/pr.json > /tmp/pr-body.md
-          HEAD_SHA="$HEAD" node scripts/adversarial-review-check.mjs --body-file /tmp/pr-body.md --head-sha "$HEAD"
-          ARTIFACT=$(sed -nE 's/^[[:space:]]*-?[[:space:]]*review_artifact_id[[:space:]]*:[[:space:]]*(rv_[a-f0-9]{32})[[:space:]]*$/\1/p' /tmp/pr-body.md | head -n 1)
-          curl -fsS --get --data-urlencode "id=$ARTIFACT" "$API/v1/reviews" -o /tmp/review.json
-          node scripts/review-artifact-check.mjs --file /tmp/review.json --artifact "$ARTIFACT" --head "$HEAD" --author-agent "$AGENT"
-
-          gh api --paginate --slurp "repos/$REPO/pulls/$PR/reviews?per_page=100" | jq 'add' > /tmp/reviews.json
-          jq -e --arg head "$HEAD" '[.[] | select(.user.login == "baney75" and .commit_id == $head)] | sort_by(.id) | last | .state == "APPROVED"' /tmp/reviews.json >/dev/null
-          gh api "repos/$REPO/commits/$HEAD/check-runs?per_page=100" > /tmp/checks.json
-          jq -e '[.check_runs[] | select((.name == "Tiny perfect PR" or .name == "Secret scan") and .status == "completed" and .conclusion == "success") | .name] | unique | sort == ["Secret scan", "Tiny perfect PR"]' /tmp/checks.json >/dev/null
-
-          FILES=$(jq 'length' /tmp/files.json)
-          TOTAL=$(jq '[.[].changes] | add' /tmp/files.json)
-          PATHS=$(jq -c '[.[].filename]' /tmp/files.json)
+          [ "$HEAD" = "$RUN_HEAD" ] || { echo "PR head differs from the successful PR quality run."; exit 1; }
+          DETAILS_URL="https://github.com/$REPO/actions/runs/$GITHUB_RUN_ID"
+          EXTERNAL_ID="trusted-review:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$PR:$HEAD"
+          STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          CHECK_ID=$(gh api --method POST "repos/$REPO/check-runs" -f name="Trusted agent review" -f head_sha="$HEAD" -f status="in_progress" -f started_at="$STARTED_AT" -f details_url="$DETAILS_URL" -f external_id="$EXTERNAL_ID" --jq '.id')
+          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Trusted check-run ID was not returned."; exit 1; }
           {
             echo "pr=$PR"
             echo "head=$HEAD"
             echo "author=$AUTHOR"
+            echo "check_id=$CHECK_ID"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate exact head, lane, reviewer identity, bounty, and checks
+        id: validation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          API: https://grokplace.barnlabs.net
+          PR: ${{ steps.candidate.outputs.pr }}
+          HEAD: ${{ steps.candidate.outputs.head }}
+          AUTHOR: ${{ steps.candidate.outputs.author }}
+        run: |
+          set -euo pipefail
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] && [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "Candidate outputs are invalid."; exit 1; }
+          gh api "repos/$REPO/pulls/$PR" > /tmp/pr.json
+          CURRENT_HEAD=$(jq -r '.head.sha' /tmp/pr.json)
+          CURRENT_AUTHOR=$(jq -r '.user.login' /tmp/pr.json)
+          [ "$CURRENT_HEAD" = "$HEAD" ] && [ "$CURRENT_AUTHOR" = "$AUTHOR" ] || { echo "PR identity changed after trusted check creation."; exit 1; }
+          jq -e '.draft == false and .state == "open" and .base.ref == "main"' /tmp/pr.json >/dev/null
+
+          gh api --paginate --slurp "repos/$REPO/pulls/$PR/files?per_page=100" | jq 'add // []' > /tmp/files.json
+          jq -e 'length >= 1' /tmp/files.json >/dev/null || { echo "PR has no changed files."; exit 1; }
+          FILES=$(jq 'length' /tmp/files.json)
+          TOTAL=$(jq '[.[].changes] | add' /tmp/files.json)
+          PATHS=$(jq -c '[.[].filename]' /tmp/files.json)
+          if [ "$AUTHOR" = "baney75" ]; then
+            LANE=product
+          elif jq -r '.[].filename' /tmp/files.json | node scripts/maintain-path-check.mjs >/tmp/lane-check.log 2>&1; then
+            LANE=maintain
+          else
+            echo "Non-owner PRs are eligible only for the allowlisted maintenance lane."
+            exit 1
+          fi
+
+          jq -r '.body // ""' /tmp/pr.json > /tmp/pr-body.md
+          field_count() {
+            grep -Ec "^[[:space:]]*-[[:space:]]*$1[[:space:]]*:" /tmp/pr-body.md || true
+          }
+          field_value() {
+            sed -nE "s/^[[:space:]]*-[[:space:]]*$1[[:space:]]*:[[:space:]]*([^[:space:]]+)[[:space:]]*$/\\1/p" /tmp/pr-body.md
+          }
+          mapfile -t ARTIFACTS < <(sed -nE 's/^[[:space:]]*-?[[:space:]]*review_artifact_id[[:space:]]*:[[:space:]]*(rv_[a-f0-9]{32})[[:space:]]*$/\1/p' /tmp/pr-body.md)
+          [ "${#ARTIFACTS[@]}" -eq 1 ] || { echo "PR must contain exactly one immutable review_artifact_id."; exit 1; }
+          ARTIFACT=${ARTIFACTS[0]}
+          curl -fsS --get --data-urlencode "id=$ARTIFACT" "$API/v1/reviews" -o /tmp/review.json
+
+          AGENT=""
+          BOUNTY_ISSUE_ID=""
+          BOUNTY_APPROVAL_COMMENT_ID=""
+          if [ "$LANE" = "product" ]; then
+            [ "$AUTHOR" = "baney75" ] || { echo "Product-lane PR author must be exactly baney75."; exit 1; }
+            [ "$(field_count implementer_agent)" = "1" ] || { echo "Product PR must contain exactly one implementer_agent field."; exit 1; }
+            IMPLEMENTER_AGENT=$(field_value implementer_agent)
+            [[ "$IMPLEMENTER_AGENT" =~ ^[A-Za-z0-9_-]{2,32}$ ]] && [ "$IMPLEMENTER_AGENT" != "PASTE_IMPLEMENTER_AGENT_HERE" ] || {
+              echo "implementer_agent must be a real 2-32 character agent name."
+              exit 1
+            }
+            node scripts/review-artifact-check.mjs --mode product-owner --file /tmp/review.json --artifact "$ARTIFACT" --head "$HEAD" --implementer-agent "$IMPLEMENTER_AGENT"
+          else
+            jq -e 'length >= 1 and length <= 3 and ((map(.changes) | add) >= 1 and (map(.changes) | add) <= 40)' /tmp/files.json >/dev/null || {
+              echo "Maintain lane must be 1-3 files and 1-40 changed lines."
+              exit 1
+            }
+            jq -r '.[].filename' /tmp/files.json | node scripts/maintain-path-check.mjs
+
+            curl -fsS "$API/v1/maintainers" -o /tmp/maintainers.json
+            jq -e --arg user "$AUTHOR" '[.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active")] | length == 1' /tmp/maintainers.json >/dev/null || {
+              echo "Author must resolve to exactly one active grok/place maintainer."
+              exit 1
+            }
+            AGENT=$(jq -r --arg user "$AUTHOR" '.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active") | .agent' /tmp/maintainers.json)
+            curl -fsS --get --data-urlencode "agent=$AGENT" "$API/v1/bank" -o /tmp/bank.json
+            jq -e '.ok == true and .bank.bankCap == 200 and .bank.bonusTiles >= 0 and .bank.bonusTiles <= 190' /tmp/bank.json >/dev/null || {
+              echo "Maintainer bank cannot accept the fixed 10-tile award."
+              exit 1
+            }
+
+            HEAD_SHA="$HEAD" node scripts/adversarial-review-check.mjs --body-file /tmp/pr-body.md --head-sha "$HEAD"
+            node scripts/review-artifact-check.mjs --mode maintainer --file /tmp/review.json --artifact "$ARTIFACT" --head "$HEAD" --implementer-agent "$AGENT" --author-github "$AUTHOR" --require-verified-maintainer
+
+            [ "$(field_count bounty_issue)" = "1" ] || { echo "PR must contain exactly one bounty_issue field."; exit 1; }
+            [ "$(field_count bounty_approval_comment)" = "1" ] || { echo "PR must contain exactly one bounty_approval_comment field."; exit 1; }
+            BOUNTY_ISSUE=$(field_value bounty_issue)
+            BOUNTY_COMMENT=$(field_value bounty_approval_comment)
+            [ -n "$BOUNTY_ISSUE" ] && [ -n "$BOUNTY_COMMENT" ] || { echo "Bounty fields must contain one non-whitespace value each."; exit 1; }
+            if [ "$BOUNTY_ISSUE" = "NONE" ] && [ "$BOUNTY_COMMENT" = "NONE" ]; then
+              : # Ordinary maintenance: no bounty identity is sent to the award service.
+            elif [ "$BOUNTY_ISSUE" = "NONE" ] || [ "$BOUNTY_COMMENT" = "NONE" ]; then
+              echo "A claimed bounty requires both bounty_issue and bounty_approval_comment; otherwise use NONE for both."
+              exit 1
+            else
+              ISSUE_PREFIX="https://github.com/$REPO/issues/"
+              [[ "$BOUNTY_ISSUE" == "$ISSUE_PREFIX"* ]] || { echo "Bounty issue URL must name this repository."; exit 1; }
+              BOUNTY_ISSUE_ID=${BOUNTY_ISSUE#"$ISSUE_PREFIX"}
+              [[ "$BOUNTY_ISSUE_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Bounty issue URL must be canonical and numeric."; exit 1; }
+              COMMENT_PREFIX="${ISSUE_PREFIX}${BOUNTY_ISSUE_ID}#issuecomment-"
+              [[ "$BOUNTY_COMMENT" == "$COMMENT_PREFIX"* ]] || { echo "Bounty approval URL must bind to the exact bounty issue in this repository."; exit 1; }
+              BOUNTY_APPROVAL_COMMENT_ID=${BOUNTY_COMMENT#"$COMMENT_PREFIX"}
+              [[ "$BOUNTY_APPROVAL_COMMENT_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Bounty approval comment URL must be canonical and numeric."; exit 1; }
+
+              gh api "repos/$REPO/issues/$BOUNTY_ISSUE_ID" > /tmp/bounty-issue.json
+              jq -e --argjson issue "$BOUNTY_ISSUE_ID" '.number == $issue and .state == "open" and (.pull_request? == null) and ([.labels[]?.name] | index("bounty")) != null' /tmp/bounty-issue.json >/dev/null || {
+                echo "Bounty issue must remain open, be an issue (not a PR), and carry the bounty label."
+                exit 1
+              }
+              gh api "repos/$REPO/issues/comments/$BOUNTY_APPROVAL_COMMENT_ID" > /tmp/bounty-comment.json
+              ISSUE_API_URL="https://api.github.com/repos/$REPO/issues/$BOUNTY_ISSUE_ID"
+              jq -e --argjson comment "$BOUNTY_APPROVAL_COMMENT_ID" --arg commentUrl "$BOUNTY_COMMENT" --arg issueUrl "$ISSUE_API_URL" --arg phrase "BOUNTY APPROVED" '.id == $comment and .html_url == $commentUrl and .issue_url == $issueUrl and .user.login == "baney75" and ((.body | strings | gsub("^[[:space:]]+|[[:space:]]+$"; "")) == $phrase)' /tmp/bounty-comment.json >/dev/null || {
+                echo "Bounty approval must be the exact trimmed @baney75 comment body: BOUNTY APPROVED"
+                exit 1
+              }
+            fi
+          fi
+
+          gh api "repos/$REPO/commits/$HEAD/check-runs?per_page=100" > /tmp/checks.json
+          jq -e '[.check_runs[] | select((.name == "Tiny perfect PR" or .name == "Secret scan") and .app.id == 15368 and .status == "completed" and .conclusion == "success") | .name] | unique | sort == ["Secret scan", "Tiny perfect PR"]' /tmp/checks.json >/dev/null
+
+          {
+            echo "lane=$LANE"
             echo "files=$FILES"
             echo "total=$TOTAL"
             echo "paths=$PATHS"
+            echo "bounty_issue=$BOUNTY_ISSUE_ID"
+            echo "bounty_approval_comment_id=$BOUNTY_APPROVAL_COMMENT_ID"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Reserve the exact award before merge
+      - name: Reserve the exact maintain award before merge
+        if: steps.validation.outputs.lane == 'maintain'
         env:
           AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
           API: https://grokplace.barnlabs.net
           PR: ${{ steps.candidate.outputs.pr }}
           HEAD: ${{ steps.candidate.outputs.head }}
           AUTHOR: ${{ steps.candidate.outputs.author }}
-          FILES: ${{ steps.candidate.outputs.files }}
-          TOTAL: ${{ steps.candidate.outputs.total }}
-          PATHS: ${{ steps.candidate.outputs.paths }}
+          FILES: ${{ steps.validation.outputs.files }}
+          TOTAL: ${{ steps.validation.outputs.total }}
+          PATHS: ${{ steps.validation.outputs.paths }}
+          BOUNTY_ISSUE: ${{ steps.validation.outputs.bounty_issue }}
+          BOUNTY_APPROVAL_COMMENT_ID: ${{ steps.validation.outputs.bounty_approval_comment_id }}
         run: |
           set -euo pipefail
           [ -n "${AWARD_SECRET:-}" ] || { echo "AWARD_SECRET is not configured."; exit 1; }
-          BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --argjson files "$FILES" --argjson lines "$TOTAL" --argjson paths "$PATHS" '{phase:"reserve",github:$github,prNumber:$pr,headSha:$head,filesChanged:$files,linesChanged:$lines,paths:$paths}')
+          BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --argjson files "$FILES" --argjson lines "$TOTAL" --argjson paths "$PATHS" --arg bountyIssue "${BOUNTY_ISSUE:-}" --arg bountyApprovalCommentId "${BOUNTY_APPROVAL_COMMENT_ID:-}" '{phase:"reserve",github:$github,prNumber:$pr,headSha:$head,filesChanged:$files,linesChanged:$lines,paths:$paths} + (if $bountyIssue == "" and $bountyApprovalCommentId == "" then {} else {bountyIssue: ($bountyIssue | tonumber), bountyApprovalCommentId: ($bountyApprovalCommentId | tonumber)} end)')
           curl --retry 5 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/reserve.json
           jq -e '.ok == true and (.reserved == true or .already == true)' /tmp/reserve.json >/dev/null
 
-      - name: Merge the exact reserved head
+      - name: Publish successful trusted agent review
+        id: trusted_success
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.candidate.outputs.pr }}
+          HEAD: ${{ steps.candidate.outputs.head }}
+          CHECK_ID: ${{ steps.candidate.outputs.check_id }}
+        run: |
+          set -euo pipefail
+          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "Trusted check identity is invalid."; exit 1; }
+          CURRENT=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
+          [ "$CURRENT" = "$HEAD" ] || { echo "PR head changed before trusted success."; exit 1; }
+          gh api "repos/$REPO/check-runs/$CHECK_ID" > /tmp/trusted-check.json
+          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368 and .status == "in_progress"' /tmp/trusted-check.json >/dev/null
+          COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="success" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted agent review passed' -f 'output[summary]=Exact-head reviewer, lane, bounty, and reservation gates passed.' > /tmp/trusted-success.json
+          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368 and .status == "completed" and .conclusion == "success"' /tmp/trusted-success.json >/dev/null
+
+      - name: Publish failed trusted agent review
+        if: ${{ always() && steps.candidate.outputs.check_id != '' && steps.trusted_success.outcome != 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD: ${{ steps.candidate.outputs.head }}
+          CHECK_ID: ${{ steps.candidate.outputs.check_id }}
+        run: |
+          set -euo pipefail
+          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "Trusted failure check identity is invalid."; exit 1; }
+          gh api "repos/$REPO/check-runs/$CHECK_ID" > /tmp/trusted-check.json
+          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368' /tmp/trusted-check.json >/dev/null
+          COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="failure" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted agent review failed' -f 'output[summary]=Validation or durable maintenance reservation failed; merge remains blocked.' > /tmp/trusted-failure.json
+          jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368 and .status == "completed" and .conclusion == "failure"' /tmp/trusted-failure.json >/dev/null
+
+      - name: Merge the exact eligible head
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -141,12 +276,13 @@ jobs:
         run: |
           set -euo pipefail
           CURRENT=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
-          [ "$CURRENT" = "$HEAD" ] || { echo "PR head changed after reservation."; exit 1; }
-          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch
+          [ "$CURRENT" = "$HEAD" ] || { echo "PR head changed after trusted validation."; exit 1; }
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD"
           gh api "repos/$REPO/pulls/$PR" > /tmp/merged.json
           jq -e --arg head "$HEAD" '.merged == true and .head.sha == $head and (.merge_commit_sha | test("^[a-f0-9]{40}$"))' /tmp/merged.json >/dev/null
 
-      - name: Finalize the reserved award
+      - name: Finalize the reserved maintain award
+        if: steps.validation.outputs.lane == 'maintain'
         env:
           AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
           API: https://grokplace.barnlabs.net

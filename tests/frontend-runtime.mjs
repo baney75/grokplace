@@ -37,13 +37,27 @@ function element(id = "") {
   };
 }
 
+class CustomEventMock {
+  constructor(type, init = {}) {
+    this.type = type;
+    this.detail = init.detail;
+  }
+}
+
 function browserHarness(elements) {
   const windowListeners = new Map();
+  const documentListeners = new Map();
   const local = new Map();
   const document = {
     title: "grok/place · live mosaic",
+    hidden: false,
     getElementById(id) { return elements.get(id) || null; },
     createElement() { return element(); },
+    addEventListener(type, handler) {
+      const current = documentListeners.get(type) || [];
+      current.push(handler);
+      documentListeners.set(type, current);
+    },
   };
   const window = {
     GROKPLACE_API: "http://127.0.0.1:8787",
@@ -56,15 +70,95 @@ function browserHarness(elements) {
       current.push(handler);
       windowListeners.set(type, current);
     },
+    dispatchEvent(event) {
+      emit(windowListeners, event?.type, event);
+      return true;
+    },
+    CustomEvent: CustomEventMock,
   };
   return {
     document,
     window,
     windowListeners,
+    documentListeners,
     localStorage: {
       getItem(key) { return local.get(key) || null; },
       setItem(key, value) { local.set(key, value); },
     },
+  };
+}
+
+function fakeWebSockets() {
+  const sockets = [];
+  class WebSocketMock {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 0;
+      this.sent = [];
+      this.closed = [];
+      sockets.push(this);
+    }
+    send(value) { this.sent.push(value); }
+    open() {
+      this.readyState = 1;
+      this.onopen?.({ type: "open" });
+    }
+    message(data) { this.onmessage?.({ data }); }
+    close(code = 1000, reason = "") {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      this.closed.push({ code, reason });
+      this.onclose?.({ code, reason });
+    }
+    fail() { this.onerror?.({ type: "error" }); }
+  }
+  return { WebSocketMock, sockets };
+}
+
+function emit(listeners, type, event = {}) {
+  for (const handler of listeners.get(type) || []) handler(event);
+}
+
+function fakeTimers() {
+  let now = 0;
+  let nextId = 1;
+  const jobs = new Map();
+  const setTimeout = (callback, delay = 0) => {
+    const id = nextId++;
+    jobs.set(id, { callback, at: now + Math.max(0, Number(delay) || 0) });
+    return id;
+  };
+  const clearTimeout = (id) => jobs.delete(id);
+  const flushMicrotasks = async () => {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  };
+  async function tick(ms) {
+    const target = now + ms;
+    while (true) {
+      let id = 0;
+      let next = null;
+      for (const [candidateId, job] of jobs) {
+        if (job.at <= target && (!next || job.at < next.at || (job.at === next.at && candidateId < id))) {
+          id = candidateId;
+          next = job;
+        }
+      }
+      if (!next) break;
+      now = next.at;
+      jobs.delete(id);
+      next.callback();
+      await flushMicrotasks();
+    }
+    now = target;
+    await flushMicrotasks();
+  }
+  return {
+    setTimeout,
+    clearTimeout,
+    tick,
+    count() { return jobs.size; },
+    delays() { return [...jobs.values()].map((job) => job.at - now).sort((a, b) => a - b); },
+    now() { return now; },
   };
 }
 
@@ -92,6 +186,61 @@ function delayedFetch() {
 async function flush(ms = 0) {
   await new Promise((resolve) => setTimeout(resolve, ms));
   await Promise.resolve();
+}
+
+{
+  const board = element("board");
+  const wrap = element("canvas-wrap");
+  const share = element("share-btn");
+  const toast = element("toast");
+  const harness = browserHarness(new Map([["board", board], ["canvas-wrap", wrap], ["share-btn", share], ["toast", toast]]));
+  harness.window.GROKPLACE_API = "https://preview.grokplace.test/agent-api/";
+  let shareAttempts = 0;
+  const copied = [];
+  const navigator = {
+    share: async () => {
+      shareAttempts++;
+      throw new Error("share unavailable");
+    },
+    clipboard: { async writeText(text) { copied.push(text); } },
+  };
+  const context = vm.createContext({
+    ...harness,
+    navigator,
+    fetch: async () => ({ ok: false, status: 503 }),
+    AbortController,
+    URL,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
+    Math,
+    JSON,
+    Date,
+    performance,
+    atob,
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
+  share._listeners.get("click")();
+  await flush();
+  const invite = copied[0] || "";
+  const playbookUrl = "https://preview.grokplace.test/agent-api/llms.txt";
+  const actions = [
+    `1. Read ${playbookUrl}.`,
+    "2. Claim your agent name.",
+    "3. Inspect the live board.",
+    "4. Preserve coherent art; place up to 5 empty tiles.",
+    "5. If the goal is blank, ask the human what to draw.",
+  ];
+  const actionPositions = actions.map((action) => invite.indexOf(action));
+  check("invite falls back from Web Share to clipboard", shareAttempts === 1 && copied.length === 1 && toast.textContent === "Invite copied — paste it to your agent");
+  check("invite uses the exact dynamic playbook URL", invite.includes(playbookUrl) && !invite.includes("https://grokplace.barnlabs.net/llms.txt"), invite);
+  check("invite directly briefs the receiving agent", invite.startsWith("You are the receiving agent for grok/place.\nGoal: [what to draw]\n"), invite);
+  check("invite actions are complete and ordered", actionPositions.every((position, index) => position >= 0 && (index === 0 || position > actionPositions[index - 1])), invite);
+  for (const handler of harness.windowListeners.get("pagehide") || []) handler({ persisted: false });
 }
 
 {
@@ -130,6 +279,197 @@ async function flush(ms = 0) {
 }
 
 {
+  const board = element("board");
+  const wrap = element("canvas-wrap");
+  const harness = browserHarness(new Map([["board", board], ["canvas-wrap", wrap]]));
+  const timers = fakeTimers();
+  const calls = new Map();
+  const fetch = async (url) => {
+    const path = new URL(url).pathname;
+    const attempt = (calls.get(path) || 0) + 1;
+    calls.set(path, attempt);
+    if (attempt === 1) return { ok: false, status: 1101 };
+    if (path === "/v1/canvas") {
+      return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#ffffff"], version: attempt }) };
+    }
+    return { ok: true, json: async () => ({ ok: true, feed: [] }) };
+  };
+  const context = vm.createContext({
+    ...harness,
+    fetch,
+    AbortController,
+    URL,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
+    Math,
+    JSON,
+    Date,
+    performance,
+    atob,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
+  await timers.tick(0);
+  check("canvas and feed use exponential retry after a 1101", JSON.stringify(timers.delays()) === JSON.stringify([24_000, 60_000]), JSON.stringify(timers.delays()));
+  harness.document.hidden = true;
+  emit(harness.documentListeners, "visibilitychange");
+  check("hidden mosaic cancels every scheduled DO read", timers.count() === 0, `timers=${timers.count()}`);
+  await timers.tick(120_000);
+  check("hidden mosaic does not keep polling", calls.get("/v1/canvas") === 1 && calls.get("/v1/feed") === 1, JSON.stringify(Object.fromEntries(calls)));
+  harness.document.hidden = false;
+  emit(harness.documentListeners, "visibilitychange");
+  emit(harness.documentListeners, "visibilitychange");
+  emit(harness.windowListeners, "focus");
+  check("repeat resume events retain one mosaic timer per resource", timers.count() === 2, `timers=${timers.count()}`);
+  await timers.tick(0);
+  check("mosaic recovers immediately on return to the foreground", calls.get("/v1/canvas") === 2 && calls.get("/v1/feed") === 2, JSON.stringify(Object.fromEntries(calls)));
+  check("successful mosaic recovery returns to the bounded foreground cadence", JSON.stringify(timers.delays()) === JSON.stringify([12_000, 30_000]), JSON.stringify(timers.delays()));
+  emit(harness.windowListeners, "pagehide", { persisted: false });
+}
+
+{
+  const board = element("board");
+  const wrap = element("canvas-wrap");
+  const sound = element("sound-btn");
+  sound.querySelector = () => element();
+  const harness = browserHarness(new Map([["board", board], ["canvas-wrap", wrap], ["sound-btn", sound]]));
+  const timers = fakeTimers();
+  const live = fakeWebSockets();
+  harness.window.WebSocket = live.WebSocketMock;
+  const calls = [];
+  const fetch = async (url) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path === "/v1/canvas") return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#ffffff"], version: 1 }) };
+    if (path === "/v1/feed") return { ok: true, json: async () => ({ ok: true, feed: [] }) };
+    return { ok: true, json: async () => ({ ok: true, now: null }) };
+  };
+  const context = vm.createContext({
+    ...harness,
+    fetch,
+    AbortController,
+    URL,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
+    Set,
+    Math,
+    JSON,
+    Date,
+    performance,
+    atob,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
+  vm.runInContext(readFileSync(new URL("public/radio.js", root), "utf8"), context, { filename: "public/radio.js" });
+  check("one visible tab opens exactly one anonymous live socket", live.sockets.length === 1 && live.sockets[0].url === "ws://127.0.0.1:8787/v1/live", JSON.stringify(live.sockets.map((socket) => socket.url)));
+  const socket = live.sockets[0];
+  socket.open();
+  socket.message('{"t":"ready","v":0}');
+  for (let index = 0; index < 5; index++) emit(harness.windowListeners, "focus");
+  check("repeated visible focus does not create a reconnect storm", live.sockets.length === 1, `sockets=${live.sockets.length}`);
+  await timers.tick(0);
+  const count = (path) => calls.filter((value) => value === path).length;
+  check("ready coalesces one canvas, activity, and music refresh", count("/v1/canvas") === 1 && count("/v1/feed") === 1 && count("/v1/music") === 1, JSON.stringify(calls));
+  socket.message('{"t":"ready","v":0}');
+  await timers.tick(0);
+  check("a duplicate ready event does not create double immediate reads", count("/v1/canvas") === 1 && count("/v1/feed") === 1 && count("/v1/music") === 1, JSON.stringify(calls));
+  socket.message("{");
+  socket.message("x".repeat(97));
+  socket.message('{"t":"canvas","v":1,"extra":true}');
+  await timers.tick(0);
+  check("malformed, oversize, and untrusted live messages are ignored", count("/v1/canvas") === 1 && count("/v1/feed") === 1 && count("/v1/music") === 1, JSON.stringify(calls));
+  socket.message('{"t":"canvas","v":1}');
+  socket.message('{"t":"canvas","v":1}');
+  await timers.tick(0);
+  check("canvas invalidations coalesce and fetch only the canvas", count("/v1/canvas") === 2 && count("/v1/feed") === 1 && count("/v1/music") === 1, JSON.stringify(calls));
+  socket.message('{"t":"activity","v":1}');
+  socket.message('{"t":"activity","v":1}');
+  await timers.tick(0);
+  check("activity invalidations coalesce and fetch only the feed", count("/v1/canvas") === 2 && count("/v1/feed") === 2 && count("/v1/music") === 1, JSON.stringify(calls));
+  socket.message('{"t":"music","v":1}');
+  socket.message('{"t":"music","v":1}');
+  await timers.tick(0);
+  check("music invalidations coalesce and fetch only music", count("/v1/canvas") === 2 && count("/v1/feed") === 2 && count("/v1/music") === 2, JSON.stringify(calls));
+  check("the viewer never sends a websocket command", socket.sent.length === 0, JSON.stringify(socket.sent));
+  socket.close();
+  const retryDelays = timers.delays();
+  check("closed live sockets restore fallback reads and retry with bounded jitter", retryDelays.filter((delay) => delay === 0).length === 3 && retryDelays.some((delay) => delay >= 800 && delay <= 1_200), JSON.stringify(retryDelays));
+  await timers.tick(1_200);
+  check("a closed live socket retries once after its bounded backoff", live.sockets.length === 2, `sockets=${live.sockets.length}`);
+  harness.document.hidden = true;
+  emit(harness.documentListeners, "visibilitychange");
+  emit(harness.windowListeners, "focus");
+  check("hidden tabs close live sockets and schedule neither reads nor reconnects", live.sockets[1].closed.length === 1 && timers.count() === 0, JSON.stringify({ closed: live.sockets[1].closed, timers: timers.count() }));
+  emit(harness.windowListeners, "pagehide", { persisted: false });
+}
+
+{
+  const board = element("board");
+  const wrap = element("canvas-wrap");
+  const sound = element("sound-btn");
+  sound.querySelector = () => element();
+  const harness = browserHarness(new Map([["board", board], ["canvas-wrap", wrap], ["sound-btn", sound]]));
+  const timers = fakeTimers();
+  const live = fakeWebSockets();
+  harness.window.WebSocket = live.WebSocketMock;
+  const calls = [];
+  let musicGets = 0;
+  const shortestTrack = {
+    id: "cmp_shortest_live",
+    startedAt: 0,
+    endsAt: 84,
+    composition: { bpm: 180, waveform: "sine", notes: [{ note: "A4", at: 0, duration: 1, velocity: 0.7 }] },
+  };
+  const context = vm.createContext({
+    ...harness,
+    fetch: async (url) => {
+      const path = new URL(url).pathname;
+      calls.push({ path, at: timers.now() });
+      if (path === "/v1/canvas") return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#ffffff"], version: 1 }) };
+      if (path === "/v1/feed") return { ok: true, json: async () => ({ ok: true, feed: [] }) };
+      musicGets++;
+      return { ok: true, json: async () => ({ ok: true, now: musicGets === 1 ? shortestTrack : null }) };
+    },
+    AbortController,
+    URL,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
+    Set,
+    Math,
+    JSON,
+    Date,
+    performance,
+    atob,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
+  vm.runInContext(readFileSync(new URL("public/radio.js", root), "utf8"), context, { filename: "public/radio.js" });
+  live.sockets[0].open();
+  live.sockets[0].message('{"t":"ready","v":0}');
+  await timers.tick(29_999);
+  check("a connected shortest-valid track does not wait nearly two minutes for promotion", musicGets === 1, JSON.stringify(calls));
+  await timers.tick(1);
+  const musicCallsAtThirtySeconds = calls.filter((call) => call.path === "/v1/music");
+  check("connected music reconciliation fetches again at thirty seconds", musicGets === 2 && musicCallsAtThirtySeconds[1]?.at === 30_000, JSON.stringify(musicCallsAtThirtySeconds));
+  await timers.tick(270_000);
+  const byPath = calls.reduce((counts, call) => ({ ...counts, [call.path]: (counts[call.path] || 0) + 1 }), {});
+  check("a healthy live socket holds the five-minute budget to twenty reads", calls.length === 20 && byPath["/v1/canvas"] === 6 && byPath["/v1/feed"] === 3 && byPath["/v1/music"] === 11, JSON.stringify({ calls: calls.length, byPath }));
+  emit(harness.windowListeners, "pagehide", { persisted: false });
+}
+
+{
   const sound = element("sound-btn");
   sound.querySelector = () => element();
   const harness = browserHarness(new Map([["sound-btn", sound]]));
@@ -154,6 +494,96 @@ async function flush(ms = 0) {
   for (const handler of harness.windowListeners.get("pagehide") || []) handler({ persisted: false });
   await flush();
   check("pagehide aborts music polling", tracker.pending.get("/v1/music") === 0 && tracker.aborted === 1);
+}
+
+{
+  const sound = element("sound-btn");
+  sound.querySelector = () => element();
+  const harness = browserHarness(new Map([["sound-btn", sound]]));
+  const timers = fakeTimers();
+  let calls = 0;
+  const context = vm.createContext({
+    ...harness,
+    fetch: async () => {
+      calls++;
+      if (calls === 1) return { ok: false, status: 1101 };
+      return { ok: true, json: async () => ({ ok: true, now: null }) };
+    },
+    AbortController,
+    URL,
+    Set,
+    Math,
+    JSON,
+    Date,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  vm.runInContext(readFileSync(new URL("public/radio.js", root), "utf8"), context, { filename: "public/radio.js" });
+  await timers.tick(0);
+  check("music uses exponential retry after a 1101", JSON.stringify(timers.delays()) === JSON.stringify([60_000]), JSON.stringify(timers.delays()));
+  harness.document.hidden = true;
+  emit(harness.documentListeners, "visibilitychange");
+  check("hidden radio cancels scheduled DO reads", timers.count() === 0, `timers=${timers.count()}`);
+  await timers.tick(120_000);
+  check("hidden radio does not keep polling", calls === 1, `calls=${calls}`);
+  harness.document.hidden = false;
+  emit(harness.documentListeners, "visibilitychange");
+  emit(harness.windowListeners, "focus");
+  check("repeat radio resume events retain one timer", timers.count() === 1, `timers=${timers.count()}`);
+  await timers.tick(0);
+  check("radio recovers immediately and returns to its normal cadence", calls === 2 && JSON.stringify(timers.delays()) === JSON.stringify([30_000]), JSON.stringify({ calls, delays: timers.delays() }));
+  emit(harness.windowListeners, "pagehide", { persisted: false });
+}
+
+{
+  const board = element("board");
+  const wrap = element("canvas-wrap");
+  const sound = element("sound-btn");
+  sound.querySelector = () => element();
+  const harness = browserHarness(new Map([["board", board], ["canvas-wrap", wrap], ["sound-btn", sound]]));
+  harness.document.hidden = true;
+  const timers = fakeTimers();
+  const calls = [];
+  const context = vm.createContext({
+    ...harness,
+    fetch: async (url) => {
+      const path = new URL(url).pathname;
+      calls.push(path);
+      if (path === "/v1/canvas") return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#ffffff"], version: 1 }) };
+      if (path === "/v1/feed") return { ok: true, json: async () => ({ ok: true, feed: [] }) };
+      return { ok: true, json: async () => ({ ok: true, now: null }) };
+    },
+    AbortController,
+    URL,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
+    Set,
+    Math,
+    JSON,
+    Date,
+    performance,
+    atob,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
+  vm.runInContext(readFileSync(new URL("public/radio.js", root), "utf8"), context, { filename: "public/radio.js" });
+  await timers.tick(120_000);
+  check("an initially hidden viewer schedules no DO reads", calls.length === 0 && timers.count() === 0, JSON.stringify({ calls, timers: timers.count() }));
+  harness.document.hidden = false;
+  emit(harness.documentListeners, "visibilitychange");
+  check("first visibility schedules one immediate poll per resource", timers.count() === 3, `timers=${timers.count()}`);
+  await timers.tick(0);
+  const callsByPath = calls.reduce((counts, path) => ({ ...counts, [path]: (counts[path] || 0) + 1 }), {});
+  check("first visible refresh makes exactly one canvas, feed, and music read", calls.length === 3 && callsByPath["/v1/canvas"] === 1 && callsByPath["/v1/feed"] === 1 && callsByPath["/v1/music"] === 1, JSON.stringify(callsByPath));
+  check("initially hidden recovery returns to bounded timers", JSON.stringify(timers.delays()) === JSON.stringify([12_000, 30_000, 30_000]), JSON.stringify(timers.delays()));
+  emit(harness.windowListeners, "focus");
+  emit(harness.windowListeners, "focus");
+  check("visible focus after hidden recovery leaves bounded timers intact", JSON.stringify(timers.delays()) === JSON.stringify([12_000, 30_000, 30_000]), JSON.stringify(timers.delays()));
+  emit(harness.windowListeners, "pagehide", { persisted: false });
 }
 
 {
@@ -219,9 +649,12 @@ async function flush(ms = 0) {
 }
 
 {
+  const board = element("board");
+  const wrap = element("canvas-wrap");
   const sound = element("sound-btn");
   sound.querySelector = () => element();
-  const harness = browserHarness(new Map([["sound-btn", sound]]));
+  const harness = browserHarness(new Map([["board", board], ["canvas-wrap", wrap], ["sound-btn", sound]]));
+  const timers = fakeTimers();
   const frequencies = [];
   class AudioContextMock {
     constructor() { this.currentTime = 0; this.state = "running"; this.destination = {}; }
@@ -247,56 +680,72 @@ async function flush(ms = 0) {
     resume() { return Promise.resolve(); }
   }
   harness.window.AudioContext = AudioContextMock;
-  const initialTime = Date.now();
+  const initialTime = 2_000_000_000_000;
   const first = {
     id: "cmp_first",
-    advanceToken: "a".repeat(32),
     startedAt: initialTime,
-    endsAt: initialTime + 180,
-    composition: { bpm: 120, waveform: "sine", notes: [{ note: "A4", at: 0, duration: 4, velocity: 0.7 }] },
+    endsAt: initialTime + 84,
+    composition: { bpm: 180, waveform: "sine", notes: [{ note: "A4", at: 0, duration: 1, velocity: 0.7 }] },
   };
   const second = {
     id: "cmp_second",
-    advanceToken: "b".repeat(32),
-    startedAt: initialTime + 180,
-    endsAt: initialTime + 10_000,
+    startedAt: initialTime + 30_000,
+    endsAt: initialTime + 120_000,
     composition: { bpm: 120, waveform: "triangle", notes: [{ note: "C5", at: 0, duration: 4, velocity: 0.7 }] },
   };
-  let gets = 0;
-  let advanceBody = null;
-  let advanceAt = 0;
-  let secondFetchedAt = 0;
-  const fetch = async (url, options = {}) => {
+  const calls = [];
+  let musicGets = 0;
+  const fetch = async (url) => {
     const path = new URL(url).pathname;
-    if (path === "/v1/music/advance") {
-      advanceAt = Date.now();
-      advanceBody = JSON.parse(options.body);
-      return { ok: false, status: 409, json: async () => ({ ok: false, error: "stale_composition" }) };
+    calls.push({ path, at: timers.now() });
+    if (path === "/v1/canvas") return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#ffffff"], version: 1 }) };
+    if (path === "/v1/feed") return { ok: true, json: async () => ({ ok: true, feed: [] }) };
+    if (path === "/v1/music") {
+      musicGets++;
+      return { ok: true, json: async () => ({ ok: true, now: musicGets === 1 ? first : second }) };
     }
-    gets++;
-    if (gets > 1) secondFetchedAt = Date.now();
-    return { ok: true, json: async () => ({ ok: true, now: gets === 1 ? first : second }) };
+    return { ok: false, status: 404, json: async () => ({ ok: false }) };
   };
   const context = vm.createContext({
     ...harness,
     fetch,
     AbortController,
     URL,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
     Set,
     Math,
     JSON,
-    Date,
-    setTimeout,
-    clearTimeout,
+    Date: { now: () => initialTime + timers.now() },
+    performance,
+    atob,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
   });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
   vm.runInContext(readFileSync(new URL("public/radio.js", root), "utf8"), context, { filename: "public/radio.js" });
-  await flush(20);
+  await timers.tick(0);
   sound._listeners.get("click")({ preventDefault() {}, stopPropagation() {} });
-  await flush(260);
-  check("radio advance sends the exact current id and token inside the end window", advanceAt > 0 && advanceAt <= first.endsAt && first.endsAt - advanceAt <= 1500 && advanceBody?.compositionId === first.id && advanceBody?.advanceToken === first.advanceToken, JSON.stringify({ advanceAt, endsAt: first.endsAt, advanceBody }));
-  check("stale advance response immediately refetches the promoted composition", gets >= 2 && secondFetchedAt > 0 && secondFetchedAt - advanceAt < 250, `gets=${gets} handoffMs=${secondFetchedAt - advanceAt}`);
-  check("promoted composition is scheduled without the four-second polling gap", frequencies.some((value) => Math.abs(value - 523.251) < 0.01), JSON.stringify(frequencies));
-  for (const handler of harness.windowListeners.get("pagehide") || []) handler({ persisted: false });
+  await timers.tick(100);
+  check("shortest valid track completion schedules no viewer advance or immediate read", calls.length === 3 && musicGets === 1 && !calls.some((call) => call.path === "/v1/music/advance"), JSON.stringify(calls));
+  for (let i = 0; i < 29; i++) {
+    emit(harness.windowListeners, "focus");
+    await timers.tick(1_000);
+  }
+  emit(harness.windowListeners, "focus");
+  await timers.tick(900);
+  check("the next track arrives through the single normal music poll", musicGets === 2 && frequencies.some((value) => Math.abs(value - 523.251) < 0.01), JSON.stringify({ musicGets, frequencies }));
+  for (let i = 0; i < 30; i++) {
+    emit(harness.windowListeners, "focus");
+    await timers.tick(1_000);
+  }
+  const callsByPath = calls.reduce((counts, call) => ({ ...counts, [call.path]: (counts[call.path] || 0) + 1 }), {});
+  check("repeat visible focus events cannot exceed twelve DO calls through sixty seconds", calls.length === 12 && callsByPath["/v1/canvas"] === 6 && callsByPath["/v1/feed"] === 3 && callsByPath["/v1/music"] === 3, JSON.stringify({ callsByPath, calls }));
+  check("the viewer never calls the public music advance route", !calls.some((call) => call.path === "/v1/music/advance"), JSON.stringify(calls));
+  emit(harness.windowListeners, "pagehide", { persisted: false });
 }
 
 process.exitCode = failed ? 1 : 0;
