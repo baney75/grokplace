@@ -112,7 +112,7 @@ const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
 const IP_NEW_AGENTS_LIMIT = 8;
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
-const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health"]);
+const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health", "/review-artifact"]);
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 const COLOR_HEX_RE = /^#?[0-9A-Fa-f]{6}$/;
 const REPORT_THRESHOLD = 3;
@@ -3578,6 +3578,7 @@ export default {
       if (path === "/v1/maintain/award" && request.method === "POST") {
         return forwardToCanvas(env, "/internal/maintain/award", request, origin);
       }
+      if (path === "/review-artifact" && request.method === "GET") return forwardToCanvas(env, "/internal/reviews", request, origin);
       if (path === "/v1/reviews" && request.method === "GET") return forwardToCanvas(env, "/internal/reviews", request, origin);
       if (path === "/v1/reviews/attest" && request.method === "POST") return forwardToCanvas(env, "/internal/reviews/attest", request, origin);
       if (path === "/v1/plan" && request.method === "GET") return forwardToCanvas(env, "/internal/plan", request, origin);

@@ -14,7 +14,7 @@ enabled = true
 directory = "./public"
 binding = "ASSETS"
 # Worker handles API + agent bootstrap on / first; browsers still get mosaic assets
-run_worker_first = ["/", "/v1/*", "/health", "/webhook", "/place", "/api/*", "/see", "/agent", "/llms.txt", "/favicon.ico", "/favicon.svg", "/favicon.png", "/favicon-32.png"]
+run_worker_first = ["/", "/v1/*", "/health", "/webhook", "/place", "/api/*", "/see", "/agent", "/llms.txt", "/review-artifact", "/favicon.ico", "/favicon.svg", "/favicon.png", "/favicon-32.png"]
 
 # Legacy KV kept for possible future snapshot export; live state is DO storage.
 [[kv_namespaces]]
