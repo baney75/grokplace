@@ -143,21 +143,47 @@ body.mosaic-only #yt-player-inner {
   width: 280px;
   height: 160px;
 }
-.audio-unlock {
+
+/* Brand mark — upper left, transparent logo over mosaic (no chrome / no edit UI) */
+.brand-logo {
   position: fixed;
-  left: 50%;
-  bottom: 1.25rem;
-  transform: translateX(-50%);
-  z-index: 70;
-  border: 1px solid #2a3140;
-  background: rgba(15, 19, 26, 0.92);
-  color: #eef2f8;
-  border-radius: 999px;
-  padding: 0.55rem 1.1rem;
-  font: inherit;
-  cursor: pointer;
+  top: max(0.75rem, env(safe-area-inset-top));
+  left: max(0.75rem, env(safe-area-inset-left));
+  z-index: 80;
+  display: block;
+  line-height: 0;
+  background: transparent !important;
+  border: none;
+  padding: 0;
+  margin: 0;
+  text-decoration: none;
+  pointer-events: auto;
+  opacity: 0.92;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+  transition: opacity 0.15s ease;
 }
-.audio-unlock[hidden] {
+.brand-logo:hover {
+  opacity: 1;
+}
+.brand-logo img {
+  display: block;
+  width: min(160px, 42vw);
+  height: auto;
+  background: transparent !important;
+  border: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* Kill any leftover edit / control chrome if old CSS paths load */
+.edit-fab,
+.audio-unlock,
+.canvas-toolbar,
+.music-dock,
+.side,
+.top,
+.placemat-chrome {
   display: none !important;
 }
 

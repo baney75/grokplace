@@ -7,9 +7,8 @@
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const ytHost = document.getElementById("yt-player");
   const spHost = document.getElementById("sp-player");
-  const unlockBtn = document.getElementById("audio-unlock");
 
-  let muted = true; // browser autoplay: start muted until user gesture
+  let muted = true; // browser autoplay: start muted until first gesture (no UI)
   let volume = 50;
   let musicVersion = -1;
   let nowTrack = null;
@@ -219,36 +218,29 @@
   }
 
   function unlockAudio() {
+    if (!muted) return;
     muted = false;
     applyAudio();
-    if (unlockBtn) unlockBtn.hidden = true;
-    // re-mount current track with sound if needed
     if (nowTrack) renderNow(nowTrack);
   }
 
-  // One optional gesture for browser autoplay policy — not a control panel
-  if (unlockBtn) {
-    unlockBtn.hidden = false;
-    unlockBtn.addEventListener("click", unlockAudio);
-  }
-  document.addEventListener(
+  // No buttons / no edit chrome — first pointer on the mosaic unlocks audio (browser policy)
+  document.getElementById("canvas-wrap")?.addEventListener(
     "pointerdown",
     () => {
-      if (muted && unlockBtn && !unlockBtn.hidden) {
-        /* keep button until they tap it or first canvas click unlocks softly muted play */
-      }
+      unlockAudio();
     },
     { once: true }
   );
 
-  // Double-tap mosaic = toggle mute (minimal, no chrome)
+  // Double-tap mosaic = mute toggle (still no UI chrome)
   let lastTap = 0;
   document.getElementById("canvas-wrap")?.addEventListener("pointerup", () => {
     const t = Date.now();
     if (t - lastTap < 350) {
       muted = !muted;
       applyAudio();
-      if (!muted && unlockBtn) unlockBtn.hidden = true;
+      if (!muted && nowTrack) renderNow(nowTrack);
     }
     lastTap = t;
   });
