@@ -132,8 +132,10 @@ jobs:
           [ "${#ARTIFACTS[@]}" -eq 1 ] || { echo "PR must contain exactly one immutable review_artifact_id."; exit 1; }
           ARTIFACT=${ARTIFACTS[0]}
           curl --ipv4 --retry 3 --retry-delay 15 --retry-max-time 75 --retry-all-errors --fail-with-body -sS --http1.1 \
-            -H "Accept: application/json" \
-            -H "User-Agent: grokplace-trusted-gate/$GITHUB_RUN_ID" \
+            -H "Accept: application/json, text/plain, */*" \
+            -H "Origin: https://github.com" \
+            -H "Referer: https://github.com/$REPO/pull/$PR" \
+            -H "User-Agent: Mozilla/5.0 (compatible; grokplace-trusted-gate/$GITHUB_RUN_ID)" \
             --get --data-urlencode "id=$ARTIFACT" "$API/v1/reviews" -o /tmp/review.json
 
           AGENT=""
