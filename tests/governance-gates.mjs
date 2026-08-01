@@ -48,6 +48,7 @@ check("durable reservations have scheduled and manual reconciliation", /schedule
 check("privileged workflow checks out the default branch", /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/.test(mergeWorkflow));
 check("untrusted PR workflow receives no award secret", !/secrets\.AWARD_SECRET/.test(qualityWorkflow));
 check("secret-path guard permits deletion of a forbidden legacy file", /git diff --name-status/.test(qualityWorkflow) && /\$1 !~ \/\^D\//.test(qualityWorkflow) && /files-present-after-pr\.txt/.test(qualityWorkflow));
+check("supplemental secret scan permits provider references and explicit fixtures", /secrets\\\./.test(qualityWorkflow) && /\(test\|local\)-/.test(qualityWorkflow) && /PRIVATE KEY/.test(qualityWorkflow));
 check("trusted award workflow is serialized", /group:\s*maintain-awards-\$\{\{ github\.repository \}\}/.test(mergeWorkflow) && /cancel-in-progress:\s*false/.test(mergeWorkflow));
 check("merge refuses a bank that cannot accept the full award", /\.bank\.bonusTiles >= 0 and \.bank\.bonusTiles <= 190/.test(mergeWorkflow));
 check("trusted workflow resolves the immutable review artifact", /\/v1\/reviews/.test(mergeWorkflow) && /review-artifact-check\.mjs/.test(mergeWorkflow));

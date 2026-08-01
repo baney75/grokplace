@@ -42,7 +42,9 @@ jobs:
           git diff --name-status "$BASE"..."$HEAD" | awk '$1 !~ /^D/ { print $NF }' > /tmp/files-present-after-pr.txt
           cat /tmp/files.txt
           # Secrets in patch always fail
-          if git diff "$BASE"..."$HEAD" | grep -Ei 'BEGIN (RSA |OPENSSH )?PRIVATE KEY|AWARD_SECRET\s*[:=]|RESET_SECRET\s*=\s*["'\''][^"'\'']+'; then
+          if git diff "$BASE"..."$HEAD" \
+            | grep -Ei 'BEGIN (RSA |OPENSSH )?PRIVATE KEY|(AWARD_SECRET|RESET_SECRET)[[:space:]]*[:=][[:space:]]*["'\''][^"'\'']{8,}' \
+            | grep -Eiv '\$\{\{[[:space:]]*secrets\.|(AWARD_SECRET|RESET_SECRET)[[:space:]]*:[[:space:]]*["'\'']?(test|local)-'; then
             echo "::error::Possible secret material in diff."
             exit 1
           fi
