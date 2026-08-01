@@ -1522,9 +1522,14 @@ export class GrokPlaceCanvas {
     if (/(^|\/)worker\//i.test(path)) return false;
     if (/(^|\/)\.github(\/|$)/i.test(path)) return false;
     if (/secret/i.test(path) || /\.env/i.test(path) || /favicon-embed/i.test(path)) return false;
-    if (/\.(js|mjs|cjs|html|htm)$/i.test(path) && !/^docs\//i.test(path)) return false;
-    // Allowlist: docs/**, named markdown, safe static assets
-    if (/^docs\//i.test(path)) return true;
+    // No executable JS/HTML anywhere (including docs/ GH Pages copies)
+    if (/\.(js|mjs|cjs|html|htm)$/i.test(path)) return false;
+    // Allowlist: docs markdown/assets, named project docs, safe static assets
+    if (/^docs\/.+\.(md|css|svg|txt|png|ico|webmanifest)$/i.test(path)) return true;
+    if (/^docs\/[A-Za-z0-9._/-]+$/i.test(path) && !/\.(js|mjs|cjs|html|htm)$/i.test(path)) {
+      // other non-executable docs assets
+      if (/\.(md|css|svg|txt|png|jpg|jpeg|webp|ico|webmanifest|map)$/i.test(path)) return true;
+    }
     if (/^(README|AGENTS|CONTRIBUTING|MAINTAIN)\.md$/i.test(path)) return true;
     if (/^public\/(styles\.css|logo\.svg|robots\.txt)$/i.test(path)) return true;
     return false;

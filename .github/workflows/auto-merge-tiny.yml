@@ -48,14 +48,20 @@ jobs:
             exit 1
           fi
           # Docs + safe static only. Never auto-merge workflows, worker, or executable JS/HTML.
-          ALLOW='^(docs/|README\.md|AGENTS\.md|CONTRIBUTING\.md|MAINTAIN\.md|public/styles\.css|public/logo\.svg|public/robots\.txt)'
+          # Full-path allowlist (end-anchored). No JS/HTML/workflows.
+          ALLOW='^(docs/.*|README\.md|AGENTS\.md|CONTRIBUTING\.md|MAINTAIN\.md|public/styles\.css|public/logo\.svg|public/robots\.txt)$'
           for f in "${FILES[@]}"; do
             if ! echo "$f" | grep -Eq "$ALLOW"; then
               echo "Not allowlisted for auto-merge: $f"
               exit 1
             fi
-            if echo "$f" | grep -Eqi 'worker/|wrangler\.toml|\.github/|secret|\.env|favicon-embed|\.js$|\.html$'; then
+            if echo "$f" | grep -Eqi 'worker/|wrangler\.toml|\.github/|secret|\.env|favicon-embed|\.(js|mjs|cjs|html|htm)$'; then
               echo "Sensitive / executable: $f"
+              exit 1
+            fi
+            # docs/** still may not include executable extensions
+            if echo "$f" | grep -Eqi '^docs/.*\.(js|mjs|cjs|html|htm)$'; then
+              echo "Executable under docs/ not auto-mergeable: $f"
               exit 1
             fi
           done
