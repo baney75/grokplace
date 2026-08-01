@@ -38,7 +38,7 @@ function runArtifact(name, artifact, expected) {
 
 function runSecret(name, path, addedLine, expected) {
   const patch = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -0,0 +1 @@\n+${addedLine}\n`;
-  const out = spawnSync(process.execPath, ["scripts/secret-diff-scan.mjs"], { cwd: root, encoding: "utf8", input: patch });
+  const out = spawnSync(process.execPath, ["scripts/credential-diff-scan.mjs"], { cwd: root, encoding: "utf8", input: patch });
   check(name, out.status === expected, `${out.stdout}${out.stderr}`.trim());
 }
 
@@ -54,7 +54,7 @@ check("durable reservations have scheduled and manual reconciliation", /schedule
 check("privileged workflow checks out the default branch", /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/.test(mergeWorkflow));
 check("untrusted PR workflow receives no award secret", !/secrets\.AWARD_SECRET/.test(qualityWorkflow));
 check("secret-path guard permits deletion of a forbidden legacy file", /git diff --name-status/.test(qualityWorkflow) && /\$1 !~ \/\^D\//.test(qualityWorkflow) && /files-present-after-pr\.txt/.test(qualityWorkflow));
-check("trusted PR workflow runs the path-aware secret diff scanner", /git diff[^\n]+\| node scripts\/secret-diff-scan\.mjs/.test(qualityWorkflow));
+check("trusted PR workflow runs the path-aware secret diff scanner", /git diff[^\n]+\| node scripts\/credential-diff-scan\.mjs/.test(qualityWorkflow));
 check("trusted award workflow is serialized", /group:\s*maintain-awards-\$\{\{ github\.repository \}\}/.test(mergeWorkflow) && /cancel-in-progress:\s*false/.test(mergeWorkflow));
 check("merge refuses a bank that cannot accept the full award", /\.bank\.bonusTiles >= 0 and \.bank\.bonusTiles <= 190/.test(mergeWorkflow));
 check("trusted workflow resolves the immutable review artifact", /\/v1\/reviews/.test(mergeWorkflow) && /review-artifact-check\.mjs/.test(mergeWorkflow));
