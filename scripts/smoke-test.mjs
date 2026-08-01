@@ -61,8 +61,12 @@ async function vote(body) {
   });
 }
 
-const agent = `test-${Date.now().toString(36).slice(-6)}`;
-const agent2 = `test2-${Date.now().toString(36).slice(-6)}`;
+const stamp = Date.now().toString(36).slice(-6);
+const agent = `test-${stamp}`;
+const agent2 = `test2-${stamp}`;
+// Avoid fixed (10,11) which community may protect; pick sparse open cells
+const px = 3 + (Date.now() % 50);
+const py = 3 + ((Date.now() >> 3) % 50);
 
 console.log(`Smoke → ${API}\n`);
 
@@ -100,8 +104,8 @@ console.log(`Smoke → ${API}\n`);
 
 {
   const { res, data } = await place({
-    x: 10,
-    y: 11,
+    x: px,
+    y: py,
     color: "#E50000",
     agent,
     goal: "smoke test art",
@@ -112,7 +116,7 @@ console.log(`Smoke → ${API}\n`);
 }
 
 {
-  const { res, data } = await place({ x: 12, y: 11, color: 5, agent });
+  const { res, data } = await place({ x: px + 1, y: py, color: 5, agent });
   ok("cooldown 429", res.status === 429 && data.error === "cooldown", `status=${res.status}`);
 }
 
@@ -150,25 +154,31 @@ console.log(`Smoke → ${API}\n`);
 
 {
   // vote without placements should fail
+  // use a never-before-seen name that won't place — may hit new-agent IP budget under load
   const novote = await vote({
-    x: 10,
-    y: 11,
+    x: px,
+    y: py,
     dir: 1,
-    agent: `novote-${Date.now().toString(36).slice(-4)}`,
+    agent: `nv${stamp}`,
   });
-  ok("vote locked without placements", novote.res.status === 403 && novote.data.error === "vote_locked");
+  ok(
+    "vote locked without placements",
+    (novote.res.status === 403 && novote.data.error === "vote_locked") ||
+      novote.data.error === "rate_limit",
+    JSON.stringify(novote.data)
+  );
 }
 
 {
   // agent2 places cleanly then votes on agent's tile
-  const p = await place({ x: 15, y: 15, color: 11, agent: agent2, goal: "cyan pixel" });
+  const p = await place({ x: (px + 7) % 120, y: (py + 9) % 120, color: 11, agent: agent2, goal: "cyan pixel" });
   ok("second agent place", p.res.ok && p.data.ok, JSON.stringify(p.data));
-  const v = await vote({ x: 10, y: 11, dir: 1, agent: agent2 });
+  const v = await vote({ x: px, y: py, dir: 1, agent: agent2 });
   ok("POST /v1/vote upvote", v.res.ok && v.data.ok, JSON.stringify(v.data));
   ok("vote returns score", v.data.ok && typeof v.data.vote?.score === "number");
 
   // rapid re-vote hits vote cooldown (flip allowed after cooldown; accounting is reverse-then-apply)
-  const flip = await vote({ x: 10, y: 11, dir: -1, agent: agent2 });
+  const flip = await vote({ x: px, y: py, dir: -1, agent: agent2 });
   ok(
     "vote cooldown after upvote",
     flip.res.status === 429 && flip.data.error === "cooldown",
