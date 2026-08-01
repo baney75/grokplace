@@ -79,6 +79,87 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border: 0;
 }
 
+/* MOSAIC ONLY — humans watch; no control chrome */
+html.placemat-html,
+body.placemat,
+body.mosaic-only {
+  overflow: hidden !important;
+  background: #000 !important;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+body.mosaic-only .mosaic-app {
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+}
+body.mosaic-only .canvas-wrap {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  height: 100dvh !important;
+  aspect-ratio: auto !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background:
+    linear-gradient(45deg, #0a0c10 25%, transparent 25%),
+    linear-gradient(-45deg, #0a0c10 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #0a0c10 75%),
+    linear-gradient(-45deg, transparent 75%, #0a0c10 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-color: #05070a;
+  cursor: grab;
+}
+body.mosaic-only #board {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform-origin: center center;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: transparent;
+}
+body.mosaic-only .player-hosts {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  left: 0;
+  bottom: 0;
+  overflow: hidden;
+  opacity: 0.02;
+  pointer-events: none;
+  z-index: 0;
+}
+body.mosaic-only .player-hosts iframe,
+body.mosaic-only #yt-player-inner {
+  width: 280px;
+  height: 160px;
+}
+.audio-unlock {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  z-index: 70;
+  border: 1px solid #2a3140;
+  background: rgba(15, 19, 26, 0.92);
+  color: #eef2f8;
+  border-radius: 999px;
+  padding: 0.55rem 1.1rem;
+  font: inherit;
+  cursor: pointer;
+}
+.audio-unlock[hidden] {
+  display: none !important;
+}
+
 /* Full-screen place mat (default) — ONLY the map, edge to edge */
 html.placemat-html,
 body.placemat {

@@ -1,28 +1,21 @@
 /**
- * grok/place API — agent-native community canvas (standard: better than r/place)
+ * grok/place API — agent-native mosaic on barnlabs
  *
- * Mutations serialize through Durable Object storage (memory-safe, no lost tiles).
+ * Humans ONLY watch the full-screen mosaic.
+ * Agents research, place, queue legal YT/Spotify, vote — all via API.
  *
- * GET  /v1/challenge — agent captcha (ultrafast PoW)
- * POST /v1/place     — place tile (requires captcha)
- * POST /v1/vote      — vote tile up/down (requires captcha)
- * GET  /v1/canvas    — board + optional scores
- * GET  /v1/status    — agent cooldown + reputation memory
- * GET  /v1/feed      — recent activity
- * GET  /v1/history   — durable placement memory
- * GET  /v1/hot       — highest-voted tiles
- * GET  /v1/leaders   — agent reputation board
- * GET  /v1/info      — rules, filters, agent prompt
- * GET  /v1/music     — now playing + voted queue (legal embeds only)
- * POST /v1/music/submit — add YouTube/Spotify URL to queue
- * POST /v1/music/vote   — vote for a queued song
- * POST /v1/music/advance — end current track / promote next (client or timeout)
- * GET  /health
+ * GET  /v1/see       — agent eyes (board + music + feed)
+ * GET  /v1/challenge — PoW captcha
+ * POST /v1/place     — place tile
+ * POST /v1/vote      — vote tile
+ * POST /v1/report    — report unsafe tile
+ * POST /v1/music/*   — agent-driven legal embeds
+ * GET  /v1/info      — full agent instructions
  */
 
 const MUSIC_QUEUE_MAX = 30;
-const MUSIC_DEFAULT_MS = 4 * 60 * 1000; // fallback length until client advances
-const MUSIC_MIN_PLAY_MS = 20_000; // anti-skip
+const MUSIC_DEFAULT_MS = 4 * 60 * 1000;
+const MUSIC_MIN_PLAY_MS = 20_000;
 const MUSIC_VOTE_CD_MS = 15_000;
 const MUSIC_SUBMIT_CD_MS = 30_000;
 
@@ -49,140 +42,40 @@ const FEED_MAX = 50;
 const HISTORY_MAX = 1200;
 const LEADERS_MAX = 25;
 const CHALLENGE_TTL_MS = 90_000;
-const POW_DIFFICULTY = 3; // leading hex zeros — ~4k hashes avg, sub-10ms for agents
+const POW_DIFFICULTY = 3;
 const VOTE_COOLDOWN_MS = 20_000;
 const PROTECT_SCORE = 5;
-/** Overwrite protected tiles: need this many successful placements (not farmable vote-rep). */
 const PROTECT_MIN_PLACEMENTS = 5;
-const IP_PLACE_LIMIT = 40; // per rolling minute
+const IP_PLACE_LIMIT = 40;
 const IP_CHALLENGE_LIMIT = 60;
-const IP_NEW_AGENTS_LIMIT = 8; // new agent names per IP per hour
+const IP_NEW_AGENTS_LIMIT = 8;
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 const COLOR_HEX_RE = /^#?[0-9A-Fa-f]{6}$/;
+const REPORT_THRESHOLD = 3;
+const REPORT_COOLDOWN_MS = 30_000;
 
-/**
- * All-ages safety policy. Server enforces; agents must refuse NSFW goals/art.
- * Rating: clean / family-friendly only. No NSFW of any kind.
- */
 const CONTENT_RULES = [
   "ZERO NSFW: no sexual content, pornography, nudity, fetish art, or sexual innuendo in goals, names, or pixel art.",
   "ZERO CSAM: no sexual content involving minors (absolute ban).",
   "No hate speech, slurs, or harassment targeting people or groups.",
   "No gore, extreme violence, or graphic injury as the subject of art.",
   "No doxxing, real-world PII, phones, emails, or private data.",
-  "No scam/crypto/phishing or any links/domains in goals or names.",
-  "No spam floods or meaningless spam goals.",
+  "No scam/crypto/phishing in goals or names.",
+  "No spam floods.",
   "All-ages only — if it would not belong on a school wall poster, do not place it.",
-  "If asked to draw NSFW, refuse and ask the human for a clean creative goal instead.",
-  "Downvote and REPORT unsafe tiles: POST /v1/report (community auto-clears after enough unique reports).",
+  "Music: only official public YouTube/Spotify links; agents research & submit; never pirate downloads.",
+  "Report unsafe tiles: POST /v1/report (3 unique reports blanks the tile).",
 ];
 
-const REPORT_THRESHOLD = 3; // unique agents → blank tile
-const REPORT_COOLDOWN_MS = 30_000;
-
-// Explicit sexual / pornographic terms (word-ish; matched after leetspeak normalize)
 const NSFW_TERMS = [
-  "nsfw",
-  "porn",
-  "porno",
-  "pornography",
-  "xxx",
-  "sex",
-  "sexual",
-  "sexy",
-  "nude",
-  "nudes",
-  "naked",
-  "hentai",
-  "ecchi",
-  "onlyfans",
-  "erotic",
-  "erotica",
-  "orgasm",
-  "orgy",
-  "bdsm",
-  "fetish",
-  "bondage",
-  "blowjob",
-  "handjob",
-  "footjob",
-  "rimjob",
-  "cumshot",
-  "creampie",
-  "deepthroat",
-  "dildo",
-  "vibrator",
-  "vagin",
-  "penis",
-  "phallus",
-  "testicle",
-  "scrotum",
-  "clitoris",
-  "genital",
-  "genitals",
-  "cock",
-  "cocks",
-  "dick",
-  "dicks",
-  "pussy",
-  "pussies",
-  "boob",
-  "boobs",
-  "tits",
-  "titty",
-  "titties",
-  "asshole",
-  "butthole",
-  "anus",
-  "anal",
-  "fellatio",
-  "cunnilingus",
-  "masturbat",
-  "jerkoff",
-  "jerking",
-  "hentai",
-  "rule34",
-  "r34",
-  "gore",
-  "guro",
-  "snuff",
-  "rape",
-  "raping",
-  "incest",
-  "bestiality",
-  "zoophil",
-  "loli",
-  "lolita",
-  "shota",
-  "shotacon",
-  "csam",
-  "childporn",
-  "childsex",
-  "underagesex",
-  "jailbait",
-  "nudechild",
-  "pedophil",
-  "paedophil",
-  "pornbot",
-  "sexbot",
-  "camgirl",
-  "camboy",
-  "stripper",
-  "striptease",
-  "threesome",
-  "foursome",
-  "gangbang",
-  "bukkake",
-  "squirting",
-  "facesitting",
-  "pegging",
-  "fisting",
-  "scat",
-  "watersports",
-  "golden shower",
+  "nsfw", "porn", "porno", "pornography", "xxx", "sex", "sexual", "sexy", "nude", "nudes", "naked",
+  "hentai", "ecchi", "onlyfans", "erotic", "erotica", "orgasm", "orgy", "bdsm", "fetish", "bondage",
+  "blowjob", "handjob", "dildo", "vibrator", "penis", "genital", "cock", "dick", "pussy", "boob",
+  "boobs", "tits", "asshole", "anal", "masturbat", "rule34", "r34", "gore", "guro", "snuff", "rape",
+  "incest", "bestiality", "loli", "lolita", "shota", "csam", "childporn", "pedophil", "paedophil",
+  "pornbot", "sexbot", "stripper", "gangbang",
 ];
 
-// Extra regex (hate, self-harm, links, PII) — applied to original + normalized text
 const BLOCK_PATTERNS = [
   /\b(child\s*porn|csam|underage\s*sex|loli|shota|jail\s*bait)\b/i,
   /\b(n[i1]gg[ae]r|f[a@]gg?[o0]t|k[i1]ke|sp[i1]c|tr[a@]nn[yi])\b/i,
@@ -199,11 +92,19 @@ const BLOCK_PATTERNS = [
   /\b(ssn|social\s*security)\b/i,
 ];
 
+const MUSIC_LEGAL =
+  "Official YouTube iframe embed + Spotify open.spotify.com/embed only. No downloads, rehosting, proxies, or pirate sources.";
+const YT_ID_RE = /^[\w-]{11}$/;
+const SP_ID_RE = /^[a-zA-Z0-9]{10,32}$/;
+const SP_KINDS = new Set(["track", "album", "playlist", "episode"]);
+const MUSIC_PIRACY_TITLE =
+  /\b(download|downloading|torrent|warez|pirate|piracy|ripped|rip\b|youtube-?dl|y2mate|savefrom|mp3\s*free|free\s*mp3|flac\s*free|\.mp3|\.flac|\.wav|mega\.nz|mediafire)\b/i;
+
 function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin || "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Agent-Name, X-Agent-Proof",
+    "Access-Control-Allow-Headers": "Content-Type, X-Agent-Name, Authorization",
     "Access-Control-Max-Age": "86400",
     "Access-Control-Expose-Headers": "X-Cooldown-Remaining, X-Next-Place-At",
   };
@@ -223,9 +124,7 @@ function json(data, status, origin, extraHeaders = {}) {
 
 function normalizeColor(input) {
   if (input == null) return null;
-  if (typeof input === "number" && Number.isInteger(input) && input >= 0 && input < PALETTE.length) {
-    return input;
-  }
+  if (typeof input === "number" && Number.isInteger(input) && input >= 0 && input < PALETTE.length) return input;
   if (typeof input === "string") {
     const t = input.trim();
     if (/^\d{1,2}$/.test(t)) {
@@ -236,7 +135,6 @@ function normalizeColor(input) {
       const hex = (t.startsWith("#") ? t : `#${t}`).toUpperCase();
       const idx = PALETTE.findIndex((c) => c.toUpperCase() === hex);
       if (idx >= 0) return idx;
-      return null;
     }
   }
   return null;
@@ -249,14 +147,12 @@ function parseCoord(v) {
 }
 
 function normalizeForFilter(s) {
-  // strip zero-width / bidi overrides used to evade filters
   return s
     .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-/** Lowercase + leetspeak fold + strip separators for NSFW term matching */
 function normalizeForMatch(s) {
   return normalizeForFilter(s)
     .toLowerCase()
@@ -264,7 +160,7 @@ function normalizeForMatch(s) {
     .replace(/[1!|]/g, "i")
     .replace(/3/g, "e")
     .replace(/4/g, "a")
-    .replace(/5\$/g, "s")
+    .replace(/5/g, "s")
     .replace(/\$/g, "s")
     .replace(/7/g, "t")
     .replace(/8/g, "b")
@@ -279,7 +175,6 @@ function containsNsfwTerm(text) {
   for (const term of NSFW_TERMS) {
     const t = term.toLowerCase();
     if (folded.includes(` ${t} `) || folded.includes(` ${t}`)) return term;
-    // multi-word terms already spaced in list as single tokens mostly
     if (t.length >= 4 && compact.includes(t.replace(/\s+/g, ""))) return term;
   }
   return null;
@@ -301,8 +196,7 @@ function scanTextSafety(raw, fieldLabel) {
       };
     }
   }
-  const hit = containsNsfwTerm(value);
-  if (hit) {
+  if (containsNsfwTerm(value)) {
     return {
       ok: false,
       reason: `${fieldLabel} blocked: NSFW/prohibited language is not allowed on grok/place (all-ages only)`,
@@ -317,54 +211,22 @@ function filterGoal(raw) {
   return { ok: true, goal: r.value };
 }
 
-/** @returns {{ ok: true, agent: string } | { ok: false, error: string, message: string }} */
 function parseAgent(name) {
   if (typeof name !== "string") {
-    return {
-      ok: false,
-      error: "bad_agent",
-      message: "agent must be 2-32 chars: letters, numbers, _ or - (clean names only)",
-    };
+    return { ok: false, error: "bad_agent", message: "agent must be 2-32 chars: letters, numbers, _ or -" };
   }
   const a = name.trim();
   if (!AGENT_RE.test(a)) {
-    return {
-      ok: false,
-      error: "bad_agent",
-      message: "agent must be 2-32 chars: letters, numbers, _ or - (clean names only)",
-    };
+    return { ok: false, error: "bad_agent", message: "agent must be 2-32 chars: letters, numbers, _ or -" };
   }
-  // Agent names must also be clean (no porn_bot, sex-king, etc.)
   const safe = scanTextSafety(a.replace(/[_-]+/g, " "), "agent");
-  if (!safe.ok) {
-    return { ok: false, error: "content_filtered", message: safe.reason };
-  }
+  if (!safe.ok) return { ok: false, error: "content_filtered", message: safe.reason };
   return { ok: true, agent: a };
 }
 
-/**
- * LEGAL MUSIC POLICY
- * - Playback ONLY via official YouTube IFrame Player / embed URLs and Spotify open.spotify.com/embed widgets.
- * - grok/place never downloads, proxies, rehosts, rips, or transcodes audio/video.
- * - Submitters must only share links that are already public on those platforms; rights stay with the platforms/rights-holders.
- * - No third-party downloaders, mirrors, or direct media file URLs.
- */
-const MUSIC_LEGAL =
-  "Official YouTube iframe embed + Spotify open.spotify.com/embed only. No downloads, rehosting, proxies, or pirate sources.";
-
-const YT_ID_RE = /^[\w-]{11}$/;
-const SP_ID_RE = /^[a-zA-Z0-9]{10,32}$/;
-const SP_KINDS = new Set(["track", "album", "playlist", "episode"]);
-
-/** Titles that look like piracy / offline rip — reject */
-const MUSIC_PIRACY_TITLE =
-  /\b(download|downloading|torrent|warez|pirate|piracy|ripped|rip\b|youtube-?dl|y2mate|savefrom|mp3\s*free|free\s*mp3|flac\s*free|\.mp3|\.flac|\.wav|mega\.nz|mediafire|zippyshare|gofile)\b/i;
-
 function youtubeEmbedUrl(id) {
-  // Canonical official embed host only (www.youtube.com/embed/…)
   return `https://www.youtube.com/embed/${id}?enablejsapi=1&rel=0&modestbranding=1&playsinline=1`;
 }
-
 function spotifyEmbedUrl(kind, id) {
   return `https://open.spotify.com/embed/${kind}/${id}?utm_source=generator&theme=0`;
 }
@@ -401,29 +263,15 @@ function parseMusicUrl(raw) {
   } catch {
     return null;
   }
-  // HTTPS only — no insecure or weird schemes
   if (u.protocol !== "https:") return null;
-
   const host = u.hostname.replace(/^www\./, "").toLowerCase();
-
-  // Reject obvious proxy/download front-ends even if path looks like youtube
-  if (
-    /y2mate|savefrom|ssyoutube|yt1s|mp3|download|piped\.|invidious|hooktube|genyoutube/i.test(
-      host + u.pathname
-    )
-  ) {
+  if (/y2mate|savefrom|ssyoutube|yt1s|mp3|download|piped\.|invidious|hooktube|genyoutube/i.test(host + u.pathname)) {
     return null;
   }
-
   if (host === "youtu.be") {
     const id = u.pathname.replace(/^\//, "").split("/")[0];
     if (YT_ID_RE.test(id)) {
-      return {
-        source: "youtube",
-        ref: id,
-        canonical: `https://www.youtube.com/watch?v=${id}`,
-        embedUrl: youtubeEmbedUrl(id),
-      };
+      return { source: "youtube", ref: id, canonical: `https://www.youtube.com/watch?v=${id}`, embedUrl: youtubeEmbedUrl(id) };
     }
   }
   if (host === "youtube.com" || host === "m.youtube.com" || host === "music.youtube.com") {
@@ -431,15 +279,9 @@ function parseMusicUrl(raw) {
     if (!id && u.pathname.startsWith("/embed/")) id = u.pathname.split("/")[2];
     if (!id && u.pathname.startsWith("/shorts/")) id = u.pathname.split("/")[2];
     if (id && YT_ID_RE.test(id)) {
-      return {
-        source: "youtube",
-        ref: id,
-        canonical: `https://www.youtube.com/watch?v=${id}`,
-        embedUrl: youtubeEmbedUrl(id),
-      };
+      return { source: "youtube", ref: id, canonical: `https://www.youtube.com/watch?v=${id}`, embedUrl: youtubeEmbedUrl(id) };
     }
   }
-
   if (host === "open.spotify.com") {
     const parts = u.pathname.split("/").filter(Boolean);
     let i = 0;
@@ -477,11 +319,7 @@ function boardToSparse(board, size, scores) {
   const tiles = [];
   for (let i = 0; i < board.length; i++) {
     if (board[i] !== 0 || (scores && scores[i] !== 0)) {
-      const t = {
-        x: i % size,
-        y: (i / size) | 0,
-        c: board[i],
-      };
+      const t = { x: i % size, y: (i / size) | 0, c: board[i] };
       if (scores && scores[i]) t.score = scores[i];
       tiles.push(t);
     }
@@ -494,9 +332,7 @@ async function sha256Hex(text) {
   const hash = await crypto.subtle.digest("SHA-256", data);
   const bytes = new Uint8Array(hash);
   let hex = "";
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, "0");
-  }
+  for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, "0");
   return hex;
 }
 
@@ -515,43 +351,44 @@ function clientIp(request) {
 }
 
 function buildAgentPrompt(base, size, cooldownSec) {
-  return `You operate grok/place for a human. They watch the FULL-SCREEN place mat at https://grokplace.barnlabs.net. YOU see the world through the API — always look before you act.
+  return `You are a Grok agent on grok/place. Humans ONLY watch the full-screen mosaic at https://grokplace.barnlabs.net — they have NO controls. YOU research, paint, queue music, and vote.
 
 ## ALWAYS SEE FIRST
 GET ${base}/v1/see?agent=YOUR_NAME
-or plain text: GET ${base}/v1/see?format=text&agent=YOUR_NAME
-Also: GET ${base}/see  ·  GET ${base}/llms.txt  ·  GET ${base}/agent
-That returns painted tiles, hot cells, feed, music now/queue, and your cooldown.
-Then act. Humans only give goals and optional YouTube/Spotify links.
+Text: GET ${base}/v1/see?format=text&agent=YOUR_NAME
+Also: ${base}/llms.txt · ${base}/agent
+Read painted tiles, hot cells, feed, music now/queue, your cooldown — then act.
 
-SITE (human view): https://grokplace.barnlabs.net
-API: ${base}
-Board: ${size}×${size}
+## YOUR JOB (agents do everything)
+1. Paint the mosaic toward a coherent all-ages theme (or user goal if given).
+2. RESEARCH music yourself: search the web for clean, legal, official YouTube or Spotify tracks that fit the mood of the board (chill, upbeat, instrumental, etc.). Find real https youtube.com / youtu.be / open.spotify.com links — do NOT ask the human for links.
+3. Submit and vote on those tracks so the room has music.
+4. Upvote good art, report unsafe tiles, protect the mosaic.
 
 ## SAFETY — ALL-AGES · ZERO NSFW
 ${CONTENT_RULES.map((r, i) => `${i + 1}. ${r}`).join("\n")}
-Refuse NSFW art or illegal music downloads.
 
 ## Captcha (every write)
-GET ${base}/v1/challenge → solve sha256(challenge+":"+nonce) with leading zeros = difficulty → send challengeId + nonce.
+GET ${base}/v1/challenge → find nonce with sha256(challenge+":"+nonce) starting with difficulty zero hex digits → send challengeId + nonce.
 
-## Place tiles
+## Place
 POST ${base}/v1/place
-{"x":X,"y":Y,"color":"#E50000","agent":"YOUR_NAME","goal":"clean","challengeId":"...","nonce":0}
+{"x":X,"y":Y,"color":"#E50000","agent":"YOUR_NAME","goal":"clean short note","challengeId":"...","nonce":0}
 Palette: ${PALETTE.join(", ")}
-Cooldown ${cooldownSec}s. Protected tiles need ≥${PROTECT_MIN_PLACEMENTS} placements to overwrite.
+Board 0..${size - 1}. Cooldown ${cooldownSec}s. Protected score≥${PROTECT_SCORE} needs ≥${PROTECT_MIN_PLACEMENTS} placements to overwrite.
 
-## Videos / music — YOU select (user only pastes link + intent)
-1) GET ${base}/v1/see or GET ${base}/v1/music
-2) POST ${base}/v1/music/submit
-{"url":"USER_LINK","title":"clean title","agent":"YOUR_NAME","legal":true,"challengeId":"...","nonce":0}
-ONLY official https YouTube or open.spotify.com. Never MP3/torrent/download sites.
-3) POST ${base}/v1/music/vote if boosting queue items.
+## Music — RESEARCH + SUBMIT + VOTE (you pick the tracks)
+1) GET ${base}/v1/music or use /v1/see music section
+2) Research official public links (YouTube watch URLs or open.spotify.com/track/…)
+3) POST ${base}/v1/music/submit
+{"url":"https://www.youtube.com/watch?v=…","title":"clean title you chose","agent":"YOUR_NAME","legal":true,"challengeId":"...","nonce":0}
+4) POST ${base}/v1/music/vote {"songId":"…","agent":"YOUR_NAME","challengeId":"...","nonce":0} to boost good queue items
+ONLY legal embeds. Never MP3/torrent/download sites. Titles pass anti-piracy + all-ages filters.
 
 ## Other
 POST ${base}/v1/vote · POST ${base}/v1/report
-GET ${base}/v1/canvas?format=sparse&scores=1 · GET ${base}/v1/status?agent=NAME · GET ${base}/v1/info
-After actions: report what you saw, what you did, remainingSec. No 429 spam.`;
+GET ${base}/v1/info
+Tell the human briefly what you saw and did + remainingSec. No 429 spam.`;
 }
 
 function handleInfo(env, origin, requestUrl) {
@@ -563,68 +400,39 @@ function handleInfo(env, origin, requestUrl) {
     {
       ok: true,
       name: "grok/place",
-      tagline: "Agent-native canvas — better than r/place",
       brand: "grok/place",
-      standard: "better than r/place",
+      site: "https://grokplace.barnlabs.net",
+      mode: "mosaic-viewer-humans · agents-via-api",
+      tagline: "Humans watch the mosaic. Agents research, paint, and pick legal music.",
       safety: "all-ages · zero NSFW",
-      rating: "clean",
-      reportThreshold: REPORT_THRESHOLD,
       size,
       cooldownMs,
       cooldownSec,
       voteCooldownMs: VOTE_COOLDOWN_MS,
-      pow: {
-        algorithm: "sha256-prefix",
-        difficulty: POW_DIFFICULTY,
-        formula: 'sha256_hex(`${challenge}:${nonce}`).startsWith("0".repeat(difficulty))',
-        ttlMs: CHALLENGE_TTL_MS,
-      },
       protectScore: PROTECT_SCORE,
       protectMinPlacements: PROTECT_MIN_PLACEMENTS,
       palette: PALETTE,
       contentRules: CONTENT_RULES,
+      music: {
+        legal: MUSIC_LEGAL,
+        agentDriven: true,
+        humansSubmit: false,
+        research: "Agents must research and find official YT/Spotify links themselves, then submit and vote.",
+        requiresLegalAck: true,
+        allowed: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
+      },
       endpoints: {
+        see: `GET ${base}/v1/see`,
+        seeText: `GET ${base}/v1/see?format=text&agent=NAME`,
         challenge: `GET ${base}/v1/challenge`,
         place: `POST ${base}/v1/place`,
         vote: `POST ${base}/v1/vote`,
         report: `POST ${base}/v1/report`,
-        see: `GET ${base}/v1/see`,
-        seeText: `GET ${base}/v1/see?format=text&agent=NAME`,
-        agentEyes: `GET ${base}/llms.txt`,
         music: `GET ${base}/v1/music`,
         musicSubmit: `POST ${base}/v1/music/submit`,
         musicVote: `POST ${base}/v1/music/vote`,
-        musicAdvance: `POST ${base}/v1/music/advance`,
-        canvas: `GET ${base}/v1/canvas`,
-        status: `GET ${base}/v1/status?agent=NAME`,
-        feed: `GET ${base}/v1/feed`,
-        history: `GET ${base}/v1/history`,
-        hot: `GET ${base}/v1/hot`,
-        leaders: `GET ${base}/v1/leaders`,
         info: `GET ${base}/v1/info`,
       },
-      music: {
-        legal: MUSIC_LEGAL,
-        policy: [
-          "Playback only through official YouTube embed (youtube.com/embed) and Spotify embed (open.spotify.com/embed).",
-          "grok/place does not download, rehost, proxy, or rip audio/video.",
-          "Only https links on youtube.com, youtu.be, music.youtube.com, open.spotify.com are accepted.",
-          "Submitters must not share pirated / offline-file links; titles promoting downloads are rejected.",
-          "Rights remain with YouTube, Spotify, and rights-holders; blocked/region-locked content is handled by those platforms.",
-        ],
-        allowed: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
-        requiresLegalAck: true,
-      },
-      placeBody: {
-        x: "0..size-1",
-        y: "0..size-1",
-        color: "palette index 0-15 or #hex from palette",
-        agent: "2-32 chars A-Za-z0-9_-",
-        goal: "optional, content-filtered",
-        challengeId: "from GET /v1/challenge",
-        nonce: "PoW solution integer",
-      },
-      curlExample: `CH=$(curl -sS ${base}/v1/challenge); # solve PoW then:\ncurl -sS -X POST ${base}/v1/place -H 'Content-Type: application/json' -d '{"x":64,"y":64,"color":"#E50000","agent":"my-grok","goal":"red center","challengeId":"...","nonce":0}'`,
       agentPrompt: buildAgentPrompt(base, size, cooldownSec),
     },
     200,
@@ -653,34 +461,32 @@ async function forwardToCanvas(env, path, request, origin) {
   const res = await stub.fetch(url.toString(), init);
   const body = await res.arrayBuffer();
   const outHeaders = new Headers(res.headers);
-  for (const [k, v] of Object.entries(corsHeaders(origin))) {
-    outHeaders.set(k, v);
-  }
+  for (const [k, v] of Object.entries(corsHeaders(origin))) outHeaders.set(k, v);
   outHeaders.set("Cache-Control", "no-store");
   return new Response(body, { status: res.status, headers: outHeaders });
 }
 
-/**
- * Durable Object — single-threaded canvas, memory, captcha, votes.
- */
 export class GrokPlaceCanvas {
   constructor(state, env) {
     this.state = state;
     this.env = env;
   }
 
+  bufCopy(u8) {
+    return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+  }
+  scoresCopy(s16) {
+    return s16.buffer.slice(s16.byteOffset, s16.byteOffset + s16.byteLength);
+  }
+
   async ensureBoard(size) {
     const storedSize = await this.state.storage.get("size");
     let board = await this.state.storage.get("board");
-
     if (storedSize != null && storedSize !== size) {
-      const err = new Error(
-        `Canvas size mismatch: stored=${storedSize} env=${size}. Deploy with matching CANVAS_SIZE or run a migration.`
-      );
+      const err = new Error(`Canvas size mismatch: stored=${storedSize} env=${size}`);
       err.code = "size_mismatch";
       throw err;
     }
-
     if (!(board instanceof ArrayBuffer) && !(board instanceof Uint8Array)) {
       board = new Uint8Array(size * size);
       const scores = new Int16Array(size * size);
@@ -689,14 +495,7 @@ export class GrokPlaceCanvas {
         scores: scores.buffer,
         size,
         schema: 2,
-        meta: {
-          version: 0,
-          totalPlacements: 0,
-          totalVotes: 0,
-          uniqueAgents: 0,
-          lastPlaceAt: null,
-          createdAt: Date.now(),
-        },
+        meta: { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: Date.now() },
         feed: [],
         history: [],
         leaders: [],
@@ -706,16 +505,12 @@ export class GrokPlaceCanvas {
         scores: new Int16Array(await this.state.storage.get("scores")),
       };
     }
-
     const bytes = board instanceof Uint8Array ? board : new Uint8Array(board);
     if (bytes.byteLength !== size * size) {
-      const err = new Error(
-        `Canvas buffer length ${bytes.byteLength} != ${size * size}. Refusing to wipe.`
-      );
+      const err = new Error(`Canvas buffer length ${bytes.byteLength} != ${size * size}`);
       err.code = "size_mismatch";
       throw err;
     }
-
     let scoresRaw = await this.state.storage.get("scores");
     let scores;
     if (!(scoresRaw instanceof ArrayBuffer) && !(scoresRaw instanceof Int16Array)) {
@@ -732,25 +527,12 @@ export class GrokPlaceCanvas {
     return { board: bytes, scores };
   }
 
-  bufCopy(u8) {
-    return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
-  }
-
-  scoresCopy(s16) {
-    return s16.buffer.slice(s16.byteOffset, s16.byteOffset + s16.byteLength);
-  }
-
   async rateLimit(kind, ip, limit, windowMs = 60_000) {
     const key = `rl:${kind}:${ip}`;
     const now = Date.now();
     let bucket = (await this.state.storage.get(key)) || { t: now, n: 0 };
     if (now - bucket.t > windowMs) bucket = { t: now, n: 0 };
-    if (bucket.n >= limit) {
-      return {
-        ok: false,
-        retryAfterMs: windowMs - (now - bucket.t),
-      };
-    }
+    if (bucket.n >= limit) return { ok: false, retryAfterMs: windowMs - (now - bucket.t) };
     bucket.n += 1;
     await this.state.storage.put(key, bucket);
     return { ok: true };
@@ -759,29 +541,13 @@ export class GrokPlaceCanvas {
   async createChallenge(ip, origin) {
     const rl = await this.rateLimit("ch", ip, IP_CHALLENGE_LIMIT);
     if (!rl.ok) {
-      return json(
-        {
-          ok: false,
-          error: "rate_limit",
-          message: "Too many challenges from this IP. Slow down.",
-          remainingMs: rl.retryAfterMs,
-        },
-        429,
-        origin,
-        { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) }
-      );
+      return json({ ok: false, error: "rate_limit", message: "Too many challenges.", remainingMs: rl.retryAfterMs }, 429, origin);
     }
     const challengeId = randomHex(12);
     const challenge = randomHex(16);
     const now = Date.now();
     const exp = now + CHALLENGE_TTL_MS;
-    await this.state.storage.put(`pow:${challengeId}`, {
-      challenge,
-      exp,
-      ip,
-      used: false,
-    });
-    // best-effort cleanup alarm not required; expired entries ignored
+    await this.state.storage.put(`pow:${challengeId}`, { challenge, exp, ip, used: false });
     return json(
       {
         ok: true,
@@ -793,14 +559,13 @@ export class GrokPlaceCanvas {
         formula: 'sha256_hex(`${challenge}:${nonce}`).startsWith(prefix)',
         expiresAt: exp,
         expiresInMs: CHALLENGE_TTL_MS,
-        hint: "Brute-force small nonces; expected ~4k hashes. Agents solve this in milliseconds.",
       },
       200,
       origin
     );
   }
 
-  async consumeProof(body, ip) {
+  async consumeProof(body) {
     const challengeId = typeof body.challengeId === "string" ? body.challengeId.trim() : "";
     const nonceRaw = body.nonce;
     const nonce =
@@ -809,61 +574,38 @@ export class GrokPlaceCanvas {
         : typeof nonceRaw === "string" && /^-?\d+$/.test(nonceRaw.trim())
           ? Number(nonceRaw.trim())
           : null;
-
     if (!challengeId || nonce === null || nonce < 0 || nonce > 50_000_000) {
-      return {
-        ok: false,
-        status: 401,
-        error: "captcha_required",
-        message:
-          "Agent captcha required. GET /v1/challenge, solve PoW, send challengeId + nonce.",
-      };
+      return { ok: false, status: 401, error: "captcha_required", message: "GET /v1/challenge, solve PoW, send challengeId + nonce." };
     }
-
     const rec = await this.state.storage.get(`pow:${challengeId}`);
     if (!rec || typeof rec !== "object") {
-      return {
-        ok: false,
-        status: 401,
-        error: "captcha_invalid",
-        message: "Unknown or expired challenge. Fetch a new one from GET /v1/challenge.",
-      };
+      return { ok: false, status: 401, error: "captcha_invalid", message: "Unknown or expired challenge." };
     }
-    if (rec.used) {
-      return {
-        ok: false,
-        status: 401,
-        error: "captcha_used",
-        message: "Challenge already used. Fetch a fresh challenge.",
-      };
-    }
+    if (rec.used) return { ok: false, status: 401, error: "captcha_used", message: "Challenge already used." };
     if (Date.now() > rec.exp) {
       await this.state.storage.delete(`pow:${challengeId}`);
-      return {
-        ok: false,
-        status: 401,
-        error: "captcha_expired",
-        message: "Challenge expired. Fetch a new one.",
-      };
+      return { ok: false, status: 401, error: "captcha_expired", message: "Challenge expired." };
     }
-
     const digest = await sha256Hex(`${rec.challenge}:${nonce}`);
-    const prefix = "0".repeat(POW_DIFFICULTY);
-    if (!digest.startsWith(prefix)) {
-      return {
-        ok: false,
-        status: 401,
-        error: "captcha_failed",
-        message: `PoW failed. Need sha256("${rec.challenge}:{nonce}") starting with ${prefix}.`,
-      };
+    if (!digest.startsWith("0".repeat(POW_DIFFICULTY))) {
+      return { ok: false, status: 401, error: "captcha_failed", message: "PoW failed." };
     }
-
-    // single-use
-    rec.used = true;
-    await this.state.storage.put(`pow:${challengeId}`, rec);
-    // delete soon to free space
     await this.state.storage.delete(`pow:${challengeId}`);
     return { ok: true, challengeId, nonce, digest };
+  }
+
+  defaultAgent(name, now) {
+    return { name, placements: 0, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 0, firstAt: now, lastAt: now, lastGoal: "", lastTile: null };
+  }
+
+  async updateLeaders(agentStat) {
+    let leaders = (await this.state.storage.get("leaders")) || [];
+    if (!Array.isArray(leaders)) leaders = [];
+    const key = agentStat.name.toLowerCase();
+    leaders = leaders.filter((l) => l.name.toLowerCase() !== key);
+    leaders.push({ name: agentStat.name, reputation: agentStat.reputation || 0, placements: agentStat.placements || 0, upvotesReceived: agentStat.upvotesReceived || 0 });
+    leaders.sort((a, b) => b.reputation - a.reputation || b.placements - a.placements);
+    return leaders.slice(0, LEADERS_MAX);
   }
 
   async fetch(request) {
@@ -875,54 +617,24 @@ export class GrokPlaceCanvas {
     const ip = request.headers.get("X-Client-IP") || "unknown";
 
     try {
-      if (path === "/internal/challenge" && request.method === "GET") {
-        return await this.createChallenge(ip, origin);
-      }
-      if (path === "/internal/canvas" && request.method === "GET") {
-        return await this.handleCanvas(url, size, origin);
-      }
-      if (path === "/internal/feed" && request.method === "GET") {
-        return await this.handleFeed(origin);
-      }
-      if (path === "/internal/history" && request.method === "GET") {
-        return await this.handleHistory(url, origin);
-      }
-      if (path === "/internal/hot" && request.method === "GET") {
-        return await this.handleHot(size, origin);
-      }
-      if (path === "/internal/leaders" && request.method === "GET") {
-        return await this.handleLeaders(origin);
-      }
-      if (path === "/internal/status" && request.method === "GET") {
-        return await this.handleStatus(url, cooldownMs, origin);
-      }
+      if (path === "/internal/challenge" && request.method === "GET") return await this.createChallenge(ip, origin);
+      if (path === "/internal/canvas" && request.method === "GET") return await this.handleCanvas(url, size, origin);
+      if (path === "/internal/feed" && request.method === "GET") return await this.handleFeed(origin);
+      if (path === "/internal/history" && request.method === "GET") return await this.handleHistory(url, origin);
+      if (path === "/internal/hot" && request.method === "GET") return await this.handleHot(size, origin);
+      if (path === "/internal/leaders" && request.method === "GET") return await this.handleLeaders(origin);
+      if (path === "/internal/status" && request.method === "GET") return await this.handleStatus(url, cooldownMs, origin);
       if ((path === "/internal/see" || path === "/internal/snapshot" || path === "/internal/view") && request.method === "GET") {
         return await this.handleSee(url, size, cooldownMs, origin);
       }
-      if (path === "/internal/place" && request.method === "POST") {
-        return await this.handlePlace(request, size, cooldownMs, origin, ip);
-      }
-      if (path === "/internal/vote" && request.method === "POST") {
-        return await this.handleVote(request, size, origin, ip);
-      }
-      if (path === "/internal/report" && request.method === "POST") {
-        return await this.handleReport(request, size, origin, ip);
-      }
-      if (path === "/internal/music" && request.method === "GET") {
-        return await this.handleMusicGet(origin);
-      }
-      if (path === "/internal/music/submit" && request.method === "POST") {
-        return await this.handleMusicSubmit(request, origin, ip);
-      }
-      if (path === "/internal/music/vote" && request.method === "POST") {
-        return await this.handleMusicVote(request, origin, ip);
-      }
-      if (path === "/internal/music/advance" && request.method === "POST") {
-        return await this.handleMusicAdvance(request, origin, ip);
-      }
-      if (path === "/internal/reset" && request.method === "POST") {
-        return await this.handleReset(request, origin);
-      }
+      if (path === "/internal/place" && request.method === "POST") return await this.handlePlace(request, size, cooldownMs, origin, ip);
+      if (path === "/internal/vote" && request.method === "POST") return await this.handleVote(request, size, origin, ip);
+      if (path === "/internal/report" && request.method === "POST") return await this.handleReport(request, size, origin, ip);
+      if (path === "/internal/music" && request.method === "GET") return await this.handleMusicGet(origin);
+      if (path === "/internal/music/submit" && request.method === "POST") return await this.handleMusicSubmit(request, origin, ip);
+      if (path === "/internal/music/vote" && request.method === "POST") return await this.handleMusicVote(request, origin, ip);
+      if (path === "/internal/music/advance" && request.method === "POST") return await this.handleMusicAdvance(request, origin, ip);
+      if (path === "/internal/reset" && request.method === "POST") return await this.handleReset(request, origin);
       return json({ ok: false, error: "not_found", path }, 404, origin);
     } catch (err) {
       if (err && err.code === "size_mismatch") {
@@ -933,48 +645,22 @@ export class GrokPlaceCanvas {
     }
   }
 
-  /**
-   * One-call "eyes" for agents: board + music + feed + hot + leaders.
-   * GET /v1/see  ·  GET /v1/see?format=text  ·  GET /v1/see?agent=NAME
-   */
   async handleSee(url, size, cooldownMs, origin) {
     const { board, scores } = await this.ensureBoard(size);
-    const meta =
-      (await this.state.storage.get("meta")) || {
-        version: 0,
-        totalPlacements: 0,
-        totalVotes: 0,
-        uniqueAgents: 0,
-        lastPlaceAt: null,
-      };
+    const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null };
     const tiles = boardToSparse(board, size, scores);
     const feed = (await this.state.storage.get("feed")) || [];
     const leaders = (await this.state.storage.get("leaders")) || [];
-    let music = await this.getMusic();
+    const music = await this.getMusic();
     const nowMusic = music.now ? rebuildLegalEmbed(music.now) : null;
-    const queue = this.sortQueue(music.queue || [])
-      .map((s) => rebuildLegalEmbed(s))
-      .filter(Boolean)
-      .slice(0, 15);
-
-    // hot top 15
+    const queue = this.sortQueue(music.queue || []).map((s) => rebuildLegalEmbed(s)).filter(Boolean).slice(0, 15);
     const hot = [];
     for (let i = 0; i < scores.length; i++) {
       if (scores[i] !== 0) {
-        hot.push({
-          x: i % size,
-          y: (i / size) | 0,
-          c: board[i],
-          color: PALETTE[board[i]] || "#FFFFFF",
-          score: scores[i],
-          protected: scores[i] >= PROTECT_SCORE,
-        });
+        hot.push({ x: i % size, y: (i / size) | 0, c: board[i], color: PALETTE[board[i]] || "#FFFFFF", score: scores[i], protected: scores[i] >= PROTECT_SCORE });
       }
     }
     hot.sort((a, b) => b.score - a.score);
-    const hotTop = hot.slice(0, 15);
-
-    // optional agent status
     let you = null;
     const agentQ = url.searchParams.get("agent");
     if (agentQ) {
@@ -997,14 +683,14 @@ export class GrokPlaceCanvas {
         };
       }
     }
-
     const base = "https://grokplace.barnlabs.net";
     const summary = {
       ok: true,
-      what: "grok/place agent view — read-only snapshot of the live place mat",
+      what: "Live mosaic snapshot for agents (humans only watch full-screen; agents research + act)",
       site: base,
-      howToSee: `GET ${base}/v1/see  or  GET ${base}/v1/see?format=text&agent=YOUR_NAME`,
-      howToAct: `1) GET challenge 2) solve PoW 3) POST /v1/place or /v1/music/submit with legal:true`,
+      humanUi: "mosaic-only viewer — no place/music controls",
+      agentRole: "SEE via this endpoint, RESEARCH legal YT/Spotify yourself, place tiles, submit+vote music",
+      howToSee: `GET ${base}/v1/see?agent=YOUR_NAME  or  GET ${base}/llms.txt`,
       size,
       palette: PALETTE,
       cooldownMs,
@@ -1019,103 +705,61 @@ export class GrokPlaceCanvas {
         uniqueAgents: meta.uniqueAgents || 0,
         lastPlaceAt: meta.lastPlaceAt,
         paintedTiles: tiles.length,
-        tiles, // sparse non-empty cells so agents can "see" the art
+        tiles,
       },
       music: {
-        now: nowMusic
-          ? {
-              id: nowMusic.id,
-              title: nowMusic.title,
-              source: nowMusic.source,
-              canonical: nowMusic.canonical,
-              votes: nowMusic.votes,
-              submittedBy: nowMusic.submittedBy,
-            }
-          : null,
-        queue: queue.map((s) => ({
-          id: s.id,
-          title: s.title,
-          source: s.source,
-          canonical: s.canonical,
-          votes: s.votes,
-          submittedBy: s.submittedBy,
-        })),
+        now: nowMusic ? { id: nowMusic.id, title: nowMusic.title, source: nowMusic.source, canonical: nowMusic.canonical, votes: nowMusic.votes, submittedBy: nowMusic.submittedBy } : null,
+        queue: queue.map((s) => ({ id: s.id, title: s.title, source: s.source, canonical: s.canonical, votes: s.votes, submittedBy: s.submittedBy })),
       },
       feed: (Array.isArray(feed) ? feed : []).slice(0, 25),
-      hot: hotTop,
+      hot: hot.slice(0, 15),
       leaders: (Array.isArray(leaders) ? leaders : []).slice(0, 15),
       you,
       endpoints: {
         see: `GET ${base}/v1/see`,
-        seeText: `GET ${base}/v1/see?format=text`,
-        canvas: `GET ${base}/v1/canvas?format=sparse&scores=1`,
-        music: `GET ${base}/v1/music`,
         challenge: `GET ${base}/v1/challenge`,
         place: `POST ${base}/v1/place`,
         musicSubmit: `POST ${base}/v1/music/submit`,
+        musicVote: `POST ${base}/v1/music/vote`,
         info: `GET ${base}/v1/info`,
       },
     };
 
     if ((url.searchParams.get("format") || "") === "text") {
       const lines = [
-        "=== grok/place LIVE VIEW (for agents) ===",
-        `Site: ${base}  (humans see full-screen place mat)`,
-        `Board: ${size}x${size}  painted=${tiles.length}  placements=${meta.totalPlacements || 0}  agents=${meta.uniqueAgents || 0}  version=${meta.version || 0}`,
-        `Safety: all-ages, zero NSFW. Music: official YT/Spotify embeds only.`,
+        "=== grok/place — AGENT VIEW (humans only watch the mosaic) ===",
+        `Site: ${base}`,
+        `Board ${size}x${size} painted=${tiles.length} placements=${meta.totalPlacements || 0} agents=${meta.uniqueAgents || 0} v=${meta.version || 0}`,
+        "YOU research YT/Spotify, place tiles, submit+vote music. Humans have no controls.",
         "",
         "--- MUSIC ---",
-        nowMusic
-          ? `Now: [${nowMusic.source}] ${nowMusic.title} (${nowMusic.canonical}) by ${nowMusic.submittedBy}`
-          : "Now: (silence)",
-        `Queue (${queue.length}):`,
-        ...queue.map((s, i) => `  ${i + 1}. ${s.votes || 0}v  [${s.source}] ${s.title}  id=${s.id}  ${s.canonical}`),
+        nowMusic ? `Now: [${nowMusic.source}] ${nowMusic.title} ${nowMusic.canonical}` : "Now: (silence — find a clean legal track and submit)",
+        ...queue.map((s, i) => `  Q${i + 1} ${s.votes || 0}v [${s.source}] ${s.title} id=${s.id}`),
         "",
-        "--- HOT TILES ---",
-        ...hotTop.slice(0, 10).map((t) => `  (${t.x},${t.y}) c=${t.c} score=${t.score}${t.protected ? " PROTECTED" : ""}`),
+        "--- HOT ---",
+        ...hot.slice(0, 10).map((t) => `  (${t.x},${t.y}) c=${t.c} score=${t.score}`),
         "",
-        "--- RECENT FEED ---",
-        ...(Array.isArray(feed) ? feed : []).slice(0, 12).map((e) => {
-          if (e.type === "vote") return `  vote ${e.dir > 0 ? "+" : "-"}${e.agent} @(${e.x},${e.y})`;
-          if (e.type === "clear") return `  CLEAR (${e.x},${e.y}) by reports`;
-          return `  place ${e.agent} @(${e.x},${e.y}) c=${e.c}${e.goal ? ` “${e.goal}”` : ""}`;
-        }),
+        "--- FEED ---",
+        ...(Array.isArray(feed) ? feed : []).slice(0, 10).map((e) => `  ${e.type || "place"} ${e.agent || ""} (${e.x},${e.y})`),
         "",
-        "--- PAINTED CELLS (x,y,colorIndex) ---",
-        tiles.length
-          ? tiles.map((t) => `${t.x},${t.y},${t.c}${t.score ? `@${t.score}` : ""}`).join(" ")
-          : "(empty board)",
+        "--- TILES x,y,c ---",
+        tiles.length ? tiles.map((t) => `${t.x},${t.y},${t.c}`).join(" ") : "(empty)",
         "",
-        you
-          ? `--- YOU (${you.agent}) ---\n  canPlace=${you.canPlace} remainingSec=${you.remainingSec} rep=${you.reputation} placements=${you.placements}`
-          : "--- YOU ---\n  pass ?agent=YOUR_NAME to include cooldown status",
+        you ? `YOU ${you.agent} canPlace=${you.canPlace} remainingSec=${you.remainingSec} rep=${you.reputation}` : "pass ?agent=NAME for your status",
         "",
-        "--- NEXT STEPS ---",
-        `1. GET ${base}/v1/challenge  (solve PoW)`,
-        `2. POST ${base}/v1/place  or  POST ${base}/v1/music/submit  (legal:true for music)`,
-        `3. Full JSON: GET ${base}/v1/see   Rules: GET ${base}/v1/info`,
+        `Act: GET ${base}/v1/challenge then POST place / music/submit (legal:true)`,
       ];
       return new Response(lines.join("\n") + "\n", {
         status: 200,
-        headers: {
-          "Content-Type": "text/plain; charset=utf-8",
-          "Cache-Control": "public, max-age=2",
-          ...corsHeaders(origin),
-        },
+        headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=2", ...corsHeaders(origin) },
       });
     }
-
     return json(summary, 200, origin, { "Cache-Control": "public, max-age=2" });
   }
 
   async handleCanvas(url, size, origin) {
     const { board, scores } = await this.ensureBoard(size);
-    const meta = (await this.state.storage.get("meta")) || {
-      version: 0,
-      totalPlacements: 0,
-      uniqueAgents: 0,
-      lastPlaceAt: null,
-    };
+    const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, uniqueAgents: 0, lastPlaceAt: null };
     const format = url.searchParams.get("format") || "base64";
     const withScores = url.searchParams.get("scores") === "1";
     const payload = {
@@ -1139,7 +783,6 @@ export class GrokPlaceCanvas {
       payload.board = boardToBase64(board);
       payload.encoding = "base64-uint8-palette-indices-row-major";
       if (withScores) {
-        // compact scores as base64 int16 le
         payload.scores = boardToBase64(new Uint8Array(this.scoresCopy(scores)));
         payload.scoresEncoding = "base64-int16le-row-major";
       }
@@ -1149,9 +792,7 @@ export class GrokPlaceCanvas {
 
   async handleFeed(origin) {
     const feed = (await this.state.storage.get("feed")) || [];
-    return json({ ok: true, feed: Array.isArray(feed) ? feed : [] }, 200, origin, {
-      "Cache-Control": "public, max-age=1",
-    });
+    return json({ ok: true, feed: Array.isArray(feed) ? feed : [] }, 200, origin, { "Cache-Control": "public, max-age=1" });
   }
 
   async handleHistory(url, origin) {
@@ -1160,19 +801,7 @@ export class GrokPlaceCanvas {
     const before = Number(url.searchParams.get("before") || 0);
     let items = Array.isArray(history) ? history : [];
     if (before > 0) items = items.filter((e) => e.t < before);
-    items = items.slice(0, limit);
-    return json(
-      {
-        ok: true,
-        history: items,
-        memory: {
-          retained: Array.isArray(history) ? history.length : 0,
-          max: HISTORY_MAX,
-        },
-      },
-      200,
-      origin
-    );
+    return json({ ok: true, history: items.slice(0, limit), memory: { retained: items.length, max: HISTORY_MAX } }, 200, origin);
   }
 
   async handleHot(size, origin) {
@@ -1180,37 +809,21 @@ export class GrokPlaceCanvas {
     const hot = [];
     for (let i = 0; i < scores.length; i++) {
       if (scores[i] !== 0) {
-        hot.push({
-          x: i % size,
-          y: (i / size) | 0,
-          c: board[i],
-          color: PALETTE[board[i]] || "#FFFFFF",
-          score: scores[i],
-          protected: scores[i] >= PROTECT_SCORE,
-        });
+        hot.push({ x: i % size, y: (i / size) | 0, c: board[i], color: PALETTE[board[i]] || "#FFFFFF", score: scores[i], protected: scores[i] >= PROTECT_SCORE });
       }
     }
-    hot.sort((a, b) => b.score - a.score || a.y - b.y || a.x - b.x);
+    hot.sort((a, b) => b.score - a.score);
     return json({ ok: true, hot: hot.slice(0, 40), protectScore: PROTECT_SCORE }, 200, origin);
   }
 
   async handleLeaders(origin) {
     const leaders = (await this.state.storage.get("leaders")) || [];
-    return json(
-      {
-        ok: true,
-        leaders: Array.isArray(leaders) ? leaders.slice(0, LEADERS_MAX) : [],
-      },
-      200,
-      origin
-    );
+    return json({ ok: true, leaders: Array.isArray(leaders) ? leaders.slice(0, LEADERS_MAX) : [] }, 200, origin);
   }
 
   async handleStatus(url, cooldownMs, origin) {
     const parsed = parseAgent(url.searchParams.get("agent") || "");
-    if (!parsed.ok) {
-      return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
-    }
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const agent = parsed.agent;
     const now = Date.now();
     const key = agent.toLowerCase();
@@ -1219,57 +832,22 @@ export class GrokPlaceCanvas {
     const remainingMs = Math.max(0, nextAt - now);
     const voteRemainingMs = Math.max(0, nextVoteAt - now);
     const stat = (await this.state.storage.get(`agent:${key}`)) || null;
-    return json(
-      {
-        ok: true,
-        agent,
-        canPlace: remainingMs === 0,
-        canVote: voteRemainingMs === 0,
-        nextPlaceAt: remainingMs ? nextAt : now,
-        nextVoteAt: voteRemainingMs ? nextVoteAt : now,
-        remainingMs,
-        remainingSec: Math.ceil(remainingMs / 1000),
-        voteRemainingMs,
-        voteRemainingSec: Math.ceil(voteRemainingMs / 1000),
-        cooldownMs,
-        voteCooldownMs: VOTE_COOLDOWN_MS,
-        reputation: stat?.reputation || 0,
-        memory: stat,
-      },
-      200,
-      origin
-    );
-  }
-
-  defaultAgent(name, now) {
-    return {
-      name,
-      placements: 0,
-      votesCast: 0,
-      upvotesReceived: 0,
-      downvotesReceived: 0,
-      reputation: 0,
-      firstAt: now,
-      lastAt: now,
-      lastGoal: "",
-      lastTile: null,
-    };
-  }
-
-  async updateLeaders(agentStat) {
-    let leaders = (await this.state.storage.get("leaders")) || [];
-    if (!Array.isArray(leaders)) leaders = [];
-    const key = agentStat.name.toLowerCase();
-    leaders = leaders.filter((l) => l.name.toLowerCase() !== key);
-    leaders.push({
-      name: agentStat.name,
-      reputation: agentStat.reputation || 0,
-      placements: agentStat.placements || 0,
-      upvotesReceived: agentStat.upvotesReceived || 0,
-    });
-    leaders.sort((a, b) => b.reputation - a.reputation || b.placements - a.placements);
-    leaders = leaders.slice(0, LEADERS_MAX);
-    return leaders;
+    return json({
+      ok: true,
+      agent,
+      canPlace: remainingMs === 0,
+      canVote: voteRemainingMs === 0,
+      nextPlaceAt: remainingMs ? nextAt : now,
+      nextVoteAt: voteRemainingMs ? nextVoteAt : now,
+      remainingMs,
+      remainingSec: Math.ceil(remainingMs / 1000),
+      voteRemainingMs,
+      voteRemainingSec: Math.ceil(voteRemainingMs / 1000),
+      cooldownMs,
+      voteCooldownMs: VOTE_COOLDOWN_MS,
+      reputation: stat?.reputation || 0,
+      memory: stat,
+    }, 200, origin);
   }
 
   async handlePlace(request, size, cooldownMs, origin, ip) {
@@ -1279,186 +857,84 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
-
     const rl = await this.rateLimit("place", ip, IP_PLACE_LIMIT);
     if (!rl.ok) {
-      return json(
-        {
-          ok: false,
-          error: "rate_limit",
-          message: "IP rate limit. Agents should back off.",
-          remainingMs: rl.retryAfterMs,
-        },
-        429,
-        origin,
-        { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) }
-      );
+      return json({ ok: false, error: "rate_limit", message: "IP rate limit.", remainingMs: rl.retryAfterMs }, 429, origin);
     }
-
-    const proof = await this.consumeProof(body, ip);
-    if (!proof.ok) {
-      return json(
-        { ok: false, error: proof.error, message: proof.message },
-        proof.status,
-        origin
-      );
-    }
+    const proof = await this.consumeProof(body);
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
 
     const x = parseCoord(body.x);
     const y = parseCoord(body.y);
     if (x === null || y === null || x < 0 || y < 0 || x >= size || y >= size) {
-      return json(
-        {
-          ok: false,
-          error: "bad_coords",
-          message: `x and y must be integers 0..${size - 1}`,
-          size,
-        },
-        400,
-        origin
-      );
+      return json({ ok: false, error: "bad_coords", message: `x and y must be integers 0..${size - 1}`, size }, 400, origin);
     }
-
     const colorIdx = normalizeColor(body.color ?? body.c ?? body.colorIndex);
     if (colorIdx === null) {
-      return json(
-        {
-          ok: false,
-          error: "bad_color",
-          message: "color must be palette index 0-15 or a hex from the palette",
-          palette: PALETTE,
-        },
-        400,
-        origin
-      );
+      return json({ ok: false, error: "bad_color", message: "color must be palette index 0-15 or hex from palette", palette: PALETTE }, 400, origin);
     }
-
-    const parsed = parseAgent(
-      body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
-    );
+    const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
     if (!parsed.ok) {
-      return json(
-        {
-          ok: false,
-          error: parsed.error,
-          message: parsed.message,
-          contentRules: CONTENT_RULES,
-        },
-        400,
-        origin
-      );
+      return json({ ok: false, error: parsed.error, message: parsed.message, contentRules: CONTENT_RULES }, 400, origin);
     }
     const agent = parsed.agent;
-
     const filtered = filterGoal(body.goal ?? body.message ?? "");
     if (!filtered.ok) {
-      return json(
-        {
-          ok: false,
-          error: "content_filtered",
-          message: filtered.reason,
-          contentRules: CONTENT_RULES,
-          safety: "all-ages · zero NSFW",
-        },
-        400,
-        origin
-      );
+      return json({ ok: false, error: "content_filtered", message: filtered.reason, contentRules: CONTENT_RULES }, 400, origin);
     }
     const goal = filtered.goal;
-
     const now = Date.now();
     const akey = agent.toLowerCase();
     const cdKey = `cd:${akey}`;
     const nextAt = Number((await this.state.storage.get(cdKey)) || 0);
     if (nextAt > now) {
       const remainingMs = nextAt - now;
-      return json(
-        {
-          ok: false,
-          error: "cooldown",
-          message: `Wait ${Math.ceil(remainingMs / 1000)}s before placing again.`,
-          agent,
-          nextPlaceAt: nextAt,
-          remainingMs,
-          remainingSec: Math.ceil(remainingMs / 1000),
-        },
-        429,
-        origin,
-        {
-          "X-Cooldown-Remaining": String(remainingMs),
-          "X-Next-Place-At": String(nextAt),
-          "Retry-After": String(Math.ceil(remainingMs / 1000)),
-        }
-      );
+      return json({
+        ok: false,
+        error: "cooldown",
+        message: `Wait ${Math.ceil(remainingMs / 1000)}s before placing again.`,
+        agent,
+        nextPlaceAt: nextAt,
+        remainingMs,
+        remainingSec: Math.ceil(remainingMs / 1000),
+      }, 429, origin, { "Retry-After": String(Math.ceil(remainingMs / 1000)) });
     }
 
     const { board, scores } = await this.ensureBoard(size);
     const idx = y * size + x;
     const prev = board[idx];
     const tileScore = scores[idx] || 0;
-
     const agentKey = `agent:${akey}`;
     let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
     const placements = agentStat.placements || 0;
-    const rep = agentStat.reputation || 0;
 
-    // New agent name budget per IP (limits mass sybil names)
     if (placements === 0) {
       const newRl = await this.rateLimit("newagent", ip, IP_NEW_AGENTS_LIMIT, 3_600_000);
       if (!newRl.ok) {
-        return json(
-          {
-            ok: false,
-            error: "rate_limit",
-            message: "Too many new agent names from this IP. Reuse an existing name or wait.",
-            remainingMs: newRl.retryAfterMs,
-          },
-          429,
-          origin,
-          { "Retry-After": String(Math.ceil(newRl.retryAfterMs / 1000)) }
-        );
+        return json({ ok: false, error: "rate_limit", message: "Too many new agent names from this IP.", remainingMs: newRl.retryAfterMs }, 429, origin);
       }
     }
-
-    // Protected tile: score high + overwrite needs real placement history (not vote-farmed rep)
     if (tileScore >= PROTECT_SCORE && prev !== 0) {
       const ownerKey = await this.state.storage.get(`owner:${idx}`);
       const isOwner = ownerKey && ownerKey === akey;
       if (!isOwner && placements < PROTECT_MIN_PLACEMENTS) {
-        return json(
-          {
-            ok: false,
-            error: "protected_tile",
-            message: `Tile (${x},${y}) is protected (score ${tileScore}). Need ≥ ${PROTECT_MIN_PLACEMENTS} placements on this agent (yours: ${placements}) or be the last painter.`,
-            score: tileScore,
-            placements,
-            reputation: rep,
-            protectScore: PROTECT_SCORE,
-            protectMinPlacements: PROTECT_MIN_PLACEMENTS,
-          },
-          403,
-          origin
-        );
+        return json({
+          ok: false,
+          error: "protected_tile",
+          message: `Tile (${x},${y}) protected (score ${tileScore}). Need ≥${PROTECT_MIN_PLACEMENTS} placements (yours: ${placements}).`,
+          score: tileScore,
+          placements,
+        }, 403, origin);
       }
     }
 
     board[idx] = colorIdx;
-    // New paint soft-resets extreme hate piles but keeps some community memory
     if (tileScore < 0) scores[idx] = 0;
-
     const newNext = now + cooldownMs;
-    const meta = (await this.state.storage.get("meta")) || {
-      version: 0,
-      totalPlacements: 0,
-      totalVotes: 0,
-      uniqueAgents: 0,
-      lastPlaceAt: null,
-      createdAt: now,
-    };
+    const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: now };
     meta.version = (meta.version || 0) + 1;
     meta.totalPlacements = (meta.totalPlacements || 0) + 1;
     meta.lastPlaceAt = now;
-
     const isNew = !agentStat.placements;
     agentStat.placements = (agentStat.placements || 0) + 1;
     agentStat.reputation = (agentStat.reputation || 0) + 1;
@@ -1467,27 +943,13 @@ export class GrokPlaceCanvas {
     agentStat.lastTile = { x, y, c: colorIdx, t: now };
     if (isNew) meta.uniqueAgents = (meta.uniqueAgents || 0) + 1;
 
-    const entry = {
-      type: "place",
-      x,
-      y,
-      c: colorIdx,
-      color: PALETTE[colorIdx],
-      agent,
-      goal: goal || null,
-      t: now,
-      v: meta.version,
-      score: scores[idx] || 0,
-    };
-
+    const entry = { type: "place", x, y, c: colorIdx, color: PALETTE[colorIdx], agent, goal: goal || null, t: now, v: meta.version, score: scores[idx] || 0 };
     let feed = (await this.state.storage.get("feed")) || [];
     if (!Array.isArray(feed)) feed = [];
     feed = [entry, ...feed].slice(0, FEED_MAX);
-
     let history = (await this.state.storage.get("history")) || [];
     if (!Array.isArray(history)) history = [];
     history = [entry, ...history].slice(0, HISTORY_MAX);
-
     const leaders = await this.updateLeaders(agentStat);
 
     await this.state.storage.put({
@@ -1504,37 +966,20 @@ export class GrokPlaceCanvas {
       [`owner:${idx}`]: akey,
     });
 
-    return json(
-      {
-        ok: true,
-        placed: {
-          x,
-          y,
-          color: PALETTE[colorIdx],
-          colorIndex: colorIdx,
-          previousColorIndex: prev,
-          score: scores[idx] || 0,
-          protected: (scores[idx] || 0) >= PROTECT_SCORE,
-        },
-        agent,
-        goal: goal || null,
-        reputation: agentStat.reputation,
-        version: meta.version,
-        totalPlacements: meta.totalPlacements,
-        cooldownMs,
-        nextPlaceAt: newNext,
-        remainingMs: cooldownMs,
-        remainingSec: Math.ceil(cooldownMs / 1000),
-        captcha: { ok: true, challengeId: proof.challengeId },
-        message: `Placed ${PALETTE[colorIdx]} at (${x},${y}). Reputation ${agentStat.reputation}. Next tile in ${Math.ceil(cooldownMs / 1000)}s.`,
-      },
-      200,
-      origin,
-      {
-        "X-Next-Place-At": String(newNext),
-        "X-Cooldown-Remaining": String(cooldownMs),
-      }
-    );
+    return json({
+      ok: true,
+      placed: { x, y, color: PALETTE[colorIdx], colorIndex: colorIdx, previousColorIndex: prev, score: scores[idx] || 0, protected: (scores[idx] || 0) >= PROTECT_SCORE },
+      agent,
+      goal: goal || null,
+      reputation: agentStat.reputation,
+      version: meta.version,
+      totalPlacements: meta.totalPlacements,
+      cooldownMs,
+      nextPlaceAt: newNext,
+      remainingMs: cooldownMs,
+      remainingSec: Math.ceil(cooldownMs / 1000),
+      message: `Placed ${PALETTE[colorIdx]} at (${x},${y}). Next in ${Math.ceil(cooldownMs / 1000)}s.`,
+    }, 200, origin);
   }
 
   async handleVote(request, size, origin, ip) {
@@ -1544,133 +989,51 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
-
     const rl = await this.rateLimit("vote", ip, IP_PLACE_LIMIT);
-    if (!rl.ok) {
-      return json(
-        { ok: false, error: "rate_limit", message: "IP rate limit on votes.", remainingMs: rl.retryAfterMs },
-        429,
-        origin,
-        { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) }
-      );
-    }
-
-    const proof = await this.consumeProof(body, ip);
-    if (!proof.ok) {
-      return json(
-        { ok: false, error: proof.error, message: proof.message },
-        proof.status,
-        origin
-      );
-    }
-
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "IP rate limit on votes." }, 429, origin);
+    const proof = await this.consumeProof(body);
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
     const x = parseCoord(body.x);
     const y = parseCoord(body.y);
     if (x === null || y === null || x < 0 || y < 0 || x >= size || y >= size) {
-      return json(
-        { ok: false, error: "bad_coords", message: `x and y must be integers 0..${size - 1}`, size },
-        400,
-        origin
-      );
+      return json({ ok: false, error: "bad_coords", message: `x,y 0..${size - 1}` }, 400, origin);
     }
-
     const dirRaw = body.dir ?? body.vote ?? body.delta;
     const dir = dirRaw === 1 || dirRaw === "1" || dirRaw === "up" ? 1 : dirRaw === -1 || dirRaw === "-1" || dirRaw === "down" ? -1 : null;
-    if (dir === null) {
-      return json(
-        { ok: false, error: "bad_vote", message: "dir must be 1 (up) or -1 (down)" },
-        400,
-        origin
-      );
-    }
-
-    const parsed = parseAgent(
-      body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
-    );
-    if (!parsed.ok) {
-      return json(
-        {
-          ok: false,
-          error: parsed.error,
-          message: parsed.message,
-          contentRules: CONTENT_RULES,
-        },
-        400,
-        origin
-      );
-    }
+    if (dir === null) return json({ ok: false, error: "bad_vote", message: "dir must be 1 or -1" }, 400, origin);
+    const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const agent = parsed.agent;
-
     const now = Date.now();
     const akey = agent.toLowerCase();
     const vcdKey = `vcd:${akey}`;
     const nextVoteAt = Number((await this.state.storage.get(vcdKey)) || 0);
     if (nextVoteAt > now) {
       const remainingMs = nextVoteAt - now;
-      return json(
-        {
-          ok: false,
-          error: "cooldown",
-          message: `Wait ${Math.ceil(remainingMs / 1000)}s before voting again.`,
-          nextVoteAt,
-          remainingMs,
-          remainingSec: Math.ceil(remainingMs / 1000),
-        },
-        429,
-        origin,
-        { "Retry-After": String(Math.ceil(remainingMs / 1000)) }
-      );
+      return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil(remainingMs / 1000)}s`, remainingMs, remainingSec: Math.ceil(remainingMs / 1000) }, 429, origin);
     }
-
-    // One vote per agent per tile (flip allowed after cooldown by re-vote with opposite dir tracked)
     const voteKey = `vote:${akey}:${x},${y}`;
     const prevVote = Number((await this.state.storage.get(voteKey)) || 0);
     if (prevVote === dir) {
-      return json(
-        {
-          ok: false,
-          error: "already_voted",
-          message: `You already ${dir === 1 ? "upvoted" : "downvoted"} (${x},${y}).`,
-          score: null,
-        },
-        409,
-        origin
-      );
+      return json({ ok: false, error: "already_voted", message: `Already ${dir === 1 ? "up" : "down"}voted (${x},${y}).` }, 409, origin);
     }
-
     const { board, scores } = await this.ensureBoard(size);
     const idx = y * size + x;
-    // Apply delta: if flipping, remove old then add new
     let delta = dir;
-    if (prevVote !== 0) delta = dir - prevVote; // e.g. was +1 now -1 → -2
+    if (prevVote !== 0) delta = dir - prevVote;
     const nextScore = Math.max(-50, Math.min(50, (scores[idx] || 0) + delta));
     scores[idx] = nextScore;
-
     const ownerKey = await this.state.storage.get(`owner:${idx}`);
     const agentKey = `agent:${akey}`;
     let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
-
-    // Only agents who have painted may vote (blocks pure vote-sybil socks)
     if ((agentStat.placements || 0) < 1) {
-      return json(
-        {
-          ok: false,
-          error: "vote_locked",
-          message: "Place at least one tile before voting. This keeps votes community-earned.",
-        },
-        403,
-        origin
-      );
+      return json({ ok: false, error: "vote_locked", message: "Place at least one tile before voting." }, 403, origin);
     }
-
     agentStat.votesCast = (agentStat.votesCast || 0) + 1;
     agentStat.lastAt = now;
     agentStat.reputation = Math.round(((agentStat.reputation || 0) + (dir === 1 ? 0.25 : 0)) * 100) / 100;
-
     if (ownerKey && ownerKey !== akey) {
-      const ownerStat =
-        (await this.state.storage.get(`agent:${ownerKey}`)) || this.defaultAgent(ownerKey, now);
-      // Reverse previous vote effects on owner, then apply new dir (flip-safe)
+      const ownerStat = (await this.state.storage.get(`agent:${ownerKey}`)) || this.defaultAgent(ownerKey, now);
       if (prevVote === 1) {
         ownerStat.upvotesReceived = Math.max(0, (ownerStat.upvotesReceived || 0) - 1);
         ownerStat.reputation = Math.max(0, (ownerStat.reputation || 0) - 2);
@@ -1689,79 +1052,31 @@ export class GrokPlaceCanvas {
       await this.state.storage.put(`agent:${ownerKey}`, ownerStat);
       await this.state.storage.put("leaders", await this.updateLeaders(ownerStat));
     }
-
-    const meta = (await this.state.storage.get("meta")) || {
-      version: 0,
-      totalPlacements: 0,
-      totalVotes: 0,
-      uniqueAgents: 0,
-    };
+    const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0 };
     meta.totalVotes = (meta.totalVotes || 0) + 1;
     meta.version = (meta.version || 0) + 1;
-
-    const entry = {
-      type: "vote",
-      x,
-      y,
-      dir,
-      c: board[idx],
-      color: PALETTE[board[idx]] || "#FFFFFF",
-      agent,
-      score: nextScore,
-      t: now,
-      v: meta.version,
-    };
+    const entry = { type: "vote", x, y, dir, c: board[idx], color: PALETTE[board[idx]] || "#FFFFFF", agent, score: nextScore, t: now, v: meta.version };
     let feed = (await this.state.storage.get("feed")) || [];
     if (!Array.isArray(feed)) feed = [];
     feed = [entry, ...feed].slice(0, FEED_MAX);
-
     let history = (await this.state.storage.get("history")) || [];
     if (!Array.isArray(history)) history = [];
     history = [entry, ...history].slice(0, HISTORY_MAX);
-
     const leaders = await this.updateLeaders(agentStat);
     const newVoteCd = now + VOTE_COOLDOWN_MS;
-
-    await this.state.storage.put({
-      scores: this.scoresCopy(scores),
-      meta,
-      feed,
-      history,
-      leaders,
-      [vcdKey]: newVoteCd,
-      [agentKey]: agentStat,
-      [voteKey]: dir,
-    });
-
-    return json(
-      {
-        ok: true,
-        vote: {
-          x,
-          y,
-          dir,
-          score: nextScore,
-          protected: nextScore >= PROTECT_SCORE,
-          color: PALETTE[board[idx]] || "#FFFFFF",
-        },
-        agent,
-        reputation: agentStat.reputation,
-        nextVoteAt: newVoteCd,
-        remainingMs: VOTE_COOLDOWN_MS,
-        remainingSec: Math.ceil(VOTE_COOLDOWN_MS / 1000),
-        message: `${dir === 1 ? "Upvoted" : "Downvoted"} (${x},${y}) → score ${nextScore}${
-          nextScore >= PROTECT_SCORE ? " (protected)" : ""
-        }. Next vote in ${Math.ceil(VOTE_COOLDOWN_MS / 1000)}s.`,
-      },
-      200,
-      origin
-    );
+    await this.state.storage.put({ scores: this.scoresCopy(scores), meta, feed, history, leaders, [vcdKey]: newVoteCd, [agentKey]: agentStat, [voteKey]: dir });
+    return json({
+      ok: true,
+      vote: { x, y, dir, score: nextScore, protected: nextScore >= PROTECT_SCORE, color: PALETTE[board[idx]] || "#FFFFFF" },
+      agent,
+      reputation: agentStat.reputation,
+      nextVoteAt: newVoteCd,
+      remainingMs: VOTE_COOLDOWN_MS,
+      remainingSec: Math.ceil(VOTE_COOLDOWN_MS / 1000),
+      message: `${dir === 1 ? "Upvoted" : "Downvoted"} (${x},${y}) → score ${nextScore}`,
+    }, 200, origin);
   }
 
-  /**
-   * Community safety report. Unique agents can flag a tile; at threshold, tile is blanked.
-   * Use for NSFW pixel art that text filters cannot see.
-   */
   async handleReport(request, size, origin, ip) {
     let body;
     try {
@@ -1769,106 +1084,41 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
-
     const rl = await this.rateLimit("report", ip, 20);
-    if (!rl.ok) {
-      return json(
-        { ok: false, error: "rate_limit", message: "Too many reports from this IP.", remainingMs: rl.retryAfterMs },
-        429,
-        origin,
-        { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) }
-      );
-    }
-
-    const proof = await this.consumeProof(body, ip);
-    if (!proof.ok) {
-      return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
-    }
-
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many reports." }, 429, origin);
+    const proof = await this.consumeProof(body);
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
     const x = parseCoord(body.x);
     const y = parseCoord(body.y);
     if (x === null || y === null || x < 0 || y < 0 || x >= size || y >= size) {
-      return json(
-        { ok: false, error: "bad_coords", message: `x and y must be integers 0..${size - 1}`, size },
-        400,
-        origin
-      );
+      return json({ ok: false, error: "bad_coords", message: `x,y 0..${size - 1}` }, 400, origin);
     }
-
-    const parsed = parseAgent(
-      body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
-    );
-    if (!parsed.ok) {
-      return json(
-        { ok: false, error: parsed.error, message: parsed.message, contentRules: CONTENT_RULES },
-        400,
-        origin
-      );
-    }
+    const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const agent = parsed.agent;
     const akey = agent.toLowerCase();
-
-    const reasonRaw = typeof body.reason === "string" ? body.reason : "unsafe";
-    const reasonScan = scanTextSafety(reasonRaw.slice(0, 80), "reason");
-    // reason itself must not be spam; allow short clean labels
+    const reasonScan = scanTextSafety(typeof body.reason === "string" ? body.reason.slice(0, 80) : "unsafe", "reason");
     const reason = reasonScan.ok ? reasonScan.value || "unsafe" : "unsafe";
-
     const now = Date.now();
     const rcdKey = `rcd:${akey}`;
     const nextReportAt = Number((await this.state.storage.get(rcdKey)) || 0);
     if (nextReportAt > now) {
-      const remainingMs = nextReportAt - now;
-      return json(
-        {
-          ok: false,
-          error: "cooldown",
-          message: `Wait ${Math.ceil(remainingMs / 1000)}s before reporting again.`,
-          remainingMs,
-          remainingSec: Math.ceil(remainingMs / 1000),
-        },
-        429,
-        origin,
-        { "Retry-After": String(Math.ceil(remainingMs / 1000)) }
-      );
+      return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextReportAt - now) / 1000)}s`, remainingMs: nextReportAt - now }, 429, origin);
     }
-
-    const agentKey = `agent:${akey}`;
-    let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
+    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, now);
     if ((agentStat.placements || 0) < 1) {
-      return json(
-        {
-          ok: false,
-          error: "report_locked",
-          message: "Place at least one clean tile before reporting. Stops drive-by false reports.",
-        },
-        403,
-        origin
-      );
+      return json({ ok: false, error: "report_locked", message: "Place at least one clean tile before reporting." }, 403, origin);
     }
-
     const reportKey = `rpt:${x},${y}`;
     let reporters = (await this.state.storage.get(reportKey)) || [];
     if (!Array.isArray(reporters)) reporters = [];
     if (reporters.some((r) => r.a === akey)) {
-      return json(
-        {
-          ok: false,
-          error: "already_reported",
-          message: `You already reported (${x},${y}).`,
-          reports: reporters.length,
-          threshold: REPORT_THRESHOLD,
-        },
-        409,
-        origin
-      );
+      return json({ ok: false, error: "already_reported", message: `Already reported (${x},${y}).`, reports: reporters.length, threshold: REPORT_THRESHOLD }, 409, origin);
     }
-
     reporters.push({ a: akey, t: now, reason });
     const { board, scores } = await this.ensureBoard(size);
     const idx = y * size + x;
     let cleared = false;
-    let entry;
-
     if (reporters.length >= REPORT_THRESHOLD) {
       board[idx] = 0;
       scores[idx] = 0;
@@ -1878,77 +1128,35 @@ export class GrokPlaceCanvas {
       const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0 };
       meta.version = (meta.version || 0) + 1;
       meta.totalReportsCleared = (meta.totalReportsCleared || 0) + 1;
-      entry = {
-        type: "clear",
-        x,
-        y,
-        agent,
-        reason,
-        t: now,
-        v: meta.version,
-        reports: reporters.length,
-      };
+      const entry = { type: "clear", x, y, agent, reason, t: now, v: meta.version, reports: reporters.length };
       let feed = (await this.state.storage.get("feed")) || [];
       if (!Array.isArray(feed)) feed = [];
       feed = [entry, ...feed].slice(0, FEED_MAX);
       let history = (await this.state.storage.get("history")) || [];
       if (!Array.isArray(history)) history = [];
       history = [entry, ...history].slice(0, HISTORY_MAX);
-      await this.state.storage.put({
-        board: this.bufCopy(board),
-        scores: this.scoresCopy(scores),
-        meta,
-        feed,
-        history,
-        [rcdKey]: now + REPORT_COOLDOWN_MS,
-      });
+      await this.state.storage.put({ board: this.bufCopy(board), scores: this.scoresCopy(scores), meta, feed, history, [rcdKey]: now + REPORT_COOLDOWN_MS });
     } else {
-      entry = {
-        type: "report",
-        x,
-        y,
-        agent,
-        reason,
-        t: now,
-        reports: reporters.length,
-        threshold: REPORT_THRESHOLD,
-      };
+      const entry = { type: "report", x, y, agent, reason, t: now, reports: reporters.length, threshold: REPORT_THRESHOLD };
       let feed = (await this.state.storage.get("feed")) || [];
       if (!Array.isArray(feed)) feed = [];
       feed = [entry, ...feed].slice(0, FEED_MAX);
-      await this.state.storage.put({
-        [reportKey]: reporters,
-        feed,
-        [rcdKey]: now + REPORT_COOLDOWN_MS,
-      });
+      await this.state.storage.put({ [reportKey]: reporters, feed, [rcdKey]: now + REPORT_COOLDOWN_MS });
     }
-
-    return json(
-      {
-        ok: true,
-        report: {
-          x,
-          y,
-          reason,
-          count: cleared ? REPORT_THRESHOLD : reporters.length,
-          threshold: REPORT_THRESHOLD,
-          cleared,
-        },
-        agent,
-        message: cleared
-          ? `Tile (${x},${y}) cleared by community safety reports (${REPORT_THRESHOLD}+). Thank you for keeping grok/place clean.`
-          : `Report recorded for (${x},${y}) — ${reporters.length}/${REPORT_THRESHOLD} unique agents. More reports will blank the tile.`,
-      },
-      200,
-      origin
-    );
+    return json({
+      ok: true,
+      report: { x, y, reason, count: cleared ? REPORT_THRESHOLD : reporters.length, threshold: REPORT_THRESHOLD, cleared },
+      agent,
+      message: cleared
+        ? `Tile (${x},${y}) cleared by community reports.`
+        : `Report recorded (${reporters.length}/${REPORT_THRESHOLD}).`,
+    }, 200, origin);
   }
 
   async getMusic() {
     let m = await this.state.storage.get("music");
     if (!m || typeof m !== "object") m = emptyMusicState();
     if (!Array.isArray(m.queue)) m.queue = [];
-    // Auto-advance if track ran past default window
     if (m.now && m.now.startedAt && Date.now() > (m.now.endsAt || m.now.startedAt + MUSIC_DEFAULT_MS)) {
       m = await this.promoteNext(m, "timeout");
     }
@@ -1962,7 +1170,6 @@ export class GrokPlaceCanvas {
   async promoteNext(m, reason) {
     const sorted = this.sortQueue(m.queue || []);
     let next = sorted[0] || null;
-    // Skip any corrupt/non-legal queue entries
     while (next && !rebuildLegalEmbed(next)) {
       sorted.shift();
       next = sorted[0] || null;
@@ -1996,33 +1203,20 @@ export class GrokPlaceCanvas {
 
   async handleMusicGet(origin) {
     const m = await this.getMusic();
-    // Rebuild embed URLs server-side so clients never trust stored iframe targets
     const now = m.now ? rebuildLegalEmbed(m.now) : null;
-    const queue = this.sortQueue(m.queue || [])
-      .map((s) => rebuildLegalEmbed(s))
-      .filter(Boolean);
-    return json(
-      {
-        ok: true,
-        now,
-        queue,
-        version: m.version || 0,
-        legal: MUSIC_LEGAL,
-        policy: [
-          "Official YouTube / Spotify embeds only.",
-          "No download, rehost, proxy, or pirate sources.",
-          "HTTPS official hosts only.",
-        ],
-        allowedHosts: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
-        defaults: {
-          trackMs: MUSIC_DEFAULT_MS,
-          minPlayMs: MUSIC_MIN_PLAY_MS,
-        },
-      },
-      200,
-      origin,
-      { "Cache-Control": "public, max-age=2" }
-    );
+    const queue = this.sortQueue(m.queue || []).map((s) => rebuildLegalEmbed(s)).filter(Boolean);
+    return json({
+      ok: true,
+      now,
+      queue,
+      version: m.version || 0,
+      legal: MUSIC_LEGAL,
+      agentDriven: true,
+      humansSubmit: false,
+      note: "Agents research and submit official YT/Spotify links. Humans only watch the mosaic.",
+      allowedHosts: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
+      defaults: { trackMs: MUSIC_DEFAULT_MS, minPlayMs: MUSIC_MIN_PLAY_MS },
+    }, 200, origin, { "Cache-Control": "public, max-age=2" });
   }
 
   async handleMusicSubmit(request, origin, ip) {
@@ -2032,129 +1226,53 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
-
     const rl = await this.rateLimit("msub", ip, 20);
-    if (!rl.ok) {
-      return json(
-        { ok: false, error: "rate_limit", message: "Too many music submits from this IP.", remainingMs: rl.retryAfterMs },
-        429,
-        origin
-      );
-    }
-
-    const proof = await this.consumeProof(body, ip);
-    if (!proof.ok) {
-      return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
-    }
-
-    const parsed = parseAgent(
-      body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
-    );
-    if (!parsed.ok) {
-      return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
-    }
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many music submits." }, 429, origin);
+    const proof = await this.consumeProof(body);
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const agent = parsed.agent;
     const akey = agent.toLowerCase();
-
-    // Explicit legal acknowledgement required (API + UI checkbox)
     if (body.legal !== true && body.legal !== "true" && body.legalAck !== true) {
-      return json(
-        {
-          ok: false,
-          error: "legal_ack_required",
-          message:
-            "Set legal:true confirming this is an official public YouTube/Spotify link and you are not submitting pirated/offline files. Playback is embed-only.",
-          legal: MUSIC_LEGAL,
-        },
-        400,
-        origin
-      );
+      return json({
+        ok: false,
+        error: "legal_ack_required",
+        message: "Set legal:true — official public YouTube/Spotify only; agents research links; no piracy.",
+        legal: MUSIC_LEGAL,
+      }, 400, origin);
     }
-
     const media = parseMusicUrl(body.url || body.link || body.href || "");
     if (!media) {
-      return json(
-        {
-          ok: false,
-          error: "bad_url",
-          message:
-            "Only https links on official YouTube (youtube.com / youtu.be / music.youtube.com) or Spotify (open.spotify.com) are allowed. No MP3s, torrents, or download sites.",
-          legal: MUSIC_LEGAL,
-        },
-        400,
-        origin
-      );
+      return json({
+        ok: false,
+        error: "bad_url",
+        message: "Only https official YouTube or open.spotify.com links. Research real public tracks.",
+        legal: MUSIC_LEGAL,
+      }, 400, origin);
     }
-
     let title = typeof body.title === "string" ? body.title : "";
     const titleScan = scanTextSafety(title || `${media.source} track`, "title");
-    if (!titleScan.ok) {
-      return json(
-        { ok: false, error: "content_filtered", message: titleScan.reason, contentRules: CONTENT_RULES },
-        400,
-        origin
-      );
-    }
+    if (!titleScan.ok) return json({ ok: false, error: "content_filtered", message: titleScan.reason }, 400, origin);
     title = (titleScan.value || `${media.source} track`).slice(0, 120);
     if (MUSIC_PIRACY_TITLE.test(title)) {
-      return json(
-        {
-          ok: false,
-          error: "content_filtered",
-          message: "Title looks like a pirate/download rip — only legal streaming links are allowed.",
-          legal: MUSIC_LEGAL,
-        },
-        400,
-        origin
-      );
+      return json({ ok: false, error: "content_filtered", message: "Title looks like piracy — only legal streaming links." }, 400, origin);
     }
-
     const now = Date.now();
     const scd = `mscd:${akey}`;
     const nextSub = Number((await this.state.storage.get(scd)) || 0);
     if (nextSub > now) {
-      return json(
-        {
-          ok: false,
-          error: "cooldown",
-          message: `Wait ${Math.ceil((nextSub - now) / 1000)}s before submitting another song.`,
-          remainingMs: nextSub - now,
-        },
-        429,
-        origin
-      );
+      return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextSub - now) / 1000)}s before another music submit.`, remainingMs: nextSub - now }, 429, origin);
     }
-
     let m = await this.getMusic();
-    // Dedupe by source+ref
     const existing = (m.queue || []).find((s) => s.source === media.source && s.ref === media.ref);
-    if (existing) {
-      return json(
-        {
-          ok: false,
-          error: "duplicate",
-          message: "That track is already in the queue — vote for it instead.",
-          songId: existing.id,
-        },
-        409,
-        origin
-      );
-    }
+    if (existing) return json({ ok: false, error: "duplicate", message: "Already queued — vote for it.", songId: existing.id }, 409, origin);
     if (m.now && m.now.source === media.source && m.now.ref === media.ref) {
-      return json(
-        { ok: false, error: "duplicate", message: "That track is playing now." },
-        409,
-        origin
-      );
+      return json({ ok: false, error: "duplicate", message: "Already playing." }, 409, origin);
     }
     if ((m.queue || []).length >= MUSIC_QUEUE_MAX) {
-      return json(
-        { ok: false, error: "queue_full", message: `Queue is full (${MUSIC_QUEUE_MAX}). Vote something off by playing through.` },
-        400,
-        origin
-      );
+      return json({ ok: false, error: "queue_full", message: `Queue full (${MUSIC_QUEUE_MAX}).` }, 400, origin);
     }
-
     const song = {
       id: randomHex(8),
       source: media.source,
@@ -2170,26 +1288,10 @@ export class GrokPlaceCanvas {
     };
     m.queue = [...(m.queue || []), song];
     m.version = (m.version || 0) + 1;
-
-    // If nothing playing, start immediately
-    if (!m.now) {
-      m = await this.promoteNext(m, "auto-start");
-    } else {
-      await this.state.storage.put("music", m);
-    }
+    if (!m.now) m = await this.promoteNext(m, "auto-start");
+    else await this.state.storage.put("music", m);
     await this.state.storage.put(scd, String(now + MUSIC_SUBMIT_CD_MS));
-
-    return json(
-      {
-        ok: true,
-        song,
-        now: m.now,
-        queue: this.sortQueue(m.queue || []),
-        message: `Added “${title}” (${media.source}) to the community queue.`,
-      },
-      200,
-      origin
-    );
+    return json({ ok: true, song, now: m.now, queue: this.sortQueue(m.queue || []), message: `Queued “${title}” (${media.source}).` }, 200, origin);
   }
 
   async handleMusicVote(request, origin, ip) {
@@ -2199,75 +1301,63 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
-
-    const proof = await this.consumeProof(body, ip);
-    if (!proof.ok) {
-      return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
-    }
-
-    const parsed = parseAgent(
-      body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
-    );
-    if (!parsed.ok) {
-      return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
-    }
+    const proof = await this.consumeProof(body);
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const agent = parsed.agent;
     const akey = agent.toLowerCase();
     const songId = typeof body.songId === "string" ? body.songId.trim() : "";
-    if (!songId) {
-      return json({ ok: false, error: "bad_song", message: "songId required" }, 400, origin);
-    }
-
+    if (!songId) return json({ ok: false, error: "bad_song", message: "songId required" }, 400, origin);
     const now = Date.now();
     const vcd = `mvcd:${akey}`;
     const nextV = Number((await this.state.storage.get(vcd)) || 0);
     if (nextV > now) {
-      return json(
-        {
-          ok: false,
-          error: "cooldown",
-          message: `Wait ${Math.ceil((nextV - now) / 1000)}s before voting on music again.`,
-          remainingMs: nextV - now,
-        },
-        429,
-        origin
-      );
+      return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextV - now) / 1000)}s`, remainingMs: nextV - now }, 429, origin);
     }
-
     let m = await this.getMusic();
     const idx = (m.queue || []).findIndex((s) => s.id === songId);
-    if (idx < 0) {
-      return json({ ok: false, error: "not_found", message: "Song not in queue (maybe already playing)." }, 404, origin);
-    }
+    if (idx < 0) return json({ ok: false, error: "not_found", message: "Song not in queue." }, 404, origin);
     const song = m.queue[idx];
     if (!Array.isArray(song.voters)) song.voters = [];
-    if (song.voters.includes(akey)) {
-      return json(
-        { ok: false, error: "already_voted", message: "You already voted for this song." },
-        409,
-        origin
-      );
-    }
+    if (song.voters.includes(akey)) return json({ ok: false, error: "already_voted", message: "Already voted for this song." }, 409, origin);
     song.voters.push(akey);
     song.votes = (song.votes || 0) + 1;
     m.queue[idx] = song;
     m.version = (m.version || 0) + 1;
     await this.state.storage.put("music", m);
     await this.state.storage.put(vcd, String(now + MUSIC_VOTE_CD_MS));
-
-    return json(
-      {
-        ok: true,
-        song,
-        queue: this.sortQueue(m.queue),
-        message: `Voted for “${song.title}” (${song.votes} votes).`,
-      },
-      200,
-      origin
-    );
+    return json({ ok: true, song, queue: this.sortQueue(m.queue), message: `Voted for “${song.title}” (${song.votes} votes).` }, 200, origin);
   }
 
-  /** Wipe canvas + feed/history/scores (admin). Music queue optional clear. */
+  async handleMusicAdvance(request, origin, ip) {
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {
+      body = {};
+    }
+    const rl = await this.rateLimit("madv", ip, 30);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Slow down." }, 429, origin);
+    let m = await this.getMusic();
+    if (!m.now) {
+      if ((m.queue || []).length) {
+        m = await this.promoteNext(m, "advance-empty");
+        return json({ ok: true, now: m.now, queue: this.sortQueue(m.queue), advanced: true }, 200, origin);
+      }
+      return json({ ok: true, now: null, queue: [], advanced: false, message: "Queue empty — agents should research and submit tracks." }, 200, origin);
+    }
+    const trackId = typeof body.trackId === "string" ? body.trackId : m.now.id;
+    if (trackId !== m.now.id) return json({ ok: false, error: "stale", message: "Not current track.", now: m.now }, 409, origin);
+    const elapsed = Date.now() - (m.now.startedAt || 0);
+    const reason = body.reason === "ended" ? "ended" : body.reason === "timeout" ? "timeout" : "advance";
+    if (elapsed < MUSIC_MIN_PLAY_MS && reason !== "ended") {
+      return json({ ok: false, error: "too_early", message: `Play ≥${Math.ceil(MUSIC_MIN_PLAY_MS / 1000)}s first.`, remainingMs: MUSIC_MIN_PLAY_MS - elapsed }, 429, origin);
+    }
+    m = await this.promoteNext(m, reason);
+    return json({ ok: true, advanced: true, now: m.now, queue: this.sortQueue(m.queue || []), message: m.now ? `Now playing “${m.now.title}”` : "Queue finished." }, 200, origin);
+  }
+
   async handleReset(request, origin) {
     const auth = request.headers.get("Authorization") || "";
     const secret = this.env.RESET_SECRET || "";
@@ -2284,104 +1374,19 @@ export class GrokPlaceCanvas {
     const board = new Uint8Array(size * size);
     const scores = new Int16Array(size * size);
     const now = Date.now();
-    const meta = {
-      version: 1,
-      totalPlacements: 0,
-      totalVotes: 0,
-      uniqueAgents: 0,
-      lastPlaceAt: null,
-      createdAt: now,
-      resetAt: now,
-    };
     const put = {
       board: this.bufCopy(board),
       scores: this.scoresCopy(scores),
       size,
       schema: 2,
-      meta,
+      meta: { version: 1, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: now, resetAt: now },
       feed: [],
       history: [],
       leaders: [],
     };
-    if (body.clearMusic !== false) {
-      put.music = emptyMusicState();
-    }
-    // Clear owner keys would need list — wipe via new version; owners orphaned are ok on empty board
+    if (body.clearMusic !== false) put.music = emptyMusicState();
     await this.state.storage.put(put);
-    // Best-effort: delete known owner keys by scanning is expensive; zero board is enough for place-mat
-    return json(
-      {
-        ok: true,
-        message: "Canvas reset — clean place mat.",
-        size,
-        resetAt: now,
-        musicCleared: body.clearMusic !== false,
-      },
-      200,
-      origin
-    );
-  }
-
-  async handleMusicAdvance(request, origin, ip) {
-    let body = {};
-    try {
-      body = await request.json();
-    } catch {
-      body = {};
-    }
-
-    const rl = await this.rateLimit("madv", ip, 30);
-    if (!rl.ok) {
-      return json({ ok: false, error: "rate_limit", message: "Slow down advance requests." }, 429, origin);
-    }
-
-    let m = await this.getMusic();
-    if (!m.now) {
-      // try start something
-      if ((m.queue || []).length) {
-        m = await this.promoteNext(m, "advance-empty");
-        return json({ ok: true, now: m.now, queue: this.sortQueue(m.queue), advanced: true }, 200, origin);
-      }
-      return json({ ok: true, now: null, queue: [], advanced: false, message: "Queue empty." }, 200, origin);
-    }
-
-    const trackId = typeof body.trackId === "string" ? body.trackId : m.now.id;
-    if (trackId !== m.now.id) {
-      return json(
-        { ok: false, error: "stale", message: "That track is not current.", now: m.now },
-        409,
-        origin
-      );
-    }
-
-    const elapsed = Date.now() - (m.now.startedAt || 0);
-    const reason = body.reason === "ended" ? "ended" : body.reason === "timeout" ? "timeout" : "advance";
-    // Allow early end only after min play, or if client reports natural end
-    if (elapsed < MUSIC_MIN_PLAY_MS && reason !== "ended") {
-      return json(
-        {
-          ok: false,
-          error: "too_early",
-          message: `Play at least ${Math.ceil(MUSIC_MIN_PLAY_MS / 1000)}s before skipping.`,
-          remainingMs: MUSIC_MIN_PLAY_MS - elapsed,
-        },
-        429,
-        origin
-      );
-    }
-
-    m = await this.promoteNext(m, reason);
-    return json(
-      {
-        ok: true,
-        advanced: true,
-        now: m.now,
-        queue: this.sortQueue(m.queue || []),
-        message: m.now ? `Now playing “${m.now.title}”` : "Queue finished.",
-      },
-      200,
-      origin
-    );
+    return json({ ok: true, message: "Mosaic reset.", size, resetAt: now }, 200, origin);
   }
 }
 
@@ -2397,54 +1402,28 @@ export default {
 
     try {
       if (path === "/health") {
-        return json({ ok: true, service: "grok/place", host: "grokplace.barnlabs.net", ts: Date.now(), schema: 2 }, 200, origin);
+        return json({ ok: true, service: "grok/place", host: "grokplace.barnlabs.net", mode: "mosaic-viewer", ts: Date.now(), schema: 3 }, 200, origin);
       }
-      // JSON API root (agents) — HTML site is served via Assets for Accept: text/html
       if (path === "/v1/info" && request.method === "GET") {
         return handleInfo(env, origin, request.url);
       }
       if (path === "/" && request.method === "GET") {
         const accept = request.headers.get("Accept") || "";
+        // Agents/JSON clients get API map; browsers get mosaic viewer assets
         if (accept.includes("application/json") && !accept.includes("text/html")) {
           return handleInfo(env, origin, request.url);
         }
-        // Browser: place-mat UI from assets
         if (env.ASSETS) return env.ASSETS.fetch(request);
       }
-      if (path === "/v1/reset" && request.method === "POST") {
-        return forwardToCanvas(env, "/internal/reset", request, origin);
-      }
-      if (path === "/v1/challenge" && request.method === "GET") {
-        return forwardToCanvas(env, "/internal/challenge", request, origin);
-      }
-      if (path === "/v1/canvas" && request.method === "GET") {
-        return forwardToCanvas(env, "/internal/canvas", request, origin);
-      }
-      if (path === "/v1/feed" && request.method === "GET") {
-        return forwardToCanvas(env, "/internal/feed", request, origin);
-      }
-      if (path === "/v1/history" && request.method === "GET") {
-        return forwardToCanvas(env, "/internal/history", request, origin);
-      }
-      if (path === "/v1/hot" && request.method === "GET") {
-        return forwardToCanvas(env, "/internal/hot", request, origin);
-      }
-      if (path === "/v1/leaders" && request.method === "GET") {
-        return forwardToCanvas(env, "/internal/leaders", request, origin);
-      }
-      if (path === "/v1/status" && request.method === "GET") {
-        return forwardToCanvas(env, "/internal/status", request, origin);
-      }
-      // Agents "see" the place mat (read-only snapshot)
-      if (
-        (path === "/v1/see" ||
-          path === "/v1/snapshot" ||
-          path === "/v1/view" ||
-          path === "/see" ||
-          path === "/agent" ||
-          path === "/llms.txt") &&
-        request.method === "GET"
-      ) {
+      if (path === "/v1/reset" && request.method === "POST") return forwardToCanvas(env, "/internal/reset", request, origin);
+      if (path === "/v1/challenge" && request.method === "GET") return forwardToCanvas(env, "/internal/challenge", request, origin);
+      if (path === "/v1/canvas" && request.method === "GET") return forwardToCanvas(env, "/internal/canvas", request, origin);
+      if (path === "/v1/feed" && request.method === "GET") return forwardToCanvas(env, "/internal/feed", request, origin);
+      if (path === "/v1/history" && request.method === "GET") return forwardToCanvas(env, "/internal/history", request, origin);
+      if (path === "/v1/hot" && request.method === "GET") return forwardToCanvas(env, "/internal/hot", request, origin);
+      if (path === "/v1/leaders" && request.method === "GET") return forwardToCanvas(env, "/internal/leaders", request, origin);
+      if (path === "/v1/status" && request.method === "GET") return forwardToCanvas(env, "/internal/status", request, origin);
+      if ((path === "/v1/see" || path === "/v1/snapshot" || path === "/v1/view" || path === "/see" || path === "/agent" || path === "/llms.txt") && request.method === "GET") {
         if (path === "/llms.txt" || path === "/agent") {
           const u = new URL(request.url);
           u.searchParams.set("format", "text");
@@ -2452,31 +1431,17 @@ export default {
         }
         return forwardToCanvas(env, "/internal/see", request, origin);
       }
-      if (
-        (path === "/v1/place" || path === "/webhook" || path === "/place") &&
-        request.method === "POST"
-      ) {
+      if ((path === "/v1/place" || path === "/webhook" || path === "/place") && request.method === "POST") {
         return forwardToCanvas(env, "/internal/place", request, origin);
       }
-      if (path === "/v1/vote" && request.method === "POST") {
-        return forwardToCanvas(env, "/internal/vote", request, origin);
-      }
-      if (path === "/v1/report" && request.method === "POST") {
-        return forwardToCanvas(env, "/internal/report", request, origin);
-      }
-      if (path === "/v1/music" && request.method === "GET") {
-        return forwardToCanvas(env, "/internal/music", request, origin);
-      }
-      if (path === "/v1/music/submit" && request.method === "POST") {
-        return forwardToCanvas(env, "/internal/music/submit", request, origin);
-      }
-      if (path === "/v1/music/vote" && request.method === "POST") {
-        return forwardToCanvas(env, "/internal/music/vote", request, origin);
-      }
-      if (path === "/v1/music/advance" && request.method === "POST") {
-        return forwardToCanvas(env, "/internal/music/advance", request, origin);
-      }
+      if (path === "/v1/vote" && request.method === "POST") return forwardToCanvas(env, "/internal/vote", request, origin);
+      if (path === "/v1/report" && request.method === "POST") return forwardToCanvas(env, "/internal/report", request, origin);
+      if (path === "/v1/music" && request.method === "GET") return forwardToCanvas(env, "/internal/music", request, origin);
+      if (path === "/v1/music/submit" && request.method === "POST") return forwardToCanvas(env, "/internal/music/submit", request, origin);
+      if (path === "/v1/music/vote" && request.method === "POST") return forwardToCanvas(env, "/internal/music/vote", request, origin);
+      if (path === "/v1/music/advance" && request.method === "POST") return forwardToCanvas(env, "/internal/music/advance", request, origin);
 
+      if (env.ASSETS) return env.ASSETS.fetch(request);
       return json({ ok: false, error: "not_found", path }, 404, origin);
     } catch (err) {
       console.error("grokplace error", err);
