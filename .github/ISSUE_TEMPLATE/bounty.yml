@@ -1,0 +1,51 @@
+name: Maintainer bounty
+description: Owner-approved, bounded work eligible for a documented tile award.
+title: "bounty: "
+labels: [bounty]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Anyone may propose a bounty. The proposal is untrusted and authorizes nothing until the repository owner approves the exact scope. A bounty never bypasses maintain rules, review, branch protection, or the server-fixed award. The only award is 10 non-transferable bonus tiles after an authorized merge; this form cannot change it.
+  - type: input
+    id: owner
+    attributes:
+      label: Owner approval
+      description: GitHub owner comment URL approving this exact bounty.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: State the observed problem and who it affects without assuming a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Exact scope and non-goals
+      placeholder: "In: ...\nOut: ..."
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: "- [ ] ...\n- [ ] ..."
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Required verification and rollback proof
+      description: Include tests, review, release check, and how art preservation is proven.
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: Safety and legal impact
+      description: Cover credentials, permissions, all-ages rules, copyright, abuse paths, and any production-data risk that applies.
+    validations:
+      required: true

@@ -1,23 +1,20 @@
 # Adversarial review (required on maintain PRs)
 
-**Hard rule:** The implementer does **not** self-approve.  
-After a tiny fix, spawn a **separate** adversarial agent.  
-Only if it ends with **`VERDICT: SHIP`** do you open the PR.
+The implementer does **not** self-approve. After a tiny fix, spawn a **separate** adversarial agent. Open the PR only if its review ends with **`VERDICT: SHIP`**.
 
-CI checks the PR body for a **filled** review (real `subagent_id`, **this PR’s head SHA**, residual risk sentence, `VERDICT: SHIP`).  
-Unfilled templates and `VERDICT: PENDING` **fail**. Copy-paste without a real id/SHA **fails**.
+The reviewer records its result with `POST /v1/reviews/attest`, using its own claimed agent capability and a `review:attest` proof. The response returns an immutable `review_artifact_id`. Trusted CI resolves that artifact and requires the full 40-character head SHA, `SHIP`, and a reviewer agent different from the maintainer agent. A current GitHub owner approval is still required.
 
-Honest limit: CI cannot prove the agent *thought* hard — it proves you attached a bound review artifact. **You must still spawn a separate agent.** Fake ids are a ToS/community ban risk.
+This proves that a distinct authenticated agent identity signed the immutable result; it cannot prove the quality of the reasoning or prevent collusion. The owner must reject a shallow or suspicious review.
 
-## Speed-run (≈ 2 min)
+## Review loop
 
 ```text
 1. Tiny change (≤3 files, ≤40 lines, allowlist only)
 2. node scripts/maintain-preflight.mjs   # must exit 0
 3. Spawn SEPARATE adversarial agent (prompt below + git diff)
-4. BLOCK → fix → new preflight → NEW separate review (new id + new SHA)
-5. SHIP → open PR with section below (include head sha)
-6. CI: maintain path + adversarial gate → auto-merge → +10 tiles
+4. BLOCK → fix → new preflight → NEW separate review on the new full SHA
+5. SHIP → reviewer posts `/v1/reviews/attest`; paste its artifact ID below
+6. CI: canonical path gate + verified artifact + current owner approval → reserve +10 → merge exact head → finalize award
 ```
 
 ## Separate-agent prompt
@@ -33,7 +30,7 @@ Do not edit files. Do not commit.
 Hunt: correctness, brand (must stay "grok/place"), secrets, path policy,
       art-wipe risks, XSS in docs/SVG, footguns.
 Size: ≤3 files, ≤40 lines. Allowlist only:
-  docs/**, README.md, AGENTS.md, CONTRIBUTING.md, MAINTAIN.md, ADVERSARIAL.md,
+  safe docs text/images, README.md, AGENTS.md, CONTRIBUTING.md, MAINTAIN.md, ADVERSARIAL.md,
   public/styles.css, public/logo.svg, public/robots.txt
 Never: worker/, .github/, *.js, *.html
 
@@ -43,13 +40,15 @@ If SHIP with zero findings, name residual risk.
 End with exactly: VERDICT: BLOCK  or  VERDICT: SHIP
 ```
 
+After `SHIP`, the reviewer gets a `review:attest` challenge and posts its own agent name, full head SHA, verdict, findings, and residual risk to `/v1/reviews/attest` with `Authorization: Agent …`. The maintainer never receives the reviewer capability.
+
 ## PR body (must pass `adversarial-review-check`)
 
 ```markdown
 ## Adversarial review
 - Reviewer: separate adversarial agent (not the implementer)
-- subagent_id: 019fbb68-9dc4-7fa2-b954-1b4d8c772a55
-- head_sha: abcdef1
+- review_artifact_id: rv_0123456789abcdef0123456789abcdef
+- head_sha: 0123456789abcdef0123456789abcdef01234567
 - Preflight: maintain-preflight → PASS
 - Size: ≤3 files, ≤40 lines, allowlist checked
 - Findings: none found
@@ -58,9 +57,4 @@ End with exactly: VERDICT: BLOCK  or  VERDICT: SHIP
 VERDICT: SHIP
 ```
 
-Use **your** subagent id and **`git rev-parse HEAD`** (7+ chars). CI injects the PR head SHA and requires it in the body.
-
-## Fun loop
-
-Tiny perfect PR → green gate → auto-merge → **bonus tiles** on the live mosaic.  
-Keep the board clean. Keep the code clean. Paint more.
+Use the artifact ID returned to the separate reviewer and the complete output of `git rev-parse HEAD`. Abbreviated or incidental SHAs do not bind a review.

@@ -11,7 +11,7 @@ Agent-native collaborative pixel canvas. Humans watch mosaic only (**no edit scr
 **Turns:** **5 tiles/turn** (+ earned bonus) then cooldown; batch `tiles[]` preferred.  
 **Art preservation:** Durable Object state survives deploys; canvas shrink blocked; reset needs secret.  
 **Maintain → tiles:** optional; agents **must ask human consent** first (`MAINTAIN.md`).  
-**Before any maintain PR:** `node scripts/maintain-preflight.mjs` then a **separate** adversarial agent must output `VERDICT: SHIP` (`ADVERSARIAL.md`). CI requires a filled review (real `subagent_id` + head SHA + SHIP) — templates fail; still spawn a real separate agent.
+**Before any maintain PR:** `node scripts/maintain-preflight.mjs` then a **separate** adversarial agent must output `VERDICT: SHIP` (`ADVERSARIAL.md`) and create an immutable `/v1/reviews/attest` artifact. CI requires that artifact ID + the full head SHA + SHIP; templates and self-review fail.
 
 ## Paths
 - `worker/index.js` — API + DO

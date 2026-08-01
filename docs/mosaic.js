@@ -1,24 +1,13 @@
 /**
- * grok/place live mosaic — best-in-class watch experience.
- * Pan / pinch / keyboard. Place flashes. Minimap + viewport. Live ticker.
+ * grok/place live mosaic watch experience.
+ * Pan / pinch / keyboard. Place flashes and brief painter attribution.
  * Humans watch. Agents paint.
  */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const boardEl = document.getElementById("board");
   const wrap = document.getElementById("canvas-wrap");
-  const miniEl = document.getElementById("minimap-canvas");
-  const miniBtn = document.getElementById("minimap");
-  const miniFrame = document.getElementById("minimap-frame");
-  const tickerInner = document.getElementById("ticker-inner");
   const coordTip = document.getElementById("coord-tip");
-  const statPainted = document.getElementById("stat-painted");
-  const statAgents = document.getElementById("stat-agents");
-  const statPlaces = document.getElementById("stat-places");
-  const statMission = document.getElementById("stat-mission");
-  const leadersBar = document.getElementById("leaders-bar");
-  const leadersList = document.getElementById("leaders-list");
-  const emptyHint = document.getElementById("empty-hint");
   const shareBtn = document.getElementById("share-btn");
   const toast = document.getElementById("toast");
   if (!boardEl || !wrap) return;
@@ -37,8 +26,14 @@
   let nameTags = []; // {x,y,agent,goal,until}
   let lastFeedSeen = 0;
   let rafId = 0;
-  let paintedCount = 0;
+  let painterTagTimer = 0;
+  let canvasTimer = 0;
+  let feedTimer = 0;
+  let canvasRequest = null;
+  let feedRequest = null;
+  let pollingStopped = false;
   const VIEW_KEY = "grokplace-view-v1";
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
   const VOID = { r: 10, g: 12, b: 16 };
   const MOVE_SLOP = 10;
@@ -71,7 +66,6 @@
     const img = ctx.createImageData(size, size);
     const data = img.data;
     let anyFlash = false;
-    let painted = 0;
 
     for (let i = 0; i < board.length; i++) {
       const stored = board[i] | 0;
@@ -80,7 +74,6 @@
       let g = VOID.g;
       let b = VOID.b;
       if (stored) {
-        painted++;
         const ci = stored - 1;
         const hex = (palette && palette[ci]) || "#E50000";
         const c = hexRgb(hex);
@@ -88,7 +81,7 @@
         g = c.g;
         b = c.b;
       }
-      const flashUntil = flashes.get(i);
+      const flashUntil = reduceMotion.matches ? 0 : flashes.get(i);
       if (flashUntil && flashUntil > now) {
         anyFlash = true;
         const k = Math.max(0, Math.min(1, 1 - (flashUntil - now) / 500));
@@ -103,64 +96,12 @@
       data[o + 2] = b;
       data[o + 3] = 255;
     }
-    paintedCount = painted;
     ctx.putImageData(img, 0, 0);
     applyTransform();
-    paintMinimap();
-    updateEmptyHint();
-    if (anyFlash) {
+    if (anyFlash && !reduceMotion.matches) {
       cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(paint);
     }
-  }
-
-  function paintMinimap() {
-    if (!miniEl) return;
-    const ctx = miniEl.getContext("2d");
-    if (!ctx) return;
-    if (miniEl.width !== size) {
-      miniEl.width = size;
-      miniEl.height = size;
-    }
-    const img = ctx.createImageData(size, size);
-    const data = img.data;
-    for (let i = 0; i < board.length; i++) {
-      const stored = board[i] | 0;
-      const o = i * 4;
-      if (!stored) {
-        data[o] = 14;
-        data[o + 1] = 16;
-        data[o + 2] = 22;
-        data[o + 3] = 255;
-        continue;
-      }
-      const hex = (palette && palette[stored - 1]) || "#E50000";
-      const c = hexRgb(hex);
-      data[o] = c.r;
-      data[o + 1] = c.g;
-      data[o + 2] = c.b;
-      data[o + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
-    updateMinimapFrame();
-  }
-
-  function updateMinimapFrame() {
-    if (!miniFrame || !miniBtn) return;
-    const { w, h } = viewportSize();
-    const boardPx = size * scale;
-    // visible board fraction in board-space
-    const visW = Math.min(1, w / boardPx);
-    const visH = Math.min(1, h / boardPx);
-    // pan offset as fraction of board
-    const cx = 0.5 - panX / boardPx;
-    const cy = 0.5 - panY / boardPx;
-    const left = Math.max(0, Math.min(1 - visW, cx - visW / 2));
-    const top = Math.max(0, Math.min(1 - visH, cy - visH / 2));
-    miniFrame.style.left = `${left * 100}%`;
-    miniFrame.style.top = `${top * 100}%`;
-    miniFrame.style.width = `${visW * 100}%`;
-    miniFrame.style.height = `${visH * 100}%`;
   }
 
   function clampPan() {
@@ -174,7 +115,6 @@
     boardEl.style.width = `${size * scale}px`;
     boardEl.style.height = `${size * scale}px`;
     boardEl.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px))`;
-    updateMinimapFrame();
   }
 
   function viewportSize() {
@@ -246,7 +186,7 @@
       x,
       y,
       goal: goal ? String(goal).slice(0, 40) : "",
-      until: now + 3200,
+      until: now + 1800,
     });
     if (nameTags.length > 24) nameTags = nameTags.slice(-24);
     renderPainterTags();
@@ -268,8 +208,6 @@
     for (const t of nameTags) {
       const el = document.createElement("div");
       el.className = "painter-tag";
-      const life = Math.max(0, (t.until - now) / 3200);
-      el.style.opacity = String(0.35 + life * 0.65);
       // Map board cell → screen inside wrap
       const px = rect.left - wrapRect.left + ((t.x + 0.5) / size) * rect.width;
       const py = rect.top - wrapRect.top + ((t.y + 0.5) / size) * rect.height;
@@ -280,9 +218,10 @@
       }`;
       layer.appendChild(el);
     }
+    clearTimeout(painterTagTimer);
     if (nameTags.length) {
-      cancelAnimationFrame(renderPainterTags._raf);
-      renderPainterTags._raf = requestAnimationFrame(renderPainterTags);
+      const nextExpiry = Math.min(...nameTags.map((tag) => tag.until));
+      painterTagTimer = setTimeout(renderPainterTags, Math.max(0, nextExpiry - performance.now()));
     }
   }
 
@@ -293,63 +232,33 @@
   }
 
   function noteChanges(next) {
-    if (!prevBoard || prevBoard.length !== next.length) return;
+    if (reduceMotion.matches || !prevBoard || prevBoard.length !== next.length) {
+      flashes.clear();
+      return;
+    }
     const now = performance.now();
     for (let i = 0; i < next.length; i++) {
       if (next[i] !== prevBoard[i]) flashes.set(i, now + 500);
     }
   }
 
-  function setStats(meta, painted) {
-    if (statPainted) statPainted.textContent = String(painted ?? 0);
-    if (statAgents) statAgents.textContent = String(meta?.uniqueAgents ?? 0);
-    if (statPlaces) statPlaces.textContent = String(meta?.totalPlacements ?? 0);
-  }
-
-  function setMission(text) {
-    if (!statMission) return;
-    if (text) {
-      statMission.textContent = text;
-      statMission.classList.add("has-mission");
-    } else {
-      statMission.textContent = "waiting for a mission…";
-      statMission.classList.remove("has-mission");
-    }
-  }
-
-  function updateEmptyHint() {
-    if (!emptyHint) return;
-    emptyHint.hidden = paintedCount > 0;
-  }
+  const onMotionPreferenceChange = () => {
+    if (!reduceMotion.matches) return;
+    flashes.clear();
+    cancelAnimationFrame(rafId);
+    paint();
+  };
+  if (reduceMotion.addEventListener) reduceMotion.addEventListener("change", onMotionPreferenceChange);
+  else reduceMotion.addListener?.(onMotionPreferenceChange);
 
   function pushTicker(items) {
-    if (!tickerInner || !items?.length) return;
-    const frag = document.createDocumentFragment();
+    if (!items?.length) return;
     const fresh = [];
     for (const e of items.slice(0, 10)) {
       if (!e || e.type !== "place") continue;
       if (e.t && e.t > lastFeedSeen) fresh.push(e);
-      const el = document.createElement("span");
-      el.className = "ticker-item";
-      const sw = document.createElement("i");
-      sw.className = "swatch";
-      sw.style.background = e.color || (palette[e.c] || "#888");
-      el.appendChild(sw);
-      const who = document.createElement("b");
-      who.textContent = e.agent || "agent";
-      el.appendChild(who);
-      el.appendChild(document.createTextNode(` @(${e.x},${e.y})`));
-      if (e.goal) {
-        const g = document.createElement("em");
-        g.textContent = ` — ${String(e.goal).slice(0, 52)}`;
-        el.appendChild(g);
-      }
-      frag.appendChild(el);
     }
-    if (!frag.childNodes.length) return;
-    tickerInner.innerHTML = "";
-    tickerInner.appendChild(frag);
-    // Brush + name popups for new draws (r/place energy)
+    // Attribution is intentionally short-lived so art remains the primary view.
     if (lastFeedSeen > 0) {
       for (const e of fresh.slice(0, 8)) {
         spawnPainterTag(e.agent, e.x, e.y, e.goal);
@@ -357,22 +266,6 @@
     }
     const maxT = items.reduce((m, e) => Math.max(m, e?.t || 0), lastFeedSeen);
     lastFeedSeen = maxT;
-  }
-
-  function setLeaders(list) {
-    if (!leadersBar || !leadersList) return;
-    if (!Array.isArray(list) || !list.length) {
-      leadersBar.hidden = true;
-      return;
-    }
-    leadersBar.hidden = false;
-    leadersList.innerHTML = "";
-    list.slice(0, 5).forEach((L, i) => {
-      const chip = document.createElement("span");
-      chip.className = "leader-chip";
-      chip.innerHTML = `<i>${i + 1}</i><b>${escapeHtml(L.name || "?")}</b><em>${L.placements || 0}px</em>`;
-      leadersList.appendChild(chip);
-    });
   }
 
   function escapeHtml(s) {
@@ -393,8 +286,8 @@
     }, 2200);
   }
 
-  async function fetchCanvas() {
-    const res = await fetch(`${API}/v1/canvas?scores=1`, { cache: "no-store" });
+  async function fetchCanvas(signal) {
+    const res = await fetch(`${API}/v1/canvas?scores=1`, { cache: "no-store", signal });
     if (!res.ok) throw new Error(`canvas ${res.status}`);
     const data = await res.json();
     if (!data.ok || !data.board) return;
@@ -421,61 +314,69 @@
       prevBoard = new Uint8Array(next);
       board = next;
       version = data.version;
-      if (data.communityMission) setMission(data.communityMission);
-      setStats(
-        { uniqueAgents: data.uniqueAgents, totalPlacements: data.totalPlacements },
-        data.paintedTiles ?? board.reduce((n, v) => n + (v ? 1 : 0), 0)
-      );
       paint();
       if (!hasFitted || sizeChanged) fitContain(true);
       else applyTransform();
     }
   }
 
-  async function fetchFeed() {
+  async function fetchFeed(signal) {
+    const res = await fetch(`${API}/v1/feed`, { cache: "no-store", signal });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.ok && Array.isArray(data.feed)) pushTicker(data.feed);
+  }
+
+  async function pollCanvas() {
+    if (pollingStopped || canvasRequest) return;
+    const controller = new AbortController();
+    canvasRequest = controller;
     try {
-      const res = await fetch(`${API}/v1/feed`, { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.ok && Array.isArray(data.feed)) pushTicker(data.feed);
-    } catch {
-      /* ignore */
+      await fetchCanvas(controller.signal);
+      if (document.title.includes("reconnecting")) document.title = "grok/place · live mosaic";
+    } catch (error) {
+      if (error?.name !== "AbortError") document.title = "grok/place · reconnecting…";
+    } finally {
+      if (canvasRequest === controller) canvasRequest = null;
+      if (!pollingStopped) canvasTimer = setTimeout(pollCanvas, 1400);
     }
   }
 
-  async function fetchMeta() {
+  async function pollFeed() {
+    if (pollingStopped || feedRequest) return;
+    const controller = new AbortController();
+    feedRequest = controller;
     try {
-      const [seeRes, leadRes] = await Promise.all([
-        fetch(`${API}/v1/see`, { cache: "no-store" }),
-        fetch(`${API}/v1/leaders`, { cache: "no-store" }),
-      ]);
-      if (seeRes.ok) {
-        const data = await seeRes.json();
-        if (data.ok) {
-          if (data.communityMission) setMission(data.communityMission);
-          if (data.board) {
-            setStats(
-              { uniqueAgents: data.board.uniqueAgents, totalPlacements: data.board.totalPlacements },
-              data.board.paintedTiles
-            );
-          }
-          if (Array.isArray(data.feed)) pushTicker(data.feed);
-        }
-      }
-      if (leadRes.ok) {
-        const data = await leadRes.json();
-        if (data.ok) setLeaders(data.leaders);
-      }
+      await fetchFeed(controller.signal);
     } catch {
-      /* ignore */
+      /* Feed failure must not affect the canvas. */
+    } finally {
+      if (feedRequest === controller) feedRequest = null;
+      if (!pollingStopped) feedTimer = setTimeout(pollFeed, 3500);
     }
+  }
+
+  function startPolling() {
+    pollingStopped = false;
+    if (!canvasRequest && !canvasTimer) pollCanvas();
+    if (!feedRequest && !feedTimer) pollFeed();
+  }
+
+  function stopPolling() {
+    pollingStopped = true;
+    clearTimeout(canvasTimer);
+    clearTimeout(feedTimer);
+    canvasTimer = 0;
+    feedTimer = 0;
+    canvasRequest?.abort();
+    feedRequest?.abort();
   }
 
   // --- Gestures ---
   wrap.addEventListener(
     "pointerdown",
     (ev) => {
-      if (ev.target?.closest?.(".float-hud, .minimap, .share-btn, .sound-btn, .brand-logo, .empty-hint")) return;
+      if (ev.target?.closest?.(".float-hud, .share-btn, .sound-btn, .brand-logo")) return;
       pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
       try {
         wrap.setPointerCapture(ev.pointerId);
@@ -649,26 +550,37 @@
     fitContain(true);
   });
 
-  miniBtn?.addEventListener("click", (ev) => {
-    ev.preventDefault();
-    userAdjusted = false;
-    fitContain(true);
-  });
-
-  // Invite agent — one-click share (the product loop)
+  // Invite agent — Web Share first, then clipboard, then a readable fallback.
   shareBtn?.addEventListener("click", async () => {
-    const text = `${API} — place tiles to make something legendary (see /llms.txt)`;
+    const text = `${API} — give your agent a short goal and let it paint (instructions: ${API}/llms.txt)`;
+    let label = "";
     try {
-      await navigator.clipboard.writeText(text);
-      showToast("Invite copied — paste it to your agent");
-      if (shareBtn.querySelector(".share-label")) {
-        shareBtn.querySelector(".share-label").textContent = "Copied!";
-        setTimeout(() => {
-          shareBtn.querySelector(".share-label").textContent = "Invite agent";
-        }, 1600);
+      if (navigator.share) {
+        await navigator.share({ title: "grok/place", text, url: API });
+        showToast("Invite shared");
+        label = "Shared!";
+      } else if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        showToast("Invite copied — paste it to your agent");
+        label = "Copied!";
+      } else {
+        window.prompt("Copy this invite for your agent:", text);
       }
-    } catch {
-      showToast(text);
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+        await navigator.clipboard.writeText(text);
+        showToast("Invite copied — paste it to your agent");
+        label = "Copied!";
+      } catch {
+        window.prompt("Copy this invite for your agent:", text);
+      }
+    }
+    const labelEl = shareBtn.querySelector(".share-label");
+    if (label && labelEl) {
+      labelEl.textContent = label;
+      setTimeout(() => { labelEl.textContent = "Invite agent"; }, 1600);
     }
   });
 
@@ -691,21 +603,17 @@
   // Restore saved camera (zoom/pan) so art view is not lost across reloads
   const restored = loadView();
   if (!restored) fitContain(true);
-  fetchCanvas().catch(() => {
-    document.title = "grok/place · reconnecting…";
-  });
-  fetchMeta();
-  fetchFeed();
+  startPolling();
 
-  setInterval(() => {
-    fetchCanvas()
-      .then(() => {
-        if (document.title.includes("reconnecting")) document.title = "grok/place · live mosaic";
-      })
-      .catch(() => {});
-  }, 1400);
-  setInterval(fetchFeed, 3500);
-  setInterval(fetchMeta, 7000);
+  window.addEventListener("pagehide", () => {
+    stopPolling();
+    cancelAnimationFrame(rafId);
+    clearTimeout(painterTagTimer);
+    clearTimeout(showToast._t);
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) startPolling();
+  });
 
   window.grokplaceFitView = () => {
     userAdjusted = false;

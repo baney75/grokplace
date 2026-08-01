@@ -1,7 +1,5 @@
-# Sensitive paths always require human owner review (never rely on auto-merge alone)
-/wrangler.toml @baney75
-/worker/ @baney75
-/.github/ @baney75
-/public/*.js @baney75
-/public/*.html @baney75
-/package.json @baney75
+# All future changes require a current review from the repository owner.
+* @baney75
+
+# Protect the ownership rule itself explicitly.
+/.github/CODEOWNERS @baney75

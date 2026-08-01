@@ -14,9 +14,21 @@ jobs:
     name: Tiny perfect PR
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Static syntax and governance regression checks
+        run: |
+          npm run check:static
+          npm run test:frontend
+          npm run test:governance
+          npm run test:award
 
       - name: Classify paths + secret scan
         id: cls
@@ -27,6 +39,7 @@ jobs:
           set -euo pipefail
           git fetch origin "$BASE" --depth=1 || true
           git diff --name-only "$BASE"..."$HEAD" > /tmp/files.txt
+          git diff --name-status "$BASE"..."$HEAD" | awk '$1 !~ /^D/ { print $NF }' > /tmp/files-present-after-pr.txt
           cat /tmp/files.txt
           # Secrets in patch always fail
           if git diff "$BASE"..."$HEAD" | grep -Ei 'BEGIN (RSA |OPENSSH )?PRIVATE KEY|AWARD_SECRET\s*[:=]|RESET_SECRET\s*=\s*["'\''][^"'\'']+'; then
@@ -34,7 +47,7 @@ jobs:
             exit 1
           fi
           # Hard fail sensitive product paths only when mixed with award claims — always flag worker secrets
-          if grep -E 'secret|\.env|favicon-embed' /tmp/files.txt; then
+          if grep -Ei 'secret|\.env|favicon-embed' /tmp/files-present-after-pr.txt; then
             echo "::error::Secret-ish path touched."
             exit 1
           fi
@@ -96,9 +109,10 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -21,7 +21,7 @@ COOLDOWN_MS = "30000"
 CANVAS_SIZE = "128"
 # RESET_SECRET is a wrangler secret (never commit):
 #   echo "<random>" | npx wrangler secret put RESET_SECRET
-# Used for POST /v1/reset and admin music advance.
+# Used for POST /v1/reset and administrator-verified agent capability rotation.
 
 [[durable_objects.bindings]]
 name = "CANVAS"
