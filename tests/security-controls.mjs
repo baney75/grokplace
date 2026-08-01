@@ -81,18 +81,19 @@ const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
     },
   });
   check("immutable review evidence keeps its public cache policy", response.status === 200 && response.headers.get("Cache-Control") === "public, max-age=60, immutable");
-  const mirror = await worker.fetch(new Request("https://grokplace.barnlabs.net/review-artifact?id=rv_11111111111111111111111111111111", {
-    headers: { "CF-Connecting-IP": "203.0.113.16" },
-  }), {
-    EDGE_READ_LIMITER: { async limit() { return { success: true }; } },
-    CANVAS: {
-      idFromName() { return "main"; },
-      get() {
-        return { fetch: async () => new Response(JSON.stringify({ ok: true, review: {} }), { headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=60, immutable" } }) };
-      },
-    },
-  });
-  check("trusted gate review alias preserves immutable cache policy", mirror.status === 200 && mirror.headers.get("Cache-Control") === "public, max-age=60, immutable");
+}
+
+{
+  const routed = { value: false };
+  const env = envWithRoute(routed);
+  const response = await worker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/reviews?id=rv_11111111111111111111111111111111", {
+    headers: { "CF-Connecting-IP": "203.0.113.17" },
+  }), env);
+  const blocked = await worker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/canvas", {
+    headers: { "CF-Connecting-IP": "203.0.113.17" },
+  }), env);
+  check("direct review mirror reaches only the immutable review route", response.status === 200 && routed.value);
+  check("direct review mirror blocks application paths", blocked.status === 404 && (await blocked.text()).trim() === "Not found");
 }
 
 {

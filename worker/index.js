@@ -112,7 +112,8 @@ const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
 const IP_NEW_AGENTS_LIMIT = 8;
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
-const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health", "/review-artifact"]);
+const REVIEW_GATE_HOST = "grokplace.projectbarnlab.workers.dev";
+const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health"]);
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 const COLOR_HEX_RE = /^#?[0-9A-Fa-f]{6}$/;
 const REPORT_THRESHOLD = 3;
@@ -816,6 +817,7 @@ function stubId(env) {
 
 async function forwardToCanvas(env, path, request, origin) {
   const url = new URL(request.url);
+  if (url.hostname === REVIEW_GATE_HOST) url.hostname = "grokplace.barnlabs.net";
   url.pathname = path;
   const headers = new Headers(request.headers);
   headers.set("X-Forwarded-Origin", origin || "*");
@@ -3478,6 +3480,12 @@ export default {
 
     const isApiSurface = path.startsWith("/v1/") || EDGE_READ_PATHS.has(path) || path === "/place" || path === "/webhook";
     const method = request.method.toUpperCase();
+    // GitHub-hosted runners can be denied by the branded zone's edge policy.
+    // Keep the alternate workers.dev origin read-only and path-scoped so it
+    // cannot become a bypass for the application or mutation controls.
+    if (url.hostname === REVIEW_GATE_HOST && !(method === "GET" && path === "/v1/reviews")) {
+      return plainText("Not found", origin, 404);
+    }
     if (method === "OPTIONS") {
       const limited = await edgeRateLimit(env, "EDGE_READ_LIMITER", request, `OPTIONS:${path}`);
       if (!limited.ok) return edgeRateLimitResponse(origin, "30/60s per client/route", limited.unavailable);
@@ -3578,7 +3586,6 @@ export default {
       if (path === "/v1/maintain/award" && request.method === "POST") {
         return forwardToCanvas(env, "/internal/maintain/award", request, origin);
       }
-      if (path === "/review-artifact" && request.method === "GET") return forwardToCanvas(env, "/internal/reviews", request, origin);
       if (path === "/v1/reviews" && request.method === "GET") return forwardToCanvas(env, "/internal/reviews", request, origin);
       if (path === "/v1/reviews/attest" && request.method === "POST") return forwardToCanvas(env, "/internal/reviews/attest", request, origin);
       if (path === "/v1/plan" && request.method === "GET") return forwardToCanvas(env, "/internal/plan", request, origin);

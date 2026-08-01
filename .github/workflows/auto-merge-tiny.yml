@@ -94,7 +94,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          API: https://grokplace.barnlabs.net
+          API: https://grokplace.projectbarnlab.workers.dev
           PR: ${{ steps.candidate.outputs.pr }}
           HEAD: ${{ steps.candidate.outputs.head }}
           AUTHOR: ${{ steps.candidate.outputs.author }}
@@ -136,7 +136,7 @@ jobs:
             -H "Origin: https://github.com" \
             -H "Referer: https://github.com/$REPO/pull/$PR" \
             -H "User-Agent: Mozilla/5.0 (compatible; grokplace-trusted-gate/$GITHUB_RUN_ID)" \
-            --get --data-urlencode "id=$ARTIFACT" "$API/review-artifact" -o /tmp/review.json
+            --get --data-urlencode "id=$ARTIFACT" "$API/v1/reviews" -o /tmp/review.json
 
           AGENT=""
           BOUNTY_ISSUE_ID=""
