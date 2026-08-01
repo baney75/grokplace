@@ -15,6 +15,23 @@
   let nowTrack = null;
   let ytPlayer = null;
   let ytApiLoading = false;
+  let endsTimer = null;
+
+  function clearEndsTimer() {
+    if (endsTimer) {
+      clearTimeout(endsTimer);
+      endsTimer = null;
+    }
+  }
+
+  function scheduleEndsAt(track) {
+    clearEndsTimer();
+    if (!track || !track.endsAt) return;
+    const ms = Math.max(1000, track.endsAt - Date.now());
+    endsTimer = setTimeout(() => {
+      advance("timeout");
+    }, ms);
+  }
 
   function isLegalEmbedUrl(url, source) {
     try {
@@ -50,6 +67,7 @@
   }
 
   function destroyPlayers() {
+    clearEndsTimer();
     if (ytPlayer && typeof ytPlayer.destroy === "function") {
       try {
         ytPlayer.destroy();
@@ -153,6 +171,7 @@
     }
     if (track.source === "youtube") mountYoutube(track);
     else if (track.source === "spotify") mountSpotify(track);
+    scheduleEndsAt(track);
   }
 
   async function fetchMusic() {
@@ -167,6 +186,11 @@
         const prev = nowTrack && nowTrack.id;
         if (id !== prev) renderNow(data.now);
         else if (!data.now) renderNow(null);
+        else if (data.now) {
+          // same track: refresh advanceToken / endsAt for client advance
+          nowTrack = data.now;
+          scheduleEndsAt(data.now);
+        }
       }
     } catch {
       /* ignore */
@@ -175,8 +199,11 @@
 
   async function advance(reason) {
     try {
-      const body = { reason: reason || "ended" };
-      if (nowTrack) body.trackId = nowTrack.id;
+      const body = { reason: reason === "timeout" ? "timeout" : "ended" };
+      if (nowTrack) {
+        body.trackId = nowTrack.id;
+        if (nowTrack.advanceToken) body.advanceToken = nowTrack.advanceToken;
+      }
       const res = await fetch(`${API}/v1/music/advance`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

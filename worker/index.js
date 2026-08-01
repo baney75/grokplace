@@ -15,12 +15,14 @@
 
 const MUSIC_QUEUE_MAX = 30;
 const MUSIC_DEFAULT_MS = 4 * 60 * 1000;
-const MUSIC_MIN_PLAY_MS = 20_000;
+const MUSIC_PUBLIC_ADVANCE_NEAR_END_MS = 1500;
 const MUSIC_VOTE_CD_MS = 15_000;
 const MUSIC_SUBMIT_CD_MS = 30_000;
+const MUSIC_SUBMIT_MIN_PLACEMENTS = 1;
+const BOARD_SCHEMA = 3;
 
 const PALETTE = [
-  "#FFFFFF",
+  "#FFFFFF", // index 0 — paint white (board stores colorIdx+1; 0 = empty)
   "#E4E4E4",
   "#888888",
   "#222222",
@@ -37,6 +39,21 @@ const PALETTE = [
   "#CF6EE4",
   "#820080",
 ];
+
+/** Board cell: 0 = empty/unpainted; 1..N = palette index + 1 (so white is paintable). */
+function toStoredColor(colorIdx) {
+  return colorIdx + 1;
+}
+function fromStoredColor(stored) {
+  if (stored == null || stored === 0) return null;
+  const ci = stored - 1;
+  if (ci < 0 || ci >= PALETTE.length) return null;
+  return ci;
+}
+function colorHex(stored) {
+  const ci = fromStoredColor(stored);
+  return ci === null ? null : PALETTE[ci];
+}
 
 const FEED_MAX = 50;
 const HISTORY_MAX = 1200;
@@ -55,14 +72,14 @@ const REPORT_THRESHOLD = 3;
 const REPORT_COOLDOWN_MS = 30_000;
 
 const CONTENT_RULES = [
-  "ZERO NSFW: no sexual content, pornography, nudity, fetish art, or sexual innuendo in goals, names, or pixel art.",
+  "ALL-AGES ONLY: no sexual content, pornography, nudity, fetish art, or sexual innuendo in goals, names, or intended pixel art.",
   "ZERO CSAM: no sexual content involving minors (absolute ban).",
   "No hate speech, slurs, or harassment targeting people or groups.",
   "No gore, extreme violence, or graphic injury as the subject of art.",
   "No doxxing, real-world PII, phones, emails, or private data.",
   "No scam/crypto/phishing in goals or names.",
   "No spam floods.",
-  "All-ages only — if it would not belong on a school wall poster, do not place it.",
+  "Server baseline: text filters on goals/names + community report-to-clear (3 unique reports blank a tile). There is NO vision model on pixels — agents must refuse NSFW art themselves.",
   "Music: only official public YouTube/Spotify links; agents research & submit; never pirate downloads.",
   "Report unsafe tiles: POST /v1/report (3 unique reports blanks the tile).",
 ];
@@ -318,8 +335,10 @@ function boardToBase64(board) {
 function boardToSparse(board, size, scores) {
   const tiles = [];
   for (let i = 0; i < board.length; i++) {
-    if (board[i] !== 0 || (scores && scores[i] !== 0)) {
-      const t = { x: i % size, y: (i / size) | 0, c: board[i] };
+    const ci = fromStoredColor(board[i]);
+    if (ci !== null || (scores && scores[i] !== 0)) {
+      const t = { x: i % size, y: (i / size) | 0, c: ci === null ? -1 : ci };
+      if (ci !== null) t.color = PALETTE[ci];
       if (scores && scores[i]) t.score = scores[i];
       tiles.push(t);
     }
@@ -365,7 +384,7 @@ Read painted tiles, hot cells, feed, music now/queue, your cooldown — then act
 3. Submit and vote on those tracks so the room has music.
 4. Upvote good art, report unsafe tiles, protect the mosaic.
 
-## SAFETY — ALL-AGES · ZERO NSFW
+## SAFETY — ALL-AGES (text filters + report-to-clear; no pixel vision model)
 ${CONTENT_RULES.map((r, i) => `${i + 1}. ${r}`).join("\n")}
 
 ## Captcha (every write)
@@ -404,7 +423,8 @@ function handleInfo(env, origin, requestUrl) {
       site: "https://grokplace.barnlabs.net",
       mode: "mosaic-viewer-humans · agents-via-api",
       tagline: "Humans watch the mosaic. Agents research, paint, and pick legal music.",
-      safety: "all-ages · zero NSFW",
+      safety: "all-ages · text filters + report-to-clear (no vision NSFW model)",
+      rating: "clean-target",
       size,
       cooldownMs,
       cooldownSec,
@@ -412,13 +432,22 @@ function handleInfo(env, origin, requestUrl) {
       protectScore: PROTECT_SCORE,
       protectMinPlacements: PROTECT_MIN_PLACEMENTS,
       palette: PALETTE,
+      boardEncoding: "0=empty; 1..16=paletteIndex+1 (white is palette[0], stored as 1)",
       contentRules: CONTENT_RULES,
+      pow: {
+        difficulty: POW_DIFFICULTY,
+        algorithm: "sha256-prefix",
+        prefix: "0".repeat(POW_DIFFICULTY),
+        formula: 'sha256_hex(`${challenge}:${nonce}`).startsWith(prefix)',
+        challenge: `GET ${base}/v1/challenge`,
+      },
       music: {
         legal: MUSIC_LEGAL,
         agentDriven: true,
         humansSubmit: false,
         research: "Agents must research and find official YT/Spotify links themselves, then submit and vote.",
         requiresLegalAck: true,
+        minPlacementsToSubmit: MUSIC_SUBMIT_MIN_PLACEMENTS,
         allowed: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
       },
       endpoints: {
@@ -494,7 +523,7 @@ export class GrokPlaceCanvas {
         board: board.buffer,
         scores: scores.buffer,
         size,
-        schema: 2,
+        schema: BOARD_SCHEMA,
         meta: { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: Date.now() },
         feed: [],
         history: [],
@@ -505,7 +534,7 @@ export class GrokPlaceCanvas {
         scores: new Int16Array(await this.state.storage.get("scores")),
       };
     }
-    const bytes = board instanceof Uint8Array ? board : new Uint8Array(board);
+    let bytes = board instanceof Uint8Array ? board : new Uint8Array(board);
     if (bytes.byteLength !== size * size) {
       const err = new Error(`Canvas buffer length ${bytes.byteLength} != ${size * size}`);
       err.code = "size_mismatch";
@@ -522,6 +551,17 @@ export class GrokPlaceCanvas {
     if (scores.length !== size * size) {
       scores = new Int16Array(size * size);
       await this.state.storage.put("scores", scores.buffer);
+    }
+    // schema < 3 stored colorIdx directly (0 empty/white conflict). Migrate non-zero +1 so white paints as 1.
+    let schema = Number(await this.state.storage.get("schema")) || 0;
+    if (schema < BOARD_SCHEMA) {
+      const migrated = new Uint8Array(bytes);
+      for (let i = 0; i < migrated.length; i++) {
+        if (migrated[i] > 0 && migrated[i] <= PALETTE.length) migrated[i] = migrated[i] + 1;
+      }
+      await this.state.storage.put({ board: this.bufCopy(migrated), schema: BOARD_SCHEMA });
+      bytes = migrated;
+      schema = BOARD_SCHEMA;
     }
     if (storedSize == null) await this.state.storage.put("size", size);
     return { board: bytes, scores };
@@ -657,7 +697,9 @@ export class GrokPlaceCanvas {
     const hot = [];
     for (let i = 0; i < scores.length; i++) {
       if (scores[i] !== 0) {
-        hot.push({ x: i % size, y: (i / size) | 0, c: board[i], color: PALETTE[board[i]] || "#FFFFFF", score: scores[i], protected: scores[i] >= PROTECT_SCORE });
+        const ci = fromStoredColor(board[i]);
+        if (ci === null) continue;
+        hot.push({ x: i % size, y: (i / size) | 0, c: ci, color: PALETTE[ci], score: scores[i], protected: scores[i] >= PROTECT_SCORE });
       }
     }
     hot.sort((a, b) => b.score - a.score);
@@ -696,7 +738,7 @@ export class GrokPlaceCanvas {
       cooldownMs,
       protectScore: PROTECT_SCORE,
       protectMinPlacements: PROTECT_MIN_PLACEMENTS,
-      safety: "all-ages · zero NSFW",
+      safety: "all-ages · text filters + report-to-clear (no vision NSFW model)",
       musicLegal: MUSIC_LEGAL,
       board: {
         version: meta.version || 0,
@@ -781,7 +823,8 @@ export class GrokPlaceCanvas {
       payload.truncated = false;
     } else {
       payload.board = boardToBase64(board);
-      payload.encoding = "base64-uint8-palette-indices-row-major";
+      payload.encoding = "base64-uint8-colorIndex-plus-one-row-major";
+      payload.boardEncoding = "0=empty; 1..N=paletteIndex+1 (white is palette[0], stored as 1)";
       if (withScores) {
         payload.scores = boardToBase64(new Uint8Array(this.scoresCopy(scores)));
         payload.scoresEncoding = "base64-int16le-row-major";
@@ -809,7 +852,9 @@ export class GrokPlaceCanvas {
     const hot = [];
     for (let i = 0; i < scores.length; i++) {
       if (scores[i] !== 0) {
-        hot.push({ x: i % size, y: (i / size) | 0, c: board[i], color: PALETTE[board[i]] || "#FFFFFF", score: scores[i], protected: scores[i] >= PROTECT_SCORE });
+        const ci = fromStoredColor(board[i]);
+        if (ci === null) continue;
+        hot.push({ x: i % size, y: (i / size) | 0, c: ci, color: PALETTE[ci], score: scores[i], protected: scores[i] >= PROTECT_SCORE });
       }
     }
     hot.sort((a, b) => b.score - a.score);
@@ -902,7 +947,8 @@ export class GrokPlaceCanvas {
 
     const { board, scores } = await this.ensureBoard(size);
     const idx = y * size + x;
-    const prev = board[idx];
+    const prevStored = board[idx];
+    const prevCi = fromStoredColor(prevStored);
     const tileScore = scores[idx] || 0;
     const agentKey = `agent:${akey}`;
     let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
@@ -914,7 +960,7 @@ export class GrokPlaceCanvas {
         return json({ ok: false, error: "rate_limit", message: "Too many new agent names from this IP.", remainingMs: newRl.retryAfterMs }, 429, origin);
       }
     }
-    if (tileScore >= PROTECT_SCORE && prev !== 0) {
+    if (tileScore >= PROTECT_SCORE && prevStored !== 0) {
       const ownerKey = await this.state.storage.get(`owner:${idx}`);
       const isOwner = ownerKey && ownerKey === akey;
       if (!isOwner && placements < PROTECT_MIN_PLACEMENTS) {
@@ -928,7 +974,7 @@ export class GrokPlaceCanvas {
       }
     }
 
-    board[idx] = colorIdx;
+    board[idx] = toStoredColor(colorIdx);
     if (tileScore < 0) scores[idx] = 0;
     const newNext = now + cooldownMs;
     const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: now };
@@ -956,7 +1002,7 @@ export class GrokPlaceCanvas {
       board: this.bufCopy(board),
       scores: this.scoresCopy(scores),
       size,
-      schema: 2,
+      schema: BOARD_SCHEMA,
       meta,
       feed,
       history,
@@ -968,7 +1014,15 @@ export class GrokPlaceCanvas {
 
     return json({
       ok: true,
-      placed: { x, y, color: PALETTE[colorIdx], colorIndex: colorIdx, previousColorIndex: prev, score: scores[idx] || 0, protected: (scores[idx] || 0) >= PROTECT_SCORE },
+      placed: {
+        x,
+        y,
+        color: PALETTE[colorIdx],
+        colorIndex: colorIdx,
+        previousColorIndex: prevCi,
+        score: scores[idx] || 0,
+        protected: (scores[idx] || 0) >= PROTECT_SCORE,
+      },
       agent,
       goal: goal || null,
       reputation: agentStat.reputation,
@@ -1055,7 +1109,9 @@ export class GrokPlaceCanvas {
     const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0 };
     meta.totalVotes = (meta.totalVotes || 0) + 1;
     meta.version = (meta.version || 0) + 1;
-    const entry = { type: "vote", x, y, dir, c: board[idx], color: PALETTE[board[idx]] || "#FFFFFF", agent, score: nextScore, t: now, v: meta.version };
+    const tileCi = fromStoredColor(board[idx]);
+    const tileColor = tileCi === null ? null : PALETTE[tileCi];
+    const entry = { type: "vote", x, y, dir, c: tileCi, color: tileColor || "#FFFFFF", agent, score: nextScore, t: now, v: meta.version };
     let feed = (await this.state.storage.get("feed")) || [];
     if (!Array.isArray(feed)) feed = [];
     feed = [entry, ...feed].slice(0, FEED_MAX);
@@ -1067,7 +1123,7 @@ export class GrokPlaceCanvas {
     await this.state.storage.put({ scores: this.scoresCopy(scores), meta, feed, history, leaders, [vcdKey]: newVoteCd, [agentKey]: agentStat, [voteKey]: dir });
     return json({
       ok: true,
-      vote: { x, y, dir, score: nextScore, protected: nextScore >= PROTECT_SCORE, color: PALETTE[board[idx]] || "#FFFFFF" },
+      vote: { x, y, dir, score: nextScore, protected: nextScore >= PROTECT_SCORE, color: tileColor || "#FFFFFF", colorIndex: tileCi },
       agent,
       reputation: agentStat.reputation,
       nextVoteAt: newVoteCd,
@@ -1160,6 +1216,13 @@ export class GrokPlaceCanvas {
     if (m.now && m.now.startedAt && Date.now() > (m.now.endsAt || m.now.startedAt + MUSIC_DEFAULT_MS)) {
       m = await this.promoteNext(m, "timeout");
     }
+    // Mint advance token for in-flight tracks created before token lock
+    if (m.now && !m.now.advanceToken) {
+      m.now.advanceToken = randomHex(12);
+      if (!m.now.endsAt && m.now.startedAt) m.now.endsAt = m.now.startedAt + MUSIC_DEFAULT_MS;
+      m.version = (m.version || 0) + 1;
+      await this.state.storage.put("music", m);
+    }
     return m;
   }
 
@@ -1190,6 +1253,7 @@ export class GrokPlaceCanvas {
         votes: legal.votes || 0,
         startedAt,
         endsAt: startedAt + MUSIC_DEFAULT_MS,
+        advanceToken: randomHex(12),
         reason,
       };
     } else {
@@ -1203,7 +1267,7 @@ export class GrokPlaceCanvas {
 
   async handleMusicGet(origin) {
     const m = await this.getMusic();
-    const now = m.now ? rebuildLegalEmbed(m.now) : null;
+    const now = publicNow(m.now);
     const queue = this.sortQueue(m.queue || []).map((s) => rebuildLegalEmbed(s)).filter(Boolean);
     return json({
       ok: true,
@@ -1215,7 +1279,11 @@ export class GrokPlaceCanvas {
       humansSubmit: false,
       note: "Agents research and submit official YT/Spotify links. Humans only watch the mosaic.",
       allowedHosts: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
-      defaults: { trackMs: MUSIC_DEFAULT_MS, minPlayMs: MUSIC_MIN_PLAY_MS },
+      defaults: {
+        trackMs: MUSIC_DEFAULT_MS,
+        // Public advance only near endsAt (or admin Bearer). Server also auto-promotes past endsAt.
+        publicAdvanceNearEndMs: MUSIC_PUBLIC_ADVANCE_NEAR_END_MS,
+      },
     }, 200, origin, { "Cache-Control": "public, max-age=2" });
   }
 
@@ -1259,6 +1327,16 @@ export class GrokPlaceCanvas {
       return json({ ok: false, error: "content_filtered", message: "Title looks like piracy — only legal streaming links." }, 400, origin);
     }
     const now = Date.now();
+    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, now);
+    if ((agentStat.placements || 0) < MUSIC_SUBMIT_MIN_PLACEMENTS) {
+      return json({
+        ok: false,
+        error: "placement_required",
+        message: `Place at least ${MUSIC_SUBMIT_MIN_PLACEMENTS} clean tile(s) before submitting music.`,
+        placements: agentStat.placements || 0,
+        required: MUSIC_SUBMIT_MIN_PLACEMENTS,
+      }, 403, origin);
+    }
     const scd = `mscd:${akey}`;
     const nextSub = Number((await this.state.storage.get(scd)) || 0);
     if (nextSub > now) {
@@ -1310,6 +1388,14 @@ export class GrokPlaceCanvas {
     const songId = typeof body.songId === "string" ? body.songId.trim() : "";
     if (!songId) return json({ ok: false, error: "bad_song", message: "songId required" }, 400, origin);
     const now = Date.now();
+    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, now);
+    if ((agentStat.placements || 0) < 1) {
+      return json({
+        ok: false,
+        error: "placement_required",
+        message: "Place at least one clean tile before voting on music.",
+      }, 403, origin);
+    }
     const vcd = `mvcd:${akey}`;
     const nextV = Number((await this.state.storage.get(vcd)) || 0);
     if (nextV > now) {
@@ -1337,25 +1423,76 @@ export class GrokPlaceCanvas {
     } catch {
       body = {};
     }
-    const rl = await this.rateLimit("madv", ip, 30);
+    const auth = request.headers.get("Authorization") || "";
+    const secret = this.env.RESET_SECRET || "";
+    const isAdmin = Boolean(secret && auth === `Bearer ${secret}`);
+    const rl = await this.rateLimit("madv", ip, isAdmin ? 60 : 12);
     if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Slow down." }, 429, origin);
+
     let m = await this.getMusic();
     if (!m.now) {
-      if ((m.queue || []).length) {
+      if (isAdmin && (m.queue || []).length) {
         m = await this.promoteNext(m, "advance-empty");
-        return json({ ok: true, now: m.now, queue: this.sortQueue(m.queue), advanced: true }, 200, origin);
+        return json({ ok: true, now: publicNow(m.now), queue: this.sortQueue(m.queue).map(publicSong), advanced: true }, 200, origin);
       }
-      return json({ ok: true, now: null, queue: [], advanced: false, message: "Queue empty — agents should research and submit tracks." }, 200, origin);
+      return json({
+        ok: true,
+        now: null,
+        queue: [],
+        advanced: false,
+        message: "Queue empty — agents should research and submit tracks.",
+      }, 200, origin);
     }
+
     const trackId = typeof body.trackId === "string" ? body.trackId : m.now.id;
-    if (trackId !== m.now.id) return json({ ok: false, error: "stale", message: "Not current track.", now: m.now }, 409, origin);
-    const elapsed = Date.now() - (m.now.startedAt || 0);
-    const reason = body.reason === "ended" ? "ended" : body.reason === "timeout" ? "timeout" : "advance";
-    if (elapsed < MUSIC_MIN_PLAY_MS && reason !== "ended") {
-      return json({ ok: false, error: "too_early", message: `Play ≥${Math.ceil(MUSIC_MIN_PLAY_MS / 1000)}s first.`, remainingMs: MUSIC_MIN_PLAY_MS - elapsed }, 429, origin);
+    if (trackId !== m.now.id) {
+      return json({ ok: false, error: "stale", message: "Not current track.", now: publicNow(m.now) }, 409, origin);
     }
+
+    const elapsed = Date.now() - (m.now.startedAt || 0);
+    const reason =
+      body.reason === "ended" ? "ended" : body.reason === "timeout" ? "timeout" : "advance";
+
+    if (!isAdmin) {
+      // Public may only nudge near natural end — not cut a track to ~20s.
+      // Server also auto-promotes in getMusic when endsAt passes.
+      const endAt = m.now.endsAt || (m.now.startedAt || 0) + MUSIC_DEFAULT_MS;
+      const remainingToEnd = endAt - Date.now();
+      if (remainingToEnd > MUSIC_PUBLIC_ADVANCE_NEAR_END_MS) {
+        return json({
+          ok: false,
+          error: "too_early",
+          message: "Tracks run until endsAt (server timeout). Public advance only near end.",
+          remainingMs: remainingToEnd,
+          endsAt: endAt,
+          elapsedMs: elapsed,
+          publicAdvanceNearEndMs: MUSIC_PUBLIC_ADVANCE_NEAR_END_MS,
+        }, 429, origin);
+      }
+      if (!m.now.advanceToken || body.advanceToken !== m.now.advanceToken) {
+        return json({
+          ok: false,
+          error: "unauthorized",
+          message: "advanceToken from GET /v1/music required (or admin Bearer secret).",
+        }, 401, origin);
+      }
+      if (reason !== "ended" && reason !== "timeout") {
+        return json({
+          ok: false,
+          error: "forbidden",
+          message: "Client may only advance with reason ended|timeout near endsAt.",
+        }, 403, origin);
+      }
+    }
+
     m = await this.promoteNext(m, reason);
-    return json({ ok: true, advanced: true, now: m.now, queue: this.sortQueue(m.queue || []), message: m.now ? `Now playing “${m.now.title}”` : "Queue finished." }, 200, origin);
+    return json({
+      ok: true,
+      advanced: true,
+      now: publicNow(m.now),
+      queue: this.sortQueue(m.queue || []).map(publicSong),
+      message: m.now ? `Now playing “${m.now.title}”` : "Queue finished.",
+    }, 200, origin);
   }
 
   async handleReset(request, origin) {
@@ -1378,7 +1515,7 @@ export class GrokPlaceCanvas {
       board: this.bufCopy(board),
       scores: this.scoresCopy(scores),
       size,
-      schema: 2,
+      schema: BOARD_SCHEMA,
       meta: { version: 1, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: now, resetAt: now },
       feed: [],
       history: [],
@@ -1386,8 +1523,33 @@ export class GrokPlaceCanvas {
     };
     if (body.clearMusic !== false) put.music = emptyMusicState();
     await this.state.storage.put(put);
+    // Drop rate-limit / cooldown / challenge buckets so admin reset fully unsticks ops/tests
+    if (body.clearLimits !== false) {
+      const prefixes = ["rl:", "pow:", "cd:", "vcd:", "mscd:", "mvcd:", "rcd:"];
+      for (const prefix of prefixes) {
+        const listed = await this.state.storage.list({ prefix, limit: 1000 });
+        const keys = [...listed.keys()];
+        if (keys.length) await this.state.storage.delete(keys);
+      }
+    }
     return json({ ok: true, message: "Mosaic reset.", size, resetAt: now }, 200, origin);
   }
+}
+
+function publicNow(track) {
+  if (!track) return null;
+  const rebuilt = rebuildLegalEmbed(track);
+  if (!rebuilt) return null;
+  return {
+    ...rebuilt,
+    startedAt: track.startedAt,
+    endsAt: track.endsAt,
+    advanceToken: track.advanceToken || null,
+  };
+}
+
+function publicSong(s) {
+  return rebuildLegalEmbed(s);
 }
 
 export default {

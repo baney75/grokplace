@@ -64,9 +64,11 @@ async function vote(body) {
 const stamp = Date.now().toString(36).slice(-6);
 const agent = `test-${stamp}`;
 const agent2 = `test2-${stamp}`;
-// Avoid fixed (10,11) which community may protect; pick sparse open cells
-const px = 3 + (Date.now() % 50);
-const py = 3 + ((Date.now() >> 3) % 50);
+// Avoid fixed (10,11) which community may protect; pick sparse open cells.
+// Do NOT use `>>` on Date.now() — 32-bit signed shift can yield negative coords.
+const _t = Date.now();
+const px = 3 + (_t % 50);
+const py = 3 + (Math.floor(_t / 8) % 50);
 
 console.log(`Smoke → ${API}\n`);
 
@@ -312,6 +314,130 @@ console.log(`Smoke → ${API}\n`);
       JSON.stringify(second.data)
     );
   }
+}
+
+// --- Ship-unit gates: white paint, advance lock, music placement bar ---
+{
+  const whiteAgent = `wht-${stamp}`;
+  const wx = 40 + (_t % 40);
+  const wy = 40 + (Math.floor(_t / 16) % 40);
+  const { res, data } = await place({
+    x: wx,
+    y: wy,
+    color: 0,
+    agent: whiteAgent,
+    goal: "white pixel smoke",
+  });
+  ok("place white (color 0)", res.ok && data.ok && data.placed?.colorIndex === 0, JSON.stringify(data));
+  ok("white hex #FFFFFF", data.ok && data.placed?.color === "#FFFFFF", JSON.stringify(data?.placed));
+  if (data.ok) {
+    const canvas = await j("/v1/canvas");
+    const bin = Buffer.from(canvas.data.board, "base64");
+    const stored = bin[wy * (canvas.data.size || 128) + wx];
+    ok("board stores white as 1 (colorIdx+1)", stored === 1, `stored=${stored}`);
+    ok(
+      "canvas encoding documents plus-one",
+      typeof canvas.data.encoding === "string" && canvas.data.encoding.includes("plus-one"),
+      canvas.data.encoding
+    );
+  }
+}
+
+{
+  // Seed a real track, then prove mid-track public advance is locked
+  const dj = `dj-${stamp}`;
+  const seedPlace = await place({
+    x: (px + 5) % 120,
+    y: (py + 5) % 120,
+    color: 11,
+    agent: dj,
+    goal: "dj seed",
+  });
+  if (!seedPlace.res.ok) {
+    ok("music advance lock (seed place)", false, JSON.stringify(seedPlace.data));
+  } else {
+    const proof = await captcha();
+    const sub = await j("/v1/music/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title: "smoke seed track",
+        agent: dj,
+        legal: true,
+        ...proof,
+      }),
+    });
+    ok("music seed submit for advance test", sub.res.ok && sub.data.ok, JSON.stringify(sub.data));
+    const music = await j("/v1/music");
+    const now = music.data.now;
+    ok("music now playing after seed", Boolean(now && now.id && now.advanceToken), JSON.stringify(music.data.now));
+    if (now && now.id) {
+      const noTok = await j("/v1/music/advance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "ended", trackId: now.id }),
+      });
+      ok(
+        "advance mid-track without token blocked",
+        noTok.data.error === "too_early" || noTok.data.error === "unauthorized",
+        JSON.stringify(noTok.data)
+      );
+      const withTok = await j("/v1/music/advance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reason: "ended",
+          trackId: now.id,
+          advanceToken: now.advanceToken,
+        }),
+      });
+      ok(
+        "advance mid-track with token still too_early",
+        withTok.data.error === "too_early",
+        JSON.stringify(withTok.data)
+      );
+      ok(
+        "music defaults document near-end advance",
+        music.data.defaults &&
+          typeof music.data.defaults.publicAdvanceNearEndMs === "number" &&
+          !("minPlayMs" in (music.data.defaults || {})),
+        JSON.stringify(music.data.defaults)
+      );
+    }
+  }
+}
+
+{
+  // Music submit without placements
+  const proof = await captcha();
+  const bare = await j("/v1/music/submit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      title: "legal smoke track",
+      agent: `mus0-${stamp}`,
+      legal: true,
+      ...proof,
+    }),
+  });
+  ok(
+    "music submit locked without placements",
+    bare.res.status === 403 && bare.data.error === "placement_required",
+    JSON.stringify(bare.data)
+  );
+}
+
+{
+  const info = await j("/v1/info");
+  ok(
+    "info safety not overselling vision NSFW",
+    info.data.safety &&
+      /text filter|report/i.test(info.data.safety) &&
+      !/zero NSFW$/i.test(String(info.data.safety).trim()),
+    info.data.safety
+  );
 }
 
 console.log(failed ? `\n${failed} failed` : "\nAll smoke checks passed.");

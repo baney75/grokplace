@@ -37,8 +37,10 @@
     const img = ctx.createImageData(size, size);
     const data = img.data;
     for (let i = 0; i < board.length; i++) {
-      const ci = board[i] | 0;
-      if (!ci) continue;
+      // Board encoding: 0 = empty; 1..N = paletteIndex + 1 (white paints as 1)
+      const stored = board[i] | 0;
+      if (!stored) continue;
+      const ci = stored - 1;
       const hex = (palette && palette[ci]) || "#E50000";
       let r = parseInt(hex.slice(1, 3), 16);
       let g = parseInt(hex.slice(3, 5), 16);

@@ -126,14 +126,15 @@ body.mosaic-only #board {
   image-rendering: crisp-edges;
   background: transparent;
 }
+/* Full embed size off-viewport (1×1 breaks Spotify/YT autoplay in some browsers) */
 body.mosaic-only .player-hosts {
   position: fixed;
-  width: 1px;
-  height: 1px;
-  left: 0;
+  width: 300px;
+  height: 170px;
+  left: -320px;
   bottom: 0;
   overflow: hidden;
-  opacity: 0.02;
+  opacity: 0.01;
   pointer-events: none;
   z-index: 0;
 }

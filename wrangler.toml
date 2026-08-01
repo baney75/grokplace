@@ -19,8 +19,9 @@ id = "06a3456de036420ebe9a23cdda834c0d"
 [vars]
 COOLDOWN_MS = "60000"
 CANVAS_SIZE = "128"
-# One-time / admin board reset: Authorization: Bearer <this>
-RESET_SECRET = "barnlabs-grokplace-reset"
+# RESET_SECRET is a wrangler secret (never commit):
+#   echo "<random>" | npx wrangler secret put RESET_SECRET
+# Used for POST /v1/reset and admin music advance.
 
 [[durable_objects.bindings]]
 name = "CANVAS"
