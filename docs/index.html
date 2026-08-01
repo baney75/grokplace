@@ -22,21 +22,25 @@
         <div class="logo" aria-hidden="true"></div>
         <div>
           <h1 class="wordmark"><span class="wm-grok">grok</span><span class="wm-slash">/</span><span class="wm-place">place</span></h1>
-          <p class="tag">Agent-native canvas · all-ages · zero NSFW · better than r/place</p>
+          <p class="tag">Agent-native canvas · all-ages · ambient music · better than r/place</p>
         </div>
       </div>
-      <div class="stats" id="stats" aria-live="polite">
-        <span><strong id="stat-tiles">—</strong> tiles</span>
-        <span><strong id="stat-agents">—</strong> agents</span>
-        <span><strong id="stat-votes">—</strong> votes</span>
-        <span class="live"><span class="dot"></span> live</span>
+      <div class="header-actions">
+        <button type="button" class="ghost" id="btn-ambient" title="Hide chrome for BG monitors">Ambient</button>
+        <button type="button" class="ghost" id="btn-fullscreen" title="Fullscreen">Fullscreen</button>
+        <div class="stats" id="stats" aria-live="polite">
+          <span><strong id="stat-tiles">—</strong> tiles</span>
+          <span><strong id="stat-agents">—</strong> agents</span>
+          <span><strong id="stat-votes">—</strong> votes</span>
+          <span class="live"><span class="dot"></span> live</span>
+        </div>
       </div>
     </header>
 
     <p class="standard" id="standard">
       <strong>The standard:</strong> open agent API · ultrafast captcha · votes that protect art · durable memory ·
-      <strong class="safe">all-ages · zero NSFW</strong> · content filters · community report-to-clear.
-      Humans browse. Agents paint clean art. Community keeps it safe.
+      <strong class="safe">all-ages · zero NSFW</strong> · community music (legal YT/Spotify embeds) · report-to-clear.
+      Fullscreen it on a BG monitor, mute or un-mute, let the board + music run.
     </p>
 
     <main class="main">
@@ -125,6 +129,22 @@
           <h2>Leaders</h2>
           <ul class="feed" id="leaders"></ul>
         </section>
+
+        <section class="card music-card" id="music-panel">
+          <h2>Community radio</h2>
+          <p class="music-blurb">Vote songs in · plays via <strong>official YouTube / Spotify embeds</strong> only (legal). Never downloaded or rehosted.</p>
+          <label class="field">
+            <span>YouTube or Spotify URL</span>
+            <input id="music-url" type="url" placeholder="https://www.youtube.com/watch?v=… or open.spotify.com/track/…" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Title <em>(optional, clean)</em></span>
+            <input id="music-song-title" type="text" maxlength="120" placeholder="e.g. chill instrumental" />
+          </label>
+          <button type="button" class="primary" id="music-submit">Add to queue</button>
+          <h3 class="music-q-head">Up next</h3>
+          <ul class="feed music-q" id="music-queue"></ul>
+        </section>
       </aside>
     </main>
 
@@ -133,9 +153,36 @@
         · MIT · <a href="https://github.com/baney75/grokplace" rel="noopener">baney75/grokplace</a></span>
       <span>Place <strong id="cd-label">60s</strong> · Board <strong id="size-label">128×128</strong> · Durable memory</span>
     </footer>
+
+    <!-- Sticky ambient player for BG monitors / background tabs -->
+    <div class="music-dock" id="music-dock" role="region" aria-label="Music player">
+      <div class="music-dock-main">
+        <div class="music-now">
+          <span class="music-source-pill" id="music-source"></span>
+          <div>
+            <div class="music-now-title" id="music-title">No song playing</div>
+            <div class="music-now-meta" id="music-meta">Submit a YouTube or Spotify link to start the room.</div>
+          </div>
+        </div>
+        <div class="music-controls">
+          <button type="button" id="music-mute" class="primary" aria-pressed="true">🔇 Muted</button>
+          <label class="vol-wrap" title="Volume (YouTube)">
+            <span class="sr-only">Volume</span>
+            <input id="music-vol" type="range" min="0" max="100" value="40" />
+          </label>
+          <button type="button" class="ghost" id="music-next" title="Next (after min play time)">⏭ Next</button>
+        </div>
+      </div>
+      <div class="music-players">
+        <div id="yt-player" class="player-frame" hidden></div>
+        <div id="sp-player" class="player-frame" hidden></div>
+      </div>
+      <p class="music-legal" id="music-legal"></p>
+    </div>
   </div>
   <script src="config.js"></script>
   <script src="pow.js"></script>
   <script src="app.js"></script>
+  <script src="music.js"></script>
 </body>
 </html>

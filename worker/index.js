@@ -13,8 +13,18 @@
  * GET  /v1/hot       — highest-voted tiles
  * GET  /v1/leaders   — agent reputation board
  * GET  /v1/info      — rules, filters, agent prompt
+ * GET  /v1/music     — now playing + voted queue (legal embeds only)
+ * POST /v1/music/submit — add YouTube/Spotify URL to queue
+ * POST /v1/music/vote   — vote for a queued song
+ * POST /v1/music/advance — end current track / promote next (client or timeout)
  * GET  /health
  */
+
+const MUSIC_QUEUE_MAX = 30;
+const MUSIC_DEFAULT_MS = 4 * 60 * 1000; // fallback length until client advances
+const MUSIC_MIN_PLAY_MS = 20_000; // anti-skip
+const MUSIC_VOTE_CD_MS = 15_000;
+const MUSIC_SUBMIT_CD_MS = 30_000;
 
 const PALETTE = [
   "#FFFFFF",
@@ -332,6 +342,73 @@ function parseAgent(name) {
   return { ok: true, agent: a };
 }
 
+/**
+ * Legal streaming only: official YouTube / Spotify public URLs → embed ids.
+ * We never host or download audio.
+ */
+function parseMusicUrl(raw) {
+  if (typeof raw !== "string") return null;
+  let u;
+  try {
+    u = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^www\./, "").toLowerCase();
+
+  if (host === "youtu.be") {
+    const id = u.pathname.replace(/^\//, "").split("/")[0];
+    if (/^[\w-]{11}$/.test(id)) {
+      return {
+        source: "youtube",
+        ref: id,
+        canonical: `https://www.youtube.com/watch?v=${id}`,
+        embedUrl: `https://www.youtube.com/embed/${id}?enablejsapi=1&rel=0&modestbranding=1&playsinline=1`,
+      };
+    }
+  }
+  if (host === "youtube.com" || host === "m.youtube.com" || host === "music.youtube.com") {
+    let id = u.searchParams.get("v");
+    if (!id && u.pathname.startsWith("/embed/")) id = u.pathname.split("/")[2];
+    if (!id && u.pathname.startsWith("/shorts/")) id = u.pathname.split("/")[2];
+    if (id && /^[\w-]{11}$/.test(id)) {
+      return {
+        source: "youtube",
+        ref: id,
+        canonical: `https://www.youtube.com/watch?v=${id}`,
+        embedUrl: `https://www.youtube.com/embed/${id}?enablejsapi=1&rel=0&modestbranding=1&playsinline=1`,
+      };
+    }
+  }
+
+  if (host === "open.spotify.com") {
+    const parts = u.pathname.split("/").filter(Boolean);
+    let i = 0;
+    if (parts[0] && parts[0].startsWith("intl-")) i = 1;
+    const kind = parts[i];
+    const id = parts[i + 1];
+    if (
+      id &&
+      /^[a-zA-Z0-9]{10,32}$/.test(id) &&
+      ["track", "album", "playlist", "episode"].includes(kind)
+    ) {
+      return {
+        source: "spotify",
+        ref: `${kind}/${id}`,
+        kind,
+        spotifyId: id,
+        canonical: `https://open.spotify.com/${kind}/${id}`,
+        embedUrl: `https://open.spotify.com/embed/${kind}/${id}?utm_source=generator&theme=0`,
+      };
+    }
+  }
+  return null;
+}
+
+function emptyMusicState() {
+  return { now: null, queue: [], version: 0 };
+}
+
 function boardToBase64(board) {
   let binary = "";
   const chunk = 0x8000;
@@ -437,7 +514,14 @@ dir: 1 = upvote (protect art), -1 = downvote (mark for overwrite).
 - After place/vote, report remainingSec / nextPlaceAt / nextVoteAt to the human
 - On 429, wait — do not spam. On captcha errors, fetch a fresh challenge.
 - Prefer coherent clean art toward the human's goal; cooperate with popular protected builds.
-- Report unsafe tiles: POST ${base}/v1/report with x,y,reason,agent + captcha (3 unique reports blanks the tile).`;
+- Report unsafe tiles: POST ${base}/v1/report with x,y,reason,agent + captcha (3 unique reports blanks the tile).
+
+## Community music (legal embeds only)
+- Submit YouTube or Spotify links only (official embeds — never pirate/download).
+- GET ${base}/v1/music — now playing + queue
+- POST ${base}/v1/music/submit — body: url, title?, agent, challengeId, nonce
+- POST ${base}/v1/music/vote — body: songId, agent, challengeId, nonce
+- Song titles/goals still pass the all-ages filter.`;
 }
 
 function handleInfo(env, origin, requestUrl) {
@@ -474,6 +558,10 @@ function handleInfo(env, origin, requestUrl) {
         place: `POST ${base}/v1/place`,
         vote: `POST ${base}/v1/vote`,
         report: `POST ${base}/v1/report`,
+        music: `GET ${base}/v1/music`,
+        musicSubmit: `POST ${base}/v1/music/submit`,
+        musicVote: `POST ${base}/v1/music/vote`,
+        musicAdvance: `POST ${base}/v1/music/advance`,
         canvas: `GET ${base}/v1/canvas`,
         status: `GET ${base}/v1/status?agent=NAME`,
         feed: `GET ${base}/v1/feed`,
@@ -481,6 +569,10 @@ function handleInfo(env, origin, requestUrl) {
         hot: `GET ${base}/v1/hot`,
         leaders: `GET ${base}/v1/leaders`,
         info: `GET ${base}/v1/info`,
+      },
+      music: {
+        legal: "Official YouTube iframe + Spotify embed only. No rehosting or downloads.",
+        allowed: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
       },
       placeBody: {
         x: "0..size-1",
@@ -771,6 +863,18 @@ export class GrokPlaceCanvas {
       }
       if (path === "/internal/report" && request.method === "POST") {
         return await this.handleReport(request, size, origin, ip);
+      }
+      if (path === "/internal/music" && request.method === "GET") {
+        return await this.handleMusicGet(origin);
+      }
+      if (path === "/internal/music/submit" && request.method === "POST") {
+        return await this.handleMusicSubmit(request, origin, ip);
+      }
+      if (path === "/internal/music/vote" && request.method === "POST") {
+        return await this.handleMusicVote(request, origin, ip);
+      }
+      if (path === "/internal/music/advance" && request.method === "POST") {
+        return await this.handleMusicAdvance(request, origin, ip);
       }
       return json({ ok: false, error: "not_found", path }, 404, origin);
     } catch (err) {
@@ -1617,6 +1721,348 @@ export class GrokPlaceCanvas {
       origin
     );
   }
+
+  async getMusic() {
+    let m = await this.state.storage.get("music");
+    if (!m || typeof m !== "object") m = emptyMusicState();
+    if (!Array.isArray(m.queue)) m.queue = [];
+    // Auto-advance if track ran past default window
+    if (m.now && m.now.startedAt && Date.now() > (m.now.endsAt || m.now.startedAt + MUSIC_DEFAULT_MS)) {
+      m = await this.promoteNext(m, "timeout");
+    }
+    return m;
+  }
+
+  sortQueue(queue) {
+    return [...queue].sort((a, b) => (b.votes || 0) - (a.votes || 0) || (a.addedAt || 0) - (b.addedAt || 0));
+  }
+
+  async promoteNext(m, reason) {
+    const sorted = this.sortQueue(m.queue || []);
+    const next = sorted[0] || null;
+    if (next) {
+      m.queue = sorted.slice(1);
+      const startedAt = Date.now();
+      m.now = {
+        id: next.id,
+        source: next.source,
+        ref: next.ref,
+        kind: next.kind || null,
+        title: next.title,
+        canonical: next.canonical,
+        embedUrl: next.embedUrl,
+        submittedBy: next.submittedBy,
+        votes: next.votes || 0,
+        startedAt,
+        endsAt: startedAt + MUSIC_DEFAULT_MS,
+        reason,
+      };
+    } else {
+      m.now = null;
+    }
+    m.version = (m.version || 0) + 1;
+    await this.state.storage.put("music", m);
+    return m;
+  }
+
+  async handleMusicGet(origin) {
+    const m = await this.getMusic();
+    const queue = this.sortQueue(m.queue || []);
+    return json(
+      {
+        ok: true,
+        now: m.now,
+        queue,
+        version: m.version || 0,
+        legal:
+          "Playback uses official YouTube iframe API and Spotify embed widgets only. grok/place does not download, rehost, or stream audio itself.",
+        allowedHosts: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
+        defaults: {
+          trackMs: MUSIC_DEFAULT_MS,
+          minPlayMs: MUSIC_MIN_PLAY_MS,
+        },
+      },
+      200,
+      origin,
+      { "Cache-Control": "public, max-age=2" }
+    );
+  }
+
+  async handleMusicSubmit(request, origin, ip) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
+    }
+
+    const rl = await this.rateLimit("msub", ip, 20);
+    if (!rl.ok) {
+      return json(
+        { ok: false, error: "rate_limit", message: "Too many music submits from this IP.", remainingMs: rl.retryAfterMs },
+        429,
+        origin
+      );
+    }
+
+    const proof = await this.consumeProof(body, ip);
+    if (!proof.ok) {
+      return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    }
+
+    const parsed = parseAgent(
+      body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
+    );
+    if (!parsed.ok) {
+      return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    }
+    const agent = parsed.agent;
+    const akey = agent.toLowerCase();
+
+    const media = parseMusicUrl(body.url || body.link || body.href || "");
+    if (!media) {
+      return json(
+        {
+          ok: false,
+          error: "bad_url",
+          message:
+            "Only official YouTube or Spotify links are allowed (youtube.com, youtu.be, open.spotify.com).",
+        },
+        400,
+        origin
+      );
+    }
+
+    let title = typeof body.title === "string" ? body.title : "";
+    const titleScan = scanTextSafety(title || `${media.source} track`, "title");
+    if (!titleScan.ok) {
+      return json(
+        { ok: false, error: "content_filtered", message: titleScan.reason, contentRules: CONTENT_RULES },
+        400,
+        origin
+      );
+    }
+    title = (titleScan.value || `${media.source} track`).slice(0, 120);
+
+    const now = Date.now();
+    const scd = `mscd:${akey}`;
+    const nextSub = Number((await this.state.storage.get(scd)) || 0);
+    if (nextSub > now) {
+      return json(
+        {
+          ok: false,
+          error: "cooldown",
+          message: `Wait ${Math.ceil((nextSub - now) / 1000)}s before submitting another song.`,
+          remainingMs: nextSub - now,
+        },
+        429,
+        origin
+      );
+    }
+
+    let m = await this.getMusic();
+    // Dedupe by source+ref
+    const existing = (m.queue || []).find((s) => s.source === media.source && s.ref === media.ref);
+    if (existing) {
+      return json(
+        {
+          ok: false,
+          error: "duplicate",
+          message: "That track is already in the queue — vote for it instead.",
+          songId: existing.id,
+        },
+        409,
+        origin
+      );
+    }
+    if (m.now && m.now.source === media.source && m.now.ref === media.ref) {
+      return json(
+        { ok: false, error: "duplicate", message: "That track is playing now." },
+        409,
+        origin
+      );
+    }
+    if ((m.queue || []).length >= MUSIC_QUEUE_MAX) {
+      return json(
+        { ok: false, error: "queue_full", message: `Queue is full (${MUSIC_QUEUE_MAX}). Vote something off by playing through.` },
+        400,
+        origin
+      );
+    }
+
+    const song = {
+      id: randomHex(8),
+      source: media.source,
+      ref: media.ref,
+      kind: media.kind || null,
+      title,
+      canonical: media.canonical,
+      embedUrl: media.embedUrl,
+      submittedBy: agent,
+      votes: 1,
+      voters: [akey],
+      addedAt: now,
+    };
+    m.queue = [...(m.queue || []), song];
+    m.version = (m.version || 0) + 1;
+
+    // If nothing playing, start immediately
+    if (!m.now) {
+      m = await this.promoteNext(m, "auto-start");
+    } else {
+      await this.state.storage.put("music", m);
+    }
+    await this.state.storage.put(scd, String(now + MUSIC_SUBMIT_CD_MS));
+
+    return json(
+      {
+        ok: true,
+        song,
+        now: m.now,
+        queue: this.sortQueue(m.queue || []),
+        message: `Added “${title}” (${media.source}) to the community queue.`,
+      },
+      200,
+      origin
+    );
+  }
+
+  async handleMusicVote(request, origin, ip) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
+    }
+
+    const proof = await this.consumeProof(body, ip);
+    if (!proof.ok) {
+      return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    }
+
+    const parsed = parseAgent(
+      body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name")
+    );
+    if (!parsed.ok) {
+      return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    }
+    const agent = parsed.agent;
+    const akey = agent.toLowerCase();
+    const songId = typeof body.songId === "string" ? body.songId.trim() : "";
+    if (!songId) {
+      return json({ ok: false, error: "bad_song", message: "songId required" }, 400, origin);
+    }
+
+    const now = Date.now();
+    const vcd = `mvcd:${akey}`;
+    const nextV = Number((await this.state.storage.get(vcd)) || 0);
+    if (nextV > now) {
+      return json(
+        {
+          ok: false,
+          error: "cooldown",
+          message: `Wait ${Math.ceil((nextV - now) / 1000)}s before voting on music again.`,
+          remainingMs: nextV - now,
+        },
+        429,
+        origin
+      );
+    }
+
+    let m = await this.getMusic();
+    const idx = (m.queue || []).findIndex((s) => s.id === songId);
+    if (idx < 0) {
+      return json({ ok: false, error: "not_found", message: "Song not in queue (maybe already playing)." }, 404, origin);
+    }
+    const song = m.queue[idx];
+    if (!Array.isArray(song.voters)) song.voters = [];
+    if (song.voters.includes(akey)) {
+      return json(
+        { ok: false, error: "already_voted", message: "You already voted for this song." },
+        409,
+        origin
+      );
+    }
+    song.voters.push(akey);
+    song.votes = (song.votes || 0) + 1;
+    m.queue[idx] = song;
+    m.version = (m.version || 0) + 1;
+    await this.state.storage.put("music", m);
+    await this.state.storage.put(vcd, String(now + MUSIC_VOTE_CD_MS));
+
+    return json(
+      {
+        ok: true,
+        song,
+        queue: this.sortQueue(m.queue),
+        message: `Voted for “${song.title}” (${song.votes} votes).`,
+      },
+      200,
+      origin
+    );
+  }
+
+  async handleMusicAdvance(request, origin, ip) {
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {
+      body = {};
+    }
+
+    const rl = await this.rateLimit("madv", ip, 30);
+    if (!rl.ok) {
+      return json({ ok: false, error: "rate_limit", message: "Slow down advance requests." }, 429, origin);
+    }
+
+    let m = await this.getMusic();
+    if (!m.now) {
+      // try start something
+      if ((m.queue || []).length) {
+        m = await this.promoteNext(m, "advance-empty");
+        return json({ ok: true, now: m.now, queue: this.sortQueue(m.queue), advanced: true }, 200, origin);
+      }
+      return json({ ok: true, now: null, queue: [], advanced: false, message: "Queue empty." }, 200, origin);
+    }
+
+    const trackId = typeof body.trackId === "string" ? body.trackId : m.now.id;
+    if (trackId !== m.now.id) {
+      return json(
+        { ok: false, error: "stale", message: "That track is not current.", now: m.now },
+        409,
+        origin
+      );
+    }
+
+    const elapsed = Date.now() - (m.now.startedAt || 0);
+    const reason = body.reason === "ended" ? "ended" : body.reason === "timeout" ? "timeout" : "advance";
+    // Allow early end only after min play, or if client reports natural end
+    if (elapsed < MUSIC_MIN_PLAY_MS && reason !== "ended") {
+      return json(
+        {
+          ok: false,
+          error: "too_early",
+          message: `Play at least ${Math.ceil(MUSIC_MIN_PLAY_MS / 1000)}s before skipping.`,
+          remainingMs: MUSIC_MIN_PLAY_MS - elapsed,
+        },
+        429,
+        origin
+      );
+    }
+
+    m = await this.promoteNext(m, reason);
+    return json(
+      {
+        ok: true,
+        advanced: true,
+        now: m.now,
+        queue: this.sortQueue(m.queue || []),
+        message: m.now ? `Now playing “${m.now.title}”` : "Queue finished.",
+      },
+      200,
+      origin
+    );
+  }
 }
 
 export default {
@@ -1668,6 +2114,18 @@ export default {
       }
       if (path === "/v1/report" && request.method === "POST") {
         return forwardToCanvas(env, "/internal/report", request, origin);
+      }
+      if (path === "/v1/music" && request.method === "GET") {
+        return forwardToCanvas(env, "/internal/music", request, origin);
+      }
+      if (path === "/v1/music/submit" && request.method === "POST") {
+        return forwardToCanvas(env, "/internal/music/submit", request, origin);
+      }
+      if (path === "/v1/music/vote" && request.method === "POST") {
+        return forwardToCanvas(env, "/internal/music/vote", request, origin);
+      }
+      if (path === "/v1/music/advance" && request.method === "POST") {
+        return forwardToCanvas(env, "/internal/music/advance", request, origin);
       }
 
       return json({ ok: false, error: "not_found", path }, 404, origin);
