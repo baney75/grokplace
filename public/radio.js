@@ -224,7 +224,7 @@
     if (nowTrack) renderNow(nowTrack);
   }
 
-  // No buttons / no edit chrome — first pointer on the mosaic unlocks audio (browser policy)
+  // First canvas gesture unlocks audio (autoplay policy). Mute via logo double-tap.
   document.getElementById("canvas-wrap")?.addEventListener(
     "pointerdown",
     () => {
@@ -233,17 +233,12 @@
     { once: true }
   );
 
-  // Double-tap mosaic = mute toggle (still no UI chrome)
-  let lastTap = 0;
-  document.getElementById("canvas-wrap")?.addEventListener("pointerup", () => {
-    const t = Date.now();
-    if (t - lastTap < 350) {
-      muted = !muted;
-      applyAudio();
-      if (!muted && nowTrack) renderNow(nowTrack);
-    }
-    lastTap = t;
-  });
+  window.grokplaceToggleMute = () => {
+    muted = !muted;
+    applyAudio();
+    if (!muted && nowTrack) renderNow(nowTrack);
+    return muted;
+  };
 
   loadYtApi();
   fetchMusic();

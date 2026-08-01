@@ -1,6 +1,6 @@
 /**
- * Viewer-only full-screen mosaic (desktop + mobile).
- * Pan / pinch-zoom. No place/vote UI — agents drive the API.
+ * Professional watch-only mosaic. No edit UI.
+ * Pan / pinch-zoom preserved across live updates.
  */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
@@ -17,11 +17,15 @@
   let scale = 1;
   let panX = 0;
   let panY = 0;
+  let userAdjusted = false; // once user pans/zooms, never auto-reset camera
+  let hasFitted = false;
 
-  /** Active pointers for pan + pinch */
+  const VOID = { r: 10, g: 12, b: 16 }; // solid professional void (no CSS grid under pixels)
+  const MOVE_SLOP = 10; // px before pan counts as intentional (touch jitter)
   const pointers = new Map();
   let dragging = false;
   let last = null;
+  let dragDist = 0;
   let pinchStartDist = 0;
   let pinchStartScale = 1;
 
@@ -40,34 +44,38 @@
   function paint() {
     const ctx = boardEl.getContext("2d");
     if (!ctx || !board.length) return;
-    ctx.clearRect(0, 0, size, size);
     const img = ctx.createImageData(size, size);
     const data = img.data;
     for (let i = 0; i < board.length; i++) {
-      // Board encoding: 0 = empty; 1..N = paletteIndex + 1 (white paints as 1)
       const stored = board[i] | 0;
-      if (!stored) continue;
+      const o = i * 4;
+      if (!stored) {
+        data[o] = VOID.r;
+        data[o + 1] = VOID.g;
+        data[o + 2] = VOID.b;
+        data[o + 3] = 255;
+        continue;
+      }
       const ci = stored - 1;
       const hex = (palette && palette[ci]) || "#E50000";
-      let r = parseInt(hex.slice(1, 3), 16);
-      let g = parseInt(hex.slice(3, 5), 16);
-      let b = parseInt(hex.slice(5, 7), 16);
-      if (scores && scores[i] >= protectScore) {
-        r = Math.min(255, r + 28);
-        g = Math.min(255, g + 18);
-        b = Math.min(255, Math.floor(b * 0.85));
-      }
-      const o = i * 4;
-      data[o] = r;
-      data[o + 1] = g;
-      data[o + 2] = b;
+      // True palette only — no protect tint (watch fidelity)
+      data[o] = parseInt(hex.slice(1, 3), 16);
+      data[o + 1] = parseInt(hex.slice(3, 5), 16);
+      data[o + 2] = parseInt(hex.slice(5, 7), 16);
       data[o + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
     applyTransform();
   }
 
+  function clampPan() {
+    const max = size * scale * 0.9;
+    panX = Math.max(-max, Math.min(max, panX));
+    panY = Math.max(-max, Math.min(max, panY));
+  }
+
   function applyTransform() {
+    clampPan();
     boardEl.style.width = `${size * scale}px`;
     boardEl.style.height = `${size * scale}px`;
     boardEl.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px))`;
@@ -85,18 +93,25 @@
     };
   }
 
-  function fitCover() {
+  /** Full board visible (contain) — best for watching shared art */
+  function fitContain(force) {
+    if (userAdjusted && !force) return;
     const { w, h } = viewportSize();
-    // Cover both axes so the mosaic fills phones in portrait and landscape
-    const cover = Math.max(w / size, h / size);
-    scale = Math.max(2, Math.ceil(cover));
+    const pad = Math.min(w, h) * 0.04;
+    const contain = Math.min((w - pad) / size, (h - pad) / size);
+    scale = Math.max(2, Math.floor(contain));
     panX = 0;
     panY = 0;
+    hasFitted = true;
     applyTransform();
   }
 
   function clampScale(s) {
     return Math.min(96, Math.max(2, s));
+  }
+
+  function markUserAdjusted() {
+    userAdjusted = true;
   }
 
   function pointerDistance() {
@@ -115,11 +130,14 @@
     palette = data.palette || palette;
     protectScore = data.protectScore || protectScore;
 
-    if (boardEl.width !== nextSize || boardEl.height !== nextSize) {
+    const sizeChanged = boardEl.width !== nextSize || boardEl.height !== nextSize;
+    if (sizeChanged) {
       size = nextSize;
       boardEl.width = size;
       boardEl.height = size;
       version = -1;
+      userAdjusted = false;
+      hasFitted = false;
     } else {
       size = nextSize;
     }
@@ -137,14 +155,15 @@
       }
       version = data.version;
       paint();
-      fitCover();
+      // Only auto-fit first load / size change — never yank camera on live updates
+      if (!hasFitted || sizeChanged) fitContain(true);
+      else applyTransform();
     }
   }
 
   wrap.addEventListener(
     "pointerdown",
     (ev) => {
-      // Don't steal events from the logo link
       if (ev.target && ev.target.closest && ev.target.closest(".brand-logo")) return;
       pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
       try {
@@ -154,6 +173,7 @@
       }
       if (pointers.size === 1) {
         dragging = true;
+        dragDist = 0;
         last = { x: ev.clientX, y: ev.clientY };
       } else if (pointers.size >= 2) {
         dragging = false;
@@ -174,14 +194,23 @@
         const dist = pointerDistance();
         if (pinchStartDist > 0 && dist > 0) {
           scale = clampScale(pinchStartScale * (dist / pinchStartDist));
+          markUserAdjusted();
           applyTransform();
         }
         return;
       }
 
       if (!dragging || !last) return;
-      panX += ev.clientX - last.x;
-      panY += ev.clientY - last.y;
+      const dx = ev.clientX - last.x;
+      const dy = ev.clientY - last.y;
+      dragDist += Math.hypot(dx, dy);
+      if (dragDist < MOVE_SLOP) {
+        last = { x: ev.clientX, y: ev.clientY };
+        return;
+      }
+      markUserAdjusted();
+      panX += dx;
+      panY += dy;
       last = { x: ev.clientX, y: ev.clientY };
       applyTransform();
     },
@@ -190,14 +219,11 @@
 
   function endPointer(ev) {
     pointers.delete(ev.pointerId);
-    if (pointers.size < 2) {
-      pinchStartDist = 0;
-    }
+    if (pointers.size < 2) pinchStartDist = 0;
     if (pointers.size === 0) {
       dragging = false;
       last = null;
     } else if (pointers.size === 1) {
-      // Resume pan with remaining finger
       const p = [...pointers.values()][0];
       dragging = true;
       last = { x: p.x, y: p.y };
@@ -210,18 +236,18 @@
     if (ev.pointerType === "mouse") endPointer(ev);
   });
 
-  // Desktop wheel zoom
   wrap.addEventListener(
     "wheel",
     (ev) => {
       ev.preventDefault();
+      const before = scale;
       scale = clampScale(scale * (ev.deltaY > 0 ? 0.9 : 1.1));
+      if (scale !== before) markUserAdjusted();
       applyTransform();
     },
     { passive: false }
   );
 
-  // Block page scroll / iOS rubber-band while interacting with mosaic
   wrap.addEventListener(
     "touchmove",
     (ev) => {
@@ -230,20 +256,55 @@
     { passive: false }
   );
 
-  // Refit when phone chrome shows/hides or orientation changes
-  window.addEventListener("resize", fitCover);
-  window.addEventListener("orientationchange", () => {
-    setTimeout(fitCover, 120);
-  });
-  if (window.visualViewport) {
-    window.visualViewport.addEventListener("resize", fitCover);
+  // Logo is the only chrome: tap = reset camera (never hard-navigate)
+  const logo = document.querySelector(".brand-logo");
+  if (logo) {
+    logo.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      userAdjusted = false;
+      fitContain(true);
+    });
+    // Double-tap logo toggles mute (reversible audio, no extra UI)
+    let lastLogoTap = 0;
+    logo.addEventListener("pointerup", (ev) => {
+      const t = Date.now();
+      if (t - lastLogoTap < 350) {
+        ev.preventDefault();
+        if (typeof window.grokplaceToggleMute === "function") window.grokplaceToggleMute();
+      }
+      lastLogoTap = t;
+    });
+    logo.setAttribute("title", "Tap: reset view · Double-tap: mute/unmute");
   }
 
-  fitCover();
-  fetchCanvas().catch(() => {});
+  window.addEventListener("resize", () => {
+    if (!userAdjusted) fitContain(true);
+  });
+  window.addEventListener("orientationchange", () => {
+    setTimeout(() => {
+      if (!userAdjusted) fitContain(true);
+    }, 120);
+  });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", () => {
+      if (!userAdjusted) fitContain(true);
+    });
+  }
+
+  fitContain(true);
+  fetchCanvas().catch(() => {
+    document.title = "grok/place · reconnecting…";
+  });
   setInterval(() => {
-    fetchCanvas().catch(() => {});
+    fetchCanvas()
+      .then(() => {
+        if (document.title.startsWith("grok/place · reconnect")) document.title = "grok/place · mosaic";
+      })
+      .catch(() => {});
   }, 2500);
 
-  window.grokplaceFitView = fitCover;
+  window.grokplaceFitView = () => {
+    userAdjusted = false;
+    fitContain(true);
+  };
 })();

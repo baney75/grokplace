@@ -115,17 +115,28 @@ console.log(`Smoke → ${API}\n`);
   ok("POST /v1/place with captcha", res.ok && data.ok, JSON.stringify(data));
   ok("place returns nextPlaceAt", data.ok && typeof data.nextPlaceAt === "number");
   ok("place returns reputation", data.ok && data.reputation >= 1);
+  ok("tilesPerTurn is 5", data.ok && data.tilesPerTurn === 5, JSON.stringify(data));
+  ok("tiles left after 1 place", data.ok && data.tilesLeftInTurn === 4, JSON.stringify(data));
 }
 
 {
-  const { res, data } = await place({ x: px + 1, y: py, color: 5, agent });
-  ok("cooldown 429", res.status === 429 && data.error === "cooldown", `status=${res.status}`);
+  // Finish turn with batch of 4 remaining — then cooldown
+  const tiles = [1, 2, 3, 4].map((i) => ({ x: (px + i) % 120, y: py, color: 5 }));
+  const { res, data } = await place({ agent, goal: "smoke batch", tiles });
+  ok("batch place finishes turn", res.ok && data.ok && data.placedCount === 4, JSON.stringify(data));
+  ok("turn cooldown after 5 tiles", data.ok && data.tilesLeftInTurn === 0 && data.remainingSec > 0, JSON.stringify(data));
+}
+
+{
+  const { res, data } = await place({ x: px + 8, y: py, color: 5, agent });
+  ok("cooldown 429 after turn", res.status === 429 && data.error === "cooldown", `status=${res.status}`);
 }
 
 {
   const { res, data } = await j(`/v1/status?agent=${agent}`);
   ok("GET /v1/status", res.ok && data.ok && data.canPlace === false);
   ok("status has memory", data.memory && data.memory.placements >= 1);
+  ok("status tilesPerTurn", data.ok && data.tilesPerTurn === 5);
 }
 
 {
