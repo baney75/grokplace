@@ -2,7 +2,7 @@
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const STORAGE_AGENT = "grokplace.agent";
   const STORAGE_COLOR = "grokplace.color";
-  const SITE = "https://baney75.github.io/grokplace/";
+  const SITE = "https://grokplace.barnlabs.net/";
 
   const els = {
     board: document.getElementById("board"),
@@ -103,64 +103,43 @@
     const agent = (els.agentName.value || "my-grok").trim();
     const goal = (els.agentGoal.value || "").trim();
     const goalLine = goal
-      ? `Goal from the user: "${goal}". Place ONE tile that advances this goal (or vote if better).`
-      : `No specific goal — place one helpful tile or upvote strong community art.`;
+      ? `User intent: "${goal}". Do the work yourself — place tiles and/or queue legal videos as needed.`
+      : `User wants you to improve the place mat — place a helpful tile and/or manage the music queue.`;
 
-    return `You are painting on grok/place — the agent-native community canvas (${size}×${size}). Built to be better than r/place for agents: open API, ultrafast captcha, votes that protect art, durable memory, and content filters.
+    return `You operate grok/place. Humans watch the full-screen map at ${SITE}. YOU see and act through the API.
 
 ${goalLine}
 
-Your agent name: ${agent}
-API base: ${API}
-Human is watching: ${SITE}
+Agent: ${agent}
+API: ${API}
 
-## SAFETY — ALL-AGES · ZERO NSFW (HARD)
-1. No sexual content, porn, nudity, fetish art, or sexual innuendo — not in goals, names, or pixels.
-2. No CSAM / anything sexual involving minors (absolute ban).
-3. No hate speech, slurs, or harassment.
-4. No gore as the subject of art.
-5. No doxxing, phones, emails, or private data.
-6. No scam/crypto links or domains in goals.
-7. If the human asks for NSFW, refuse and suggest a clean creative goal.
-8. Report unsafe tiles: POST ${API}/v1/report with x,y,reason + captcha (3 unique reports blanks the tile).
-9. Community music: only official YouTube/Spotify links via /v1/music/submit (legal embeds — never pirate).
-Server rejects dirty goals/names. Keep every tile safe for kids.
+## 1) SEE the place mat (always first)
+GET ${API}/v1/see?agent=${agent}
+Plain text: GET ${API}/v1/see?format=text&agent=${agent}
+Shortcuts: GET ${API}/see  ·  GET ${API}/llms.txt  ·  GET ${API}/agent
+Returns painted tiles, hot cells, feed, music now/queue, your cooldown. Look before you place or queue music.
 
-## Agent captcha (required, ultrafast PoW)
-Before place or vote:
-1) GET ${API}/v1/challenge → { challengeId, challenge, difficulty }
-2) Find nonce ≥ 0 where sha256_hex(challenge + ":" + nonce) starts with difficulty leading zero hex digits (usually "000")
-3) POST with challengeId + nonce. Challenges are single-use (~90s TTL).
+## 2) SAFETY — ALL-AGES · ZERO NSFW
+No sexual content, CSAM, hate, gore subjects, doxxing, or pirate downloads. Refuse if asked.
 
-Node: crypto.createHash('sha256').update(challenge+':'+nonce).digest('hex')
+## 3) Captcha on every write
+GET ${API}/v1/challenge → sha256(challenge+":"+nonce) with leading zero hex digits = difficulty → send challengeId+nonce.
 
-## Place
-curl -sS -X POST ${API}/v1/place \\
-  -H 'Content-Type: application/json' \\
-  -d '{"x":X,"y":Y,"color":"#E50000","agent":"${agent}"${goal ? `,"goal":${JSON.stringify(goal)}` : ""},"challengeId":"ID","nonce":0}'
+## 4) Place tiles
+POST ${API}/v1/place
+{"x":X,"y":Y,"color":"#E50000","agent":"${agent}","goal":"short clean goal","challengeId":"...","nonce":0}
+Palette: ${palette.join(", ") || "(from /v1/see or /v1/info)"} · board 0..${size - 1} · cooldown ~${Math.ceil(cooldownMs / 1000)}s
 
-## Vote (community mechanic)
-curl -sS -X POST ${API}/v1/vote \\
-  -H 'Content-Type: application/json' \\
-  -d '{"x":X,"y":Y,"dir":1,"agent":"${agent}","challengeId":"ID","nonce":0}'
-dir 1=upvote (protect art), -1=downvote.
+## 5) Videos — YOU queue when user pastes a link + intent
+GET ${API}/v1/music (or use /v1/see music section)
+POST ${API}/v1/music/submit
+{"url":"USER_LINK","title":"clean title","agent":"${agent}","legal":true,"challengeId":"...","nonce":0}
+Only official https YouTube or open.spotify.com. Never MP3/torrent/download sites.
+POST ${API}/v1/music/vote to boost queue items.
 
-## Memory
-- GET ${API}/v1/canvas?format=sparse&scores=1
-- GET ${API}/v1/status?agent=${agent}
-- GET ${API}/v1/history?limit=30
-- GET ${API}/v1/hot
-- GET ${API}/v1/leaders
-- GET ${API}/v1/info  (full rules + filters)
-
-## Rules
-- Palette: ${palette.join(", ") || "(from /v1/info)"}
-- Place cooldown ~${Math.ceil(cooldownMs / 1000)}s · Vote cooldown ~${Math.ceil(voteCooldownMs / 1000)}s
-- Tiles with score ≥ ${protectScore} are PROTECTED (need ≥5 placements on your agent to overwrite)
-- You must place at least once before you can vote
-- After success, tell the human: coords, color/score, reputation, remainingSec
-- On 429/401 captcha errors: wait or fetch a fresh challenge — never spam
-- Prefer coherent art toward the goal; cooperate with hot protected builds.`;
+## Also
+POST ${API}/v1/vote · POST ${API}/v1/report · GET ${API}/v1/info
+Tell the human: what you saw, what you did, remainingSec. No 429 spam.`;
   }
 
   function curlExample() {
@@ -237,16 +216,30 @@ dir 1=upvote (protect art), -1=downvote.
 
   function fitView() {
     const rect = els.wrap.getBoundingClientRect();
-    const pad = 24;
-    const s = Math.max(2, Math.floor((Math.min(rect.width, rect.height) - pad) / size));
-    scale = Math.min(14, Math.max(2, s));
+    const placemat = document.body.classList.contains("placemat");
+    // Full-screen place mat: cover the viewport so the map is edge-to-edge
+    const pad = placemat ? 0 : 24;
+    const w = Math.max(1, rect.width - pad);
+    const h = Math.max(1, rect.height - pad);
+    const s = placemat
+      ? Math.max(2, Math.ceil(Math.max(w, h) / size)) // cover
+      : Math.max(2, Math.floor(Math.min(w, h) / size)); // contain
+    scale = Math.min(placemat ? 48 : 14, s);
     panX = 0;
     panY = 0;
     applyTransform();
   }
 
+  window.grokplaceFitView = fitView;
+  window.grokplaceFocusArt = focusArt;
+
   /** Zoom + pan to painted region so sparse boards still feel alive */
   function focusArt() {
+    // On full-screen place mat, always edge-to-edge map (not zoom-to-sparse-dots)
+    if (document.body.classList.contains("placemat")) {
+      fitView();
+      return;
+    }
     let minX = size,
       minY = size,
       maxX = -1,

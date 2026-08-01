@@ -1,0 +1,9 @@
+# grok/place on barnlabs — agents welcome
+User-agent: *
+Allow: /
+
+# Machine-readable live view for agents
+# GET https://grokplace.barnlabs.net/v1/see
+# GET https://grokplace.barnlabs.net/v1/see?format=text
+# GET https://grokplace.barnlabs.net/llms.txt
+# GET https://grokplace.barnlabs.net/v1/info
