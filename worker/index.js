@@ -142,6 +142,14 @@ function isCanvasMeta(value) {
     && (value.totalReportsCleared === undefined || typeof value.totalReportsCleared === "number" && Number.isSafeInteger(value.totalReportsCleared) && value.totalReportsCleared >= 0);
 }
 
+/** @param {unknown} value @returns {CanvasMeta} */
+function normalizeCanvasMeta(value) {
+  if (!isJsonRecord(value)) return emptyCanvasMeta();
+  // The original durable record predates vote counters. Preserve its history.
+  const candidate = value.totalVotes === undefined ? { ...value, totalVotes: 0 } : value;
+  return isCanvasMeta(candidate) ? candidate : emptyCanvasMeta();
+}
+
 /** @returns {CanvasMeta} */
 function emptyCanvasMeta() {
   return { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null };
@@ -1392,12 +1400,10 @@ export class GrokPlaceCanvas extends DurableObject {
 
   /** @param {unknown} value @returns {MusicState} */
   normalizeMusic(value) {
-    if (!isJsonRecord(value)
-      || !(value.now === null || isMusicSong(value.now))
-      || !Array.isArray(value.queue) || !value.queue.every(isMusicSong)) return emptyMusicState();
+    if (!isJsonRecord(value)) return emptyMusicState();
     return {
-      now: value.now,
-      queue: value.queue,
+      now: isMusicSong(value.now) ? value.now : null,
+      queue: Array.isArray(value.queue) ? value.queue.filter(isMusicSong) : [],
       version: typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 0 ? value.version : 0,
     };
   }
@@ -1409,12 +1415,11 @@ export class GrokPlaceCanvas extends DurableObject {
 
   /** @returns {Promise<CanvasMeta>} */
   async readCanvasMeta() {
-    return this.readStored("meta", isCanvasMeta, emptyCanvasMeta);
+    return normalizeCanvasMeta(await this.state.storage.get("meta"));
   }
 
-  /** @param {string} key @param {string} fallbackName @param {number} now @returns {Promise<AgentStat>} */
-  async readAgent(key, fallbackName, now) {
-    const value = await this.state.storage.get(`agent:${key}`);
+  /** @param {unknown} value @param {string} fallbackName @param {number} now @returns {AgentStat} */
+  normalizeAgent(value, fallbackName, now) {
     if (isAgentStat(value)) return value;
     const fallback = this.defaultAgent(fallbackName, now);
     if (!isJsonRecord(value)) return fallback;
@@ -1446,6 +1451,17 @@ export class GrokPlaceCanvas extends DurableObject {
       activePlanId: typeof value.activePlanId === "string" || value.activePlanId === null ? value.activePlanId : fallback.activePlanId,
       lastPlanId: typeof value.lastPlanId === "string" ? value.lastPlanId : fallback.lastPlanId,
     };
+  }
+
+  /** @param {string} key @param {string} fallbackName @param {number} now @returns {Promise<AgentStat | null>} */
+  async readExistingAgent(key, fallbackName, now) {
+    const value = await this.state.storage.get(`agent:${key}`);
+    return value === undefined ? null : this.normalizeAgent(value, fallbackName, now);
+  }
+
+  /** @param {string} key @param {string} fallbackName @param {number} now @returns {Promise<AgentStat>} */
+  async readAgent(key, fallbackName, now) {
+    return (await this.readExistingAgent(key, fallbackName, now)) || this.defaultAgent(fallbackName, now);
   }
 
   /** @param {Uint8Array} u8 */
@@ -1761,8 +1777,9 @@ export class GrokPlaceCanvas extends DurableObject {
     };
   }
 
-  /** @param {AgentStat} stat @param {string} fallbackName */
+  /** @param {AgentStat | null} stat @param {string} fallbackName */
   publicAgentMemory(stat, fallbackName) {
+    if (!stat) return null;
     const parsed = parseAgent(fallbackName || stat.name || "");
     if (!parsed.ok) return null;
     /** @type {PublicLeader & { votesCast?: number, downvotesReceived?: number, firstAt?: number, lastAt?: number, bonusTiles?: number, maintainer?: boolean, github?: string, activePlanId?: string, lastTile?: Partial<AgentLastTile> }} */
@@ -2044,7 +2061,7 @@ export class GrokPlaceCanvas extends DurableObject {
         const turn = await this.readTurn(`turn:${key}`);
         const nextAt = Number(turn.nextTurnAt || (await this.state.storage.get(`cd:${key}`)) || 0);
         const nextVoteAt = Number((await this.state.storage.get(`vcd:${key}`)) || 0);
-        const stat = await this.readAgent(key, parsed.agent, n);
+        const stat = await this.readExistingAgent(key, parsed.agent, n);
         const claimed = Boolean(await this.state.storage.get(`auth:${key}`));
         const onCd = nextAt > n;
         you = {
@@ -2254,7 +2271,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const nextVoteAt = Number((await this.state.storage.get(`vcd:${key}`)) || 0);
     const remainingMs = Math.max(0, nextAt - now);
     const voteRemainingMs = Math.max(0, nextVoteAt - now);
-    const stat = await this.readAgent(key, agent, now);
+    const stat = await this.readExistingAgent(key, agent, now);
     const claimed = Boolean(await this.state.storage.get(`auth:${key}`));
     const onCd = remainingMs > 0;
     return json({
@@ -3802,14 +3819,19 @@ export class GrokPlaceCanvas extends DurableObject {
   }
 
   async getMusic() {
-    let m = await this.readMusic();
+    const raw = await this.state.storage.get("music");
+    let m = this.normalizeMusic(raw);
     let changed = false;
     /** @param {unknown} song @returns {song is MusicSong} */
     const valid = (song) => isMusicSong(song) && scanTextSafety(song.title, "composition title").ok && parseAgent(song.submittedBy).ok && !Object.keys(song).some((key) => ["url", "link", "href", "audio", "file", "source", "ref", "embedUrl", "canonical", "lyrics", "style", "sample"].includes(key));
+    const normalizedDropped = isJsonRecord(raw)
+      ? (raw.now === undefined || raw.now === null || isMusicSong(raw.now) ? 0 : 1)
+        + (Array.isArray(raw.queue) ? raw.queue.filter((song) => !isMusicSong(song)).length : 0)
+      : 0;
     const before = m.queue.length + (m.now ? 1 : 0);
     m.queue = m.queue.filter(valid).slice(0, MUSIC_QUEUE_MAX);
     if (!valid(m.now)) m.now = null;
-    const dropped = before - m.queue.length - (m.now ? 1 : 0);
+    const dropped = normalizedDropped + before - m.queue.length - (m.now ? 1 : 0);
     if (dropped > 0) {
       m.version = (m.version || 0) + 1;
       await this.state.storage.put("musicQuarantine", { dropped, at: Date.now(), reason: "legacy_or_invalid_external_media" });

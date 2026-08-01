@@ -37,20 +37,14 @@ The current Worker rate-limit bindings are the no-add-on control available throu
 
 ## Repository enforcement
 
-### One-time zero-review bootstrap
+### One-time required-check transition
 
-The existing one-review rule protects the transition PR, while the zero-review rule depends on the trusted workflow introduced by that PR. Break that cycle with this bounded fail-closed sequence:
+The trusted default-branch workflow must publish a check on the candidate SHA. When the check's protected name changes, use this bounded sequence without an admin bypass:
 
-1. Keep the current protection intact through all exact-head CI and critic gates: required approving reviews `1`, strict `Tiny perfect PR` and `Secret scan`, conversation resolution enabled, and force pushes and branch deletion disabled.
-2. Read the repository collaborators and verify that `baney75` is the sole admin/owner. Save the complete current `main` protection response and the transition PR number and full head SHA. If sole control or the exact targets cannot be proven, stop.
-3. Temporarily change **only** `enforce_admins` to `false`. Read protection back and prove required reviews remain `1`; both required checks, strict mode, conversation resolution, force-push prohibition, and deletion prohibition are byte-for-byte unchanged from the saved response. If this exact temporary bypass cannot be made or verified safely, restore `enforce_admins: true` and stop.
-4. Admin-merge only the captured transition head:
-
-   ```bash
-   gh pr merge "$transition_pr" --repo baney75/grokplace --squash --admin --match-head-commit "$transition_head"
-   ```
-
-5. As soon as that exact head is on `main`, install the final protection and read it back: `enforce_admins: true`; required approving reviews `0`; `require_code_owner_reviews: false`; `require_last_push_approval: false`; strict required checks `Tiny perfect PR`, `Secret scan`, and `merge-and-award`, each bound to GitHub Actions app ID `15368`; conversation resolution `true`; force pushes `false`; deletions `false`. Any mismatch is a release blocker.
+1. Capture the open PR number and full head SHA. Verify the exact head has successful `Tiny perfect PR`, `Secret scan`, and the currently required trusted exact-head check, all from GitHub Actions app ID `15368`. Stop if any check is missing, stale, or attached to another SHA.
+2. Save the full `main` protection response. Change only the trusted required-check context from the retiring name to the successful current name, retaining strict mode, administrator enforcement, resolved conversations, and disabled force pushes and deletion. Read the response back and prove every retained setting is unchanged.
+3. Request the normal exact-head auto-merge with `gh pr merge "$transition_pr" --repo baney75/grokplace --squash --auto --match-head-commit "$transition_head"`. Do not use `--admin` or loosen branch protection.
+4. When that exact head is on `main`, restore the final strict contexts: `Tiny perfect PR`, `Secret scan`, and `merge-and-award`, each bound to GitHub Actions app ID `15368`. Read protection back; any mismatch is a release blocker.
 
 - `.github/CODEOWNERS` assigns every path to `@baney75`, but main requires **zero human approving reviews**. The rule must require the strict, current `Tiny perfect PR`, `Secret scan`, and `merge-and-award` checks, each bound to GitHub Actions app ID `15368`; enforce the rule for administrators; require conversations to be resolved; and disable force pushes and main-branch deletion.
 - The trusted default-branch workflow runs only after successful `PR quality`. Its orchestration job has the distinct display name `Trusted merge orchestrator`; the job creates the sole protected `merge-and-award` check on the exact candidate head, then classifies paths with the default-branch maintenance policy. A product-lane PR must be ready/open against `main`, authored exactly by `baney75`, name exactly one `implementer_agent`, and carry an immutable exact-head SHIP from another agent; it merges with no tile award. A maintain-lane PR must have an active server-verified author, stay within the canonical 3-file/40-line/path/bank gates, and carry an immutable exact-head SHIP from an active verified maintainer whose GitHub principal differs from the PR author's. Both lanes revalidate `Tiny perfect PR` and `Secret scan` as successful checks from GitHub Actions app ID `15368`. Maintenance completes its durable award reservation before the trusted workflow publishes success; validation or reservation failure publishes failure. The workflow then merges only with `--match-head-commit`; no GitHub approval review is required.

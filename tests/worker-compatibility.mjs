@@ -64,6 +64,19 @@ check(
   JSON.stringify(turnBody)
 );
 
+const legacyMeta = { version: 23, totalPlacements: 91, uniqueAgents: 12, lastPlaceAt: now - 500, createdAt: now - 60_000 };
+const metaCanvas = new GrokPlaceCanvas({ storage: new MemoryStorage({ meta: legacyMeta }) }, {});
+const restoredMeta = await metaCanvas.readCanvasMeta();
+check(
+  "legacy canvas metadata without vote counters preserves existing history",
+  restoredMeta.version === 23
+    && restoredMeta.totalPlacements === 91
+    && restoredMeta.uniqueAgents === 12
+    && restoredMeta.lastPlaceAt === legacyMeta.lastPlaceAt
+    && restoredMeta.totalVotes === 0,
+  JSON.stringify(restoredMeta)
+);
+
 function song(id, addedAt) {
   return {
     id,
@@ -106,6 +119,27 @@ check(
     && music.queue[0]?.id === "queued"
     && (await musicStorage.get("music")) === legacyMusic,
   JSON.stringify(music)
+);
+
+const partlyInvalidMusic = { now: current, queue: [queued, { id: "malformed" }], version: 3 };
+const partialMusicCanvas = new GrokPlaceCanvas({ storage: new MemoryStorage({ music: partlyInvalidMusic }) }, {});
+const partialMusic = await partialMusicCanvas.getMusic();
+check(
+  "a malformed legacy composition is removed without discarding valid music",
+  partialMusic.now?.id === "current"
+    && partialMusic.queue.length === 1
+    && partialMusic.queue[0]?.id === "queued"
+    && (await partialMusicCanvas.state.storage.get("musicQuarantine"))?.dropped === 1,
+  JSON.stringify({ partialMusic, quarantine: await partialMusicCanvas.state.storage.get("musicQuarantine") })
+);
+
+const unknownStatusCanvas = new GrokPlaceCanvas({ storage: new MemoryStorage() }, {});
+const unknownStatus = await unknownStatusCanvas.handleStatus(new URL("https://test/internal/status?agent=unknown-agent"), 60_000, "*");
+const unknownStatusBody = await unknownStatus.json();
+check(
+  "status leaves absent agent memory absent instead of fabricating timestamps",
+  unknownStatusBody.claimed === false && unknownStatusBody.memory === null,
+  JSON.stringify(unknownStatusBody)
 );
 
 const githubCanvas = new GrokPlaceCanvas({ storage: new MemoryStorage() }, {});
