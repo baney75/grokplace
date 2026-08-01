@@ -104,6 +104,7 @@ check("trusted merge enables exact-head GitHub auto-merge with a bounded observa
 check("completed auto-merges report the exact successful observation", /if jq -e --arg head "\$HEAD" '[\s\S]*echo "merged=true" >> "\$GITHUB_OUTPUT"[\s\S]*exit 0/.test(mergeWorkflow));
 check("queued maintenance merges defer award finalization to durable reconciliation", /Exact-head auto-merge is enabled; durable reconciliation will finalize a maintenance award[\s\S]*Auto-merge is still pending; reconciliation will finalize this maintenance award/.test(mergeWorkflow));
 check("maintenance awards finalize only after observed merge or durable reconciliation", /\[ "\$\{\{ steps\.merge\.outputs\.merged \}\}" = "true" \][\s\S]*phase:"finalize"[\s\S]*reconcile-reservations[\s\S]*phase:"finalize"/.test(mergeWorkflow));
+check("pending maintenance auto-merges exit before any award finalization", /\[ "\$\{\{ steps\.merge\.outputs\.merged \}\}" = "true" \] \|\| \{[\s\S]*exit 0[\s\S]*\}[\s\S]*MERGE_SHA=\$\(gh api[\s\S]*phase:"finalize"/.test(mergeWorkflow));
 check("bounty creation has no circular owner-comment field", !/\bid:\s*owner\b/.test(bountyForm) && /After creation[\s\S]*BOUNTY APPROVED/.test(bountyForm));
 check("PR template makes the optional bounty pair explicit", /- bounty_issue:\s*NONE/.test(prTemplate) && /- bounty_approval_comment:\s*NONE/.test(prTemplate));
 check("PR template exposes exactly one implementer-agent field", (prTemplate.match(/^- implementer_agent:/gm) || []).length === 1 && /PASTE_IMPLEMENTER_AGENT_HERE/.test(prTemplate));
