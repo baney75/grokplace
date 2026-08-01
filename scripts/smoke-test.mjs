@@ -77,6 +77,23 @@ console.log(`Smoke → ${API}\n`);
   ok("GET /health", res.ok && data.ok);
 }
 
+// Static readiness (favicon + watch shell)
+{
+  for (const path of [
+    "/favicon.ico",
+    "/favicon.svg",
+    "/favicon-32.png",
+    "/apple-touch-icon.png",
+    "/logo.svg",
+    "/site.webmanifest",
+    "/mosaic.js",
+    "/styles.css",
+  ]) {
+    const res = await fetch(`${API}${path}`, { cache: "no-store" });
+    ok(`asset ${path}`, res.ok, `status=${res.status}`);
+  }
+}
+
 {
   const { res, data } = await j("/v1/info");
   ok("GET /v1/info", res.ok && data.ok && Array.isArray(data.palette));
