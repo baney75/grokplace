@@ -1,9 +1,12 @@
-/* grok/place — professional mosaic viewer only. No edit UI. No control panel. */
+/* grok/place — mosaic viewer: floating logo + mute only */
 
 :root {
-  --bg: #050608;
+  --bg: #0a0c10;
   --accent: #2dd4bf;
   --text: #f1f5f9;
+  --muted: #94a3b8;
+  --glass: rgba(12, 16, 24, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.12);
   --safe-t: env(safe-area-inset-top, 0px);
   --safe-r: env(safe-area-inset-right, 0px);
   --safe-b: env(safe-area-inset-bottom, 0px);
@@ -24,7 +27,7 @@ body.mosaic-only {
   width: 100%;
   height: 100%;
   overflow: hidden !important;
-  background: #000 !important;
+  background: var(--bg) !important;
   color: var(--text);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   position: fixed;
@@ -36,17 +39,6 @@ body.mosaic-only {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Soft vignette frame — cinema, not a control chrome */
-body.mosaic-only::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 40;
-  background:
-    radial-gradient(ellipse 95% 90% at 50% 50%, transparent 70%, rgba(0, 0, 0, 0.18) 100%);
-}
-
 body.mosaic-only .mosaic-app {
   position: relative;
   width: 100%;
@@ -56,6 +48,7 @@ body.mosaic-only .mosaic-app {
   margin: 0;
   padding: 0;
   max-width: none;
+  z-index: 1;
 }
 
 body.mosaic-only .canvas-wrap {
@@ -74,8 +67,8 @@ body.mosaic-only .canvas-wrap {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
-  /* Solid void — pixels painted opaque; no fake graph paper */
-  background-color: #0a0c10;
+  background-color: var(--bg);
+  z-index: 1;
 }
 
 body.mosaic-only .canvas-wrap:active {
@@ -96,7 +89,7 @@ body.mosaic-only #board {
   user-select: none;
 }
 
-/* Off-screen legal audio hosts (not UI) */
+/* Off-screen legal audio hosts */
 body.mosaic-only .player-hosts {
   position: fixed;
   width: 300px;
@@ -115,38 +108,53 @@ body.mosaic-only #yt-player-inner {
   height: 160px;
 }
 
-/* Brand — upper left, transparent mark */
-.brand-logo {
+/* ── Floating HUD: logo + mute ─────────────────────────── */
+.float-hud {
   position: fixed;
-  top: max(0.7rem, calc(var(--safe-t) + 0.45rem));
-  left: max(0.7rem, calc(var(--safe-l) + 0.45rem));
-  z-index: 80;
-  display: block;
+  top: max(0.75rem, calc(var(--safe-t) + 0.5rem));
+  left: max(0.75rem, calc(var(--safe-l) + 0.5rem));
+  right: max(0.75rem, calc(var(--safe-r) + 0.5rem));
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  pointer-events: none;
+}
+
+.brand-logo {
+  pointer-events: auto;
+  display: flex !important;
+  align-items: center;
+  visibility: visible !important;
   line-height: 0;
   margin: 0;
-  padding: 0.2rem;
-  background: transparent !important;
-  border: none;
+  padding: 0.45rem 0.7rem;
+  border-radius: 999px;
+  background: var(--glass) !important;
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
   text-decoration: none;
-  opacity: 0.95;
-  filter:
-    drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8))
-    drop-shadow(0 0 12px rgba(0, 0, 0, 0.4));
-  transition: opacity 0.15s ease;
+  opacity: 1;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
   -webkit-tap-highlight-color: transparent;
 }
 
 .brand-logo:hover,
 .brand-logo:focus-visible {
-  opacity: 1;
+  border-color: rgba(45, 212, 191, 0.45);
+  background: rgba(16, 22, 32, 0.88) !important;
   outline: none;
+  transform: translateY(-1px);
 }
 
 .brand-logo img {
   display: block;
-  width: min(156px, 38vw);
+  width: min(148px, 42vw);
   height: auto;
-  max-height: 36px;
+  max-height: 32px;
   background: transparent !important;
   border: 0;
   pointer-events: none;
@@ -154,30 +162,96 @@ body.mosaic-only #yt-player-inner {
   -webkit-user-drag: none;
 }
 
-@media (max-width: 480px) {
-  .brand-logo {
-    top: max(0.5rem, calc(var(--safe-t) + 0.35rem));
-    left: max(0.5rem, calc(var(--safe-l) + 0.3rem));
-  }
-  .brand-logo img {
-    width: min(120px, 46vw);
-    max-height: 30px;
-  }
+.mute-btn {
+  pointer-events: auto !important;
+  display: inline-flex !important;
+  visibility: visible !important;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  margin-left: auto;
+  padding: 0.55rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  color: var(--text) !important;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
-@media (max-width: 380px), (max-height: 420px) {
+.mute-btn:hover,
+.mute-btn:focus-visible {
+  border-color: rgba(45, 212, 191, 0.45);
+  background: rgba(16, 22, 32, 0.88) !important;
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.mute-btn:active {
+  transform: translateY(0);
+}
+
+.mute-btn .mute-icon {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.mute-btn .mute-label {
+  line-height: 1;
+}
+
+.mute-btn.is-unmuted {
+  border-color: rgba(45, 212, 191, 0.35);
+}
+
+.mute-btn.is-unmuted .mute-label {
+  color: var(--accent);
+}
+
+@media (max-width: 480px) {
+  .float-hud {
+    top: max(0.55rem, calc(var(--safe-t) + 0.35rem));
+    left: max(0.55rem, calc(var(--safe-l) + 0.35rem));
+    right: max(0.55rem, calc(var(--safe-r) + 0.35rem));
+  }
+  .brand-logo {
+    padding: 0.4rem 0.6rem;
+  }
   .brand-logo img {
-    width: min(100px, 42vw);
+    width: min(118px, 40vw);
     max-height: 26px;
   }
+  .mute-btn {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.82rem;
+  }
+  .mute-btn .mute-label {
+    /* keep label on mobile — user asked for a mute button */
+  }
 }
 
-/* Absolutely no edit / control chrome — hide if anything leaks in */
+@media (max-width: 360px) {
+  .mute-btn .mute-label {
+    display: none;
+  }
+  .mute-btn {
+    padding: 0.55rem 0.65rem;
+  }
+}
+
+/* Hide any leftover edit chrome if old assets leak in */
 .edit-fab,
 .audio-unlock,
 .canvas-toolbar,
 .music-dock,
-.music-open,
 .side,
 .top,
 .placemat-chrome,
@@ -185,32 +259,6 @@ body.mosaic-only #yt-player-inner {
 .foot,
 .hint,
 .field,
-.palette,
-.cooldown,
-button:not(.brand-logo),
-input,
-textarea,
-select,
-form {
+.palette {
   display: none !important;
-  visibility: hidden !important;
-  pointer-events: none !important;
-}
-
-/* brand is an <a>, not a button — ensure logo stays */
-a.brand-logo {
-  display: block !important;
-  visibility: visible !important;
-  pointer-events: auto !important;
-}
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  border: 0;
 }

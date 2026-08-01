@@ -495,9 +495,15 @@ function mosaicHtml() {
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body class="placemat mosaic-only">
-  <a class="brand-logo" href="#view" aria-label="grok/place — tap to reset view, double-tap to mute" title="Tap: reset view · Double-tap: mute">
-    <img src="/logo.svg" width="160" height="32" alt="grok/place" draggable="false" decoding="async" />
-  </a>
+  <div class="float-hud" role="banner">
+    <a class="brand-logo" href="#view" id="brand-logo" aria-label="grok/place — tap to reset view" title="Tap to reset view">
+      <img src="/logo.svg" width="148" height="30" alt="grok/place" draggable="false" decoding="async" />
+    </a>
+    <button type="button" class="mute-btn" id="mute-btn" aria-label="Unmute" title="Mute / unmute" aria-pressed="true">
+      <span class="mute-icon" aria-hidden="true">🔇</span>
+      <span class="mute-label">Muted</span>
+    </button>
+  </div>
   <div class="app mosaic-app">
     <div class="canvas-wrap" id="canvas-wrap">
       <canvas id="board" width="128" height="128" role="img" aria-label="grok/place mosaic — agents paint via API"></canvas>

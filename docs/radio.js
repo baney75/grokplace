@@ -217,30 +217,56 @@
     }
   }
 
-  function unlockAudio() {
-    if (!muted) return;
-    muted = false;
-    applyAudio();
-    if (nowTrack) renderNow(nowTrack);
+  const muteBtn = document.getElementById("mute-btn");
+
+  function syncMuteUi() {
+    if (!muteBtn) return;
+    const icon = muteBtn.querySelector(".mute-icon");
+    const label = muteBtn.querySelector(".mute-label");
+    muteBtn.setAttribute("aria-pressed", muted ? "true" : "false");
+    muteBtn.setAttribute("aria-label", muted ? "Unmute" : "Mute");
+    muteBtn.classList.toggle("is-unmuted", !muted);
+    if (icon) icon.textContent = muted ? "🔇" : "🔊";
+    if (label) label.textContent = muted ? "Muted" : "Sound";
   }
 
-  // First canvas gesture unlocks audio (autoplay policy). Mute via logo double-tap.
+  function setMuted(next) {
+    muted = Boolean(next);
+    applyAudio();
+    if (!muted && nowTrack) renderNow(nowTrack);
+    syncMuteUi();
+    return muted;
+  }
+
+  function unlockAudio() {
+    if (!muted) return;
+    setMuted(false);
+  }
+
+  // Explicit mute button (always visible)
+  if (muteBtn) {
+    muteBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      setMuted(!muted);
+    });
+    syncMuteUi();
+  }
+
+  // First canvas pan/tap can unmute for autoplay policy (button still works either way)
   document.getElementById("canvas-wrap")?.addEventListener(
     "pointerdown",
     () => {
-      unlockAudio();
+      /* gesture only — do not force unmute; user controls via mute button */
     },
     { once: true }
   );
 
-  window.grokplaceToggleMute = () => {
-    muted = !muted;
-    applyAudio();
-    if (!muted && nowTrack) renderNow(nowTrack);
-    return muted;
-  };
+  window.grokplaceToggleMute = () => setMuted(!muted);
+  window.grokplaceSetMuted = setMuted;
 
   loadYtApi();
   fetchMusic();
   setInterval(fetchMusic, 4000);
+  syncMuteUi();
 })();

@@ -256,25 +256,14 @@
     { passive: false }
   );
 
-  // Logo is the only chrome: tap = reset camera (never hard-navigate)
-  const logo = document.querySelector(".brand-logo");
+  // Floating logo: tap resets camera (does not navigate)
+  const logo = document.getElementById("brand-logo") || document.querySelector(".brand-logo");
   if (logo) {
     logo.addEventListener("click", (ev) => {
       ev.preventDefault();
       userAdjusted = false;
       fitContain(true);
     });
-    // Double-tap logo toggles mute (reversible audio, no extra UI)
-    let lastLogoTap = 0;
-    logo.addEventListener("pointerup", (ev) => {
-      const t = Date.now();
-      if (t - lastLogoTap < 350) {
-        ev.preventDefault();
-        if (typeof window.grokplaceToggleMute === "function") window.grokplaceToggleMute();
-      }
-      lastLogoTap = t;
-    });
-    logo.setAttribute("title", "Tap: reset view · Double-tap: mute/unmute");
   }
 
   window.addEventListener("resize", () => {
