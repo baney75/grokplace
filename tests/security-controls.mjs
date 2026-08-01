@@ -58,6 +58,10 @@ const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
     headers: { "CF-Connecting-IP": "203.0.113.11" },
   }), envWithRoute(routed));
   check("allowed public reads still reach the Durable Object", response.status === 200 && routed.value);
+  const see = await worker.fetch(new Request("https://grokplace.barnlabs.net/see", {
+    headers: { "CF-Connecting-IP": "203.0.113.11" },
+  }), envWithRoute({ value: false }, { success: true }));
+  check("public see alias remains an edge-limited read", see.status === 200);
   const health = await worker.fetch(new Request("https://grokplace.barnlabs.net/health", {
     headers: { "CF-Connecting-IP": "203.0.113.11" },
   }), envWithRoute({ value: false }));
@@ -110,8 +114,12 @@ const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
   const blocked = await worker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/canvas", {
     headers: { "CF-Connecting-IP": "203.0.113.17" },
   }), env);
+  const previewBlocked = await worker.fetch(new Request("https://version-123.grokplace.projectbarnlab.workers.dev/v1/canvas", {
+    headers: { "CF-Connecting-IP": "203.0.113.17" },
+  }), env);
   check("direct review mirror reaches only the immutable review route", response.status === 200 && routed.value);
   check("direct review mirror blocks application paths", blocked.status === 404 && (await blocked.text()).trim() === "Not found");
+  check("version preview hosts also block application paths", previewBlocked.status === 404 && (await previewBlocked.text()).trim() === "Not found");
 }
 
 {

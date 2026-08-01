@@ -112,8 +112,8 @@ const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
 const IP_NEW_AGENTS_LIMIT = 8;
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
-const REVIEW_GATE_HOST = "grokplace.projectbarnlab.workers.dev";
-const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health"]);
+const WORKERS_DEV_SUFFIX = ".workers.dev";
+const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health", "/see"]);
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 const COLOR_HEX_RE = /^#?[0-9A-Fa-f]{6}$/;
 const REPORT_THRESHOLD = 3;
@@ -820,7 +820,7 @@ function stubId(env) {
 
 async function forwardToCanvas(env, path, request, origin) {
   const url = new URL(request.url);
-  if (url.hostname === REVIEW_GATE_HOST) url.hostname = "grokplace.barnlabs.net";
+  if (url.hostname.endsWith(WORKERS_DEV_SUFFIX)) url.hostname = "grokplace.barnlabs.net";
   url.pathname = path;
   const headers = new Headers(request.headers);
   headers.set("X-Forwarded-Origin", origin || "*");
@@ -3486,7 +3486,7 @@ export default {
     // GitHub-hosted runners can be denied by the branded zone's edge policy.
     // Keep the alternate workers.dev origin read-only and path-scoped so it
     // cannot become a bypass for the application or mutation controls.
-    if (url.hostname === REVIEW_GATE_HOST && !(method === "GET" && path === "/v1/reviews")) {
+    if (url.hostname.endsWith(WORKERS_DEV_SUFFIX) && !(method === "GET" && path === "/v1/reviews")) {
       return plainText("Not found", origin, 404);
     }
     if (method === "OPTIONS") {
