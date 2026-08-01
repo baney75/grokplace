@@ -58,6 +58,7 @@ jobs:
             echo "PR too large for award (files=$FILES total=$TOTAL)."
             exit 0
           fi
+          # amount is fixed server-side; paths must be allowlisted (no workflows / no JS HTML)
           BODY=$(jq -n \
             --arg github "$AUTHOR" \
             --argjson pr "$PR" \
@@ -65,12 +66,12 @@ jobs:
             --argjson files "$FILES" \
             --argjson lines "$TOTAL" \
             --argjson paths "$PATHS" \
-            '{github:$github, prNumber:$pr, sha:$sha, filesChanged:$files, linesChanged:$lines, paths:$paths, amount:10}')
+            '{github:$github, prNumber:$pr, sha:$sha, filesChanged:$files, linesChanged:$lines, paths:$paths}')
           curl -sS -X POST "$API/v1/maintain/award" \
             -H "Authorization: Bearer $AWARD_SECRET" \
             -H "Content-Type: application/json" \
             -d "$BODY" | tee /tmp/award.json
           jq -e '.ok == true' /tmp/award.json || {
-            echo "Award rejected (not maintainer or policy)."
+            echo "Award rejected (not maintainer, path policy, or identity)."
             exit 0
           }

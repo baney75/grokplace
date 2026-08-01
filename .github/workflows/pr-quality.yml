@@ -47,8 +47,14 @@ jobs:
         run: |
           set -euo pipefail
           git diff --name-only "$BASE"..."$HEAD" > /tmp/files.txt
+          # worker/wrangler/secrets always fail the automated quality gate
           if grep -E '(^|/)wrangler\.toml$|(^|/)worker/|secret|\.env|favicon-embed' /tmp/files.txt; then
             echo "::error::Sensitive path modified. These require human owner review and do not auto-award."
+            exit 1
+          fi
+          # .github/ changes never auto-merge/award — still fail this gate so they need owner path
+          if grep -E '(^|/)\.github/' /tmp/files.txt; then
+            echo "::error::.github/ changes require human owner review (no agent auto-merge)."
             exit 1
           fi
           echo "Paths OK"

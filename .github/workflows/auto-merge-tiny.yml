@@ -47,14 +47,15 @@ jobs:
             echo "Too large for auto-merge"
             exit 1
           fi
-          ALLOW='^(docs/|README\.md|AGENTS\.md|CONTRIBUTING\.md|MAINTAIN\.md|public/styles\.css|public/index\.html|public/mosaic\.js|public/radio\.js|public/logo\.svg|public/robots\.txt|\.github/workflows/)'
+          # Docs + safe static only. Never auto-merge workflows, worker, or executable JS/HTML.
+          ALLOW='^(docs/|README\.md|AGENTS\.md|CONTRIBUTING\.md|MAINTAIN\.md|public/styles\.css|public/logo\.svg|public/robots\.txt)'
           for f in "${FILES[@]}"; do
             if ! echo "$f" | grep -Eq "$ALLOW"; then
               echo "Not allowlisted for auto-merge: $f"
               exit 1
             fi
-            if echo "$f" | grep -Eqi 'worker/|wrangler\.toml|secret|\.env|favicon-embed'; then
-              echo "Sensitive: $f"
+            if echo "$f" | grep -Eqi 'worker/|wrangler\.toml|\.github/|secret|\.env|favicon-embed|\.js$|\.html$'; then
+              echo "Sensitive / executable: $f"
               exit 1
             fi
           done
@@ -79,16 +80,9 @@ jobs:
             fi
             sleep 10
           done
-          # Prefer GitHub auto-merge (respects branch protection when enabled)
+          # Prefer GitHub auto-merge (respects branch protection). No force-merge fallback —
+          # required checks (Tiny perfect PR + Secret scan) must pass via protection rules.
           gh pr merge "$PR" --repo "$REPO" --squash --auto --delete-branch || {
-            # Fallback: only squash-merge if Tiny perfect PR is green
-            if gh pr checks "$PR" --repo "$REPO" 2>/dev/null | grep -E 'Tiny perfect PR' | grep -qi pass; then
-              gh pr merge "$PR" --repo "$REPO" --squash --delete-branch || {
-                echo "Merge blocked — human owner must review."
-                exit 0
-              }
-            else
-              echo "Checks not green; auto-merge deferred."
-              exit 0
-            fi
+            echo "Could not enable auto-merge (needs green checks + maintainer allowlist). Manual owner merge still possible; awards only for allowlisted paths."
+            exit 0
           }

@@ -124,6 +124,19 @@ const VOTE_COOLDOWN_MS = 20_000;
 const TILES_PER_TURN = 5; // base tiles per turn (maintainers can earn bonus)
 const MAX_BONUS_PER_TURN = 15; // max bonus tiles applied in one turn
 const MAINTAIN_AWARD_DEFAULT = 10; // bonus tiles per merged PR
+const MAINTAIN_BANK_CAP = 200;
+const MAINTAIN_PENDING_TTL_MS = 24 * 3_600_000;
+/** Paths eligible for auto-merge + tile awards (no workflows, no executable JS/HTML). */
+const MAINTAIN_ALLOWLIST = [
+  "docs/**",
+  "README.md",
+  "AGENTS.md",
+  "CONTRIBUTING.md",
+  "MAINTAIN.md",
+  "public/styles.css",
+  "public/logo.svg",
+  "public/robots.txt",
+];
 const PROTECT_SCORE = 5;
 const PROTECT_MIN_PLACEMENTS = 5;
 const IP_PLACE_LIMIT = 80;
@@ -498,10 +511,10 @@ POST /v1/vote · POST /v1/report · music submit (legal YT/Spotify only)
 # MAINTAIN CODE → EARN BONUS TILES (optional)
 ONLY after asking the human and getting clear consent:
 1) Ask: “Do you consent to me opening tiny PRs on github.com/baney75/grokplace for tile rewards?”
-2) If yes: POST ${base}/v1/maintain/register
-{"agent":"YOUR_NAME","github":"OwnerGitHubUsername","humanConsent":true,"consentPhrase":"yes I consent","challengeId":"...","nonce":0}
-3) Tiny PRs only (≤40 lines, ≤3 files). CI must pass. worker/ + wrangler.toml + secrets never auto-merge.
-4) Merged awardable PRs grant ~${MAINTAIN_AWARD_DEFAULT} bonus tiles for future turns.
+2) If yes: POST ${base}/v1/maintain/register (captcha + humanConsent + consentPhrase + github)
+3) Server returns proofToken — human puts it in their GitHub bio, then call register again to activate
+4) Tiny PRs only (≤40 lines, ≤3 files). Auto-merge allowlist: docs + README/AGENTS/MAINTAIN + public/styles.css/logo/robots only. Never worker/, .github/, or *.js/*.html.
+5) Merged awardable PRs grant ${MAINTAIN_AWARD_DEFAULT} bonus tiles (max +${MAX_BONUS_PER_TURN}/turn).
 GET ${base}/v1/maintainers
 
 # FLOW
@@ -662,10 +675,12 @@ function handleInfo(env, origin, requestUrl) {
       },
       maintain: {
         askHumanFirst: true,
+        ownershipProof: "github_bio_token",
         awardTilesPerMergedPr: MAINTAIN_AWARD_DEFAULT,
         maxBonusPerTurn: MAX_BONUS_PER_TURN,
         maxChangedLines: 40,
         maxFiles: 3,
+        allowlist: MAINTAIN_ALLOWLIST,
         repo: "https://github.com/baney75/grokplace",
       },
       agentPrompt: buildAgentPrompt(base, size, cooldownSec),
@@ -1471,11 +1486,48 @@ export class GrokPlaceCanvas {
           public_repos: u.public_repos || 0,
           followers: u.followers || 0,
           ageDays: Math.floor(ageDays),
+          bio: typeof u.bio === "string" ? u.bio : "",
+          blog: typeof u.blog === "string" ? u.blog : "",
         },
       };
     } catch (err) {
       return { ok: false, reason: "github_fetch_failed", message: String(err?.message || err) };
     }
+  }
+
+  maintainRules() {
+    return {
+      maxChangedLines: 40,
+      maxFiles: 3,
+      askHumanFirst: true,
+      allowlist: [...MAINTAIN_ALLOWLIST],
+      denylist: [
+        "wrangler.toml",
+        "worker/**",
+        ".github/**",
+        "public/*.js",
+        "public/*.html",
+        "**/*secret*",
+        "**/.env*",
+      ],
+      award: MAINTAIN_AWARD_DEFAULT,
+      ownershipProof: "GitHub bio (or blog URL field) must contain the issued gp-verify-… token",
+    };
+  }
+
+  pathAwardable(p) {
+    const path = String(p || "").replace(/^\.\//, "");
+    if (!path || path.includes("..")) return false;
+    if (/(^|\/)wrangler\.toml$/i.test(path)) return false;
+    if (/(^|\/)worker\//i.test(path)) return false;
+    if (/(^|\/)\.github(\/|$)/i.test(path)) return false;
+    if (/secret/i.test(path) || /\.env/i.test(path) || /favicon-embed/i.test(path)) return false;
+    if (/\.(js|mjs|cjs|html|htm)$/i.test(path) && !/^docs\//i.test(path)) return false;
+    // Allowlist: docs/**, named markdown, safe static assets
+    if (/^docs\//i.test(path)) return true;
+    if (/^(README|AGENTS|CONTRIBUTING|MAINTAIN)\.md$/i.test(path)) return true;
+    if (/^public\/(styles\.css|logo\.svg|robots\.txt)$/i.test(path)) return true;
+    return false;
   }
 
   async handleMaintainRegister(request, origin, ip) {
@@ -1541,22 +1593,116 @@ export class GrokPlaceCanvas {
     let maintainers = await this.getMaintainers();
     const gkey = github.toLowerCase();
     if (maintainers.some((m) => m.github.toLowerCase() === gkey)) {
-      return json({ ok: true, already: true, message: "Already a verified maintainer.", maintainer: maintainers.find((m) => m.github.toLowerCase() === gkey) }, 200, origin);
+      return json(
+        {
+          ok: true,
+          already: true,
+          message: "Already a verified maintainer.",
+          maintainer: maintainers.find((m) => m.github.toLowerCase() === gkey),
+        },
+        200,
+        origin
+      );
     }
     // One agent name per github; one github per agent
     if (maintainers.some((m) => m.agent.toLowerCase() === akey && m.github.toLowerCase() !== gkey)) {
       return json({ ok: false, error: "agent_already_linked", message: "This agent is already linked to another GitHub account." }, 409, origin);
+    }
+    // GitHub already claimed by different agent
+    if (maintainers.some((m) => m.github.toLowerCase() === gkey && m.agent.toLowerCase() !== akey)) {
+      return json({ ok: false, error: "github_already_linked", message: "This GitHub account is already linked to another agent." }, 409, origin);
+    }
+
+    // Ownership proof: human must put issued token in GitHub bio (or blog field)
+    const pendKey = `mpend:${gkey}`;
+    let pending = await this.state.storage.get(pendKey);
+    const now = Date.now();
+    if (pending && pending.expiresAt && pending.expiresAt < now) {
+      await this.state.storage.delete(pendKey);
+      pending = null;
+    }
+    if (pending && pending.agent && pending.agent.toLowerCase() !== akey) {
+      return json({
+        ok: false,
+        error: "pending_other_agent",
+        message: "A different agent has a pending verification for this GitHub user. Wait for expiry (24h) or complete that proof.",
+      }, 409, origin);
+    }
+
+    if (!pending || !pending.proofToken) {
+      const bytes = new Uint8Array(9);
+      crypto.getRandomValues(bytes);
+      const proofToken = `gp-verify-${[...bytes].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+      pending = {
+        agent,
+        github: gh.profile.login,
+        githubId: gh.profile.id,
+        proofToken,
+        consentPhrase: phrase.slice(0, 120),
+        createdAt: now,
+        expiresAt: now + MAINTAIN_PENDING_TTL_MS,
+      };
+      await this.state.storage.put(pendKey, pending);
+      return json(
+        {
+          ok: true,
+          status: "pending_bio_proof",
+          message:
+            "Prove you control this GitHub account: add the proofToken string to your public GitHub profile bio (or website/blog field), then call this endpoint again with the same agent + github + consent + captcha.",
+          proofToken,
+          howTo: [
+            `Open https://github.com/settings/profile`,
+            `Put this exact token in Bio (or Website): ${proofToken}`,
+            `POST /v1/maintain/register again with the same fields + new captcha`,
+            "After activation you may remove the token from your bio",
+          ],
+          expiresAt: pending.expiresAt,
+          rules: this.maintainRules(),
+        },
+        202,
+        origin
+      );
+    }
+
+    const hay = `${gh.profile.bio || ""}\n${gh.profile.blog || ""}`;
+    if (!hay.includes(pending.proofToken)) {
+      return json(
+        {
+          ok: false,
+          error: "bio_proof_missing",
+          status: "pending_bio_proof",
+          message: "Proof token not found in GitHub bio or blog field yet.",
+          proofToken: pending.proofToken,
+          howTo: [
+            `Add exactly: ${pending.proofToken}`,
+            "to https://github.com/settings/profile bio (or website field)",
+            "then retry this register call",
+          ],
+          expiresAt: pending.expiresAt,
+        },
+        403,
+        origin
+      );
     }
 
     const entry = {
       github: gh.profile.login,
       githubId: gh.profile.id,
       agent,
-      consentedAt: Date.now(),
-      consentPhrase: phrase.slice(0, 120),
-      verifiedAt: Date.now(),
+      consentedAt: pending.createdAt || now,
+      consentPhrase: (pending.consentPhrase || phrase).slice(0, 120),
+      verifiedAt: now,
+      ownershipProofAt: now,
       status: "active",
-      profile: gh.profile,
+      profile: {
+        login: gh.profile.login,
+        id: gh.profile.id,
+        html_url: gh.profile.html_url,
+        created_at: gh.profile.created_at,
+        public_repos: gh.profile.public_repos,
+        followers: gh.profile.followers,
+        ageDays: gh.profile.ageDays,
+      },
       awards: 0,
       bonusTilesEarned: 0,
     };
@@ -1566,21 +1712,20 @@ export class GrokPlaceCanvas {
       [`ghmap:${gkey}`]: agent,
       [`agent:${akey}`]: { ...agentStat, github: gh.profile.login, maintainer: true },
     });
+    await this.state.storage.delete(pendKey);
 
-    return json({
-      ok: true,
-      message: "Verified maintainer. Submit tiny perfect PRs; merged PRs earn bonus tiles.",
-      maintainer: { github: entry.github, agent: entry.agent, status: entry.status },
-      rules: {
-        maxChangedLines: 40,
-        maxFiles: 3,
-        askHumanFirst: true,
-        allowlist: ["docs/**", "README.md", "AGENTS.md", "CONTRIBUTING.md", "MAINTAIN.md", "public/styles.css", "public/index.html", "public/mosaic.js", "public/radio.js", "public/logo.svg", ".github/workflows/**"],
-        denylist: ["wrangler.toml", "worker/**", "**/*secret*", "**/.env*"],
-        award: MAINTAIN_AWARD_DEFAULT,
+    return json(
+      {
+        ok: true,
+        status: "active",
+        message: "Ownership proven. You are a verified maintainer. Submit tiny perfect PRs; merged awardable PRs earn bonus tiles.",
+        maintainer: { github: entry.github, agent: entry.agent, status: entry.status },
+        rules: this.maintainRules(),
+        contribute: "https://github.com/baney75/grokplace",
       },
-      contribute: "https://github.com/baney75/grokplace",
-    }, 200, origin);
+      200,
+      origin
+    );
   }
 
   async handleMaintainList(origin) {
@@ -1597,11 +1742,7 @@ export class GrokPlaceCanvas {
           bonusTilesEarned: m.bonusTilesEarned || 0,
           html_url: m.profile?.html_url || `https://github.com/${m.github}`,
         })),
-      rules: {
-        maxChangedLines: 40,
-        maxFiles: 3,
-        awardTiles: MAINTAIN_AWARD_DEFAULT,
-      },
+      rules: this.maintainRules(),
     }, 200, origin, { "Cache-Control": "public, max-age=30" });
   }
 
@@ -1651,42 +1792,40 @@ export class GrokPlaceCanvas {
         files,
       }, 400, origin);
     }
-    // Path denylist double-check from CI payload
     const paths = Array.isArray(body.paths) ? body.paths.map(String) : [];
     if (!paths.length) {
       return json({ ok: false, error: "paths_required", message: "paths[] required for award audit." }, 400, origin);
     }
-    const denied = paths.some(
-      (p) =>
-        /(^|\/)wrangler\.toml$/i.test(p) ||
-        /(^|\/)worker\//i.test(p) ||
-        /secret/i.test(p) ||
-        /\.env/i.test(p) ||
-        /favicon-embed/i.test(p)
-    );
-    if (denied) {
-      return json({ ok: false, error: "sensitive_paths", message: "Sensitive paths not awardable." }, 400, origin);
+    // Strict allowlist (not just denylist) — no workflows, no executable JS/HTML
+    const notAllowed = paths.filter((p) => !this.pathAwardable(p));
+    if (notAllowed.length) {
+      return json({
+        ok: false,
+        error: "path_not_awardable",
+        message: "One or more paths are outside the award allowlist.",
+        notAllowed: notAllowed.slice(0, 10),
+      }, 400, origin);
     }
 
-    // Idempotency: same PR or merge SHA awards once
-    const prNumber = body.prNumber != null ? Number(body.prNumber) : null;
-    const sha = typeof body.sha === "string" ? body.sha.slice(0, 64) : "";
-    const awardKey =
-      prNumber && Number.isFinite(prNumber)
-        ? `award:pr:${prNumber}`
-        : sha
-          ? `award:sha:${sha}`
-          : null;
-    if (awardKey) {
-      const prior = await this.state.storage.get(awardKey);
-      if (prior) {
-        return json({
-          ok: true,
-          already: true,
-          message: "Already awarded for this PR.",
-          prior,
-        }, 200, origin);
-      }
+    // Idempotency required: PR number + merge SHA
+    const prNumber = body.prNumber != null ? Number(body.prNumber) : NaN;
+    const sha = typeof body.sha === "string" ? body.sha.trim().slice(0, 64) : "";
+    if (!Number.isFinite(prNumber) || prNumber < 1 || !/^[0-9a-f]{7,64}$/i.test(sha)) {
+      return json({
+        ok: false,
+        error: "pr_identity_required",
+        message: "prNumber and sha are required for award idempotency.",
+      }, 400, origin);
+    }
+    const awardKey = `award:pr:${prNumber}`;
+    const prior = await this.state.storage.get(awardKey);
+    if (prior) {
+      return json({
+        ok: true,
+        already: true,
+        message: "Already awarded for this PR.",
+        prior,
+      }, 200, origin);
     }
 
     const gkey = github.toLowerCase();
@@ -1696,39 +1835,40 @@ export class GrokPlaceCanvas {
       return json({ ok: false, error: "not_maintainer", message: "GitHub user is not a verified maintainer." }, 403, origin);
     }
     const m = maintainers[idx];
-    const amount = Math.min(25, Math.max(1, Number(body.amount) || MAINTAIN_AWARD_DEFAULT));
-    // Cap bank growth (anti-farm even if CI is compromised with valid secret + many PRs)
+    // Server-fixed amount — ignore client body.amount
+    const amount = MAINTAIN_AWARD_DEFAULT;
     const akey = m.agent.toLowerCase();
     let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(m.agent, Date.now());
     const bankBefore = agentStat.bonusTiles || 0;
-    if (bankBefore >= 200) {
+    if (bankBefore >= MAINTAIN_BANK_CAP) {
       return json({
         ok: false,
         error: "bank_cap",
-        message: "Bonus tile bank full (200). Spend tiles painting first.",
+        message: `Bonus tile bank full (${MAINTAIN_BANK_CAP}). Spend tiles painting first.`,
         bonusTilesBank: bankBefore,
       }, 429, origin);
     }
-    agentStat.bonusTiles = Math.min(200, bankBefore + amount);
+    agentStat.bonusTiles = Math.min(MAINTAIN_BANK_CAP, bankBefore + amount);
     agentStat.maintainer = true;
     agentStat.github = m.github;
     m.awards = (m.awards || 0) + 1;
     m.bonusTilesEarned = (m.bonusTilesEarned || 0) + amount;
     m.lastAwardAt = Date.now();
-    m.lastPr = prNumber || sha || null;
+    m.lastPr = prNumber;
     maintainers[idx] = m;
-    const put = { maintainers, [`agent:${akey}`]: agentStat };
-    if (awardKey) {
-      put[awardKey] = {
+    await this.state.storage.put({
+      maintainers,
+      [`agent:${akey}`]: agentStat,
+      [awardKey]: {
         agent: m.agent,
         github: m.github,
         awarded: amount,
         at: Date.now(),
         prNumber,
-        sha: sha || null,
-      };
-    }
-    await this.state.storage.put(put);
+        sha,
+        paths: paths.slice(0, 8),
+      },
+    });
 
     return json({
       ok: true,
