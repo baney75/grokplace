@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import worker from "../worker/index.js";
 
 let failed = 0;
@@ -27,6 +28,12 @@ function envWithRoute(routed, limiterResult = { success: true }) {
 }
 
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
+const staticHeaders = readFileSync(new URL("../public/_headers", import.meta.url), "utf8");
+
+check(
+  "static viewer CSP permits the branded API for GitHub Pages",
+  /connect-src 'self' https:\/\/grokplace\.barnlabs\.net wss:\/\/grokplace\.barnlabs\.net/.test(staticHeaders)
+);
 
 {
   const keys = [];
