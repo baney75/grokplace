@@ -1,6 +1,6 @@
 /**
- * Viewer-only full-screen mosaic.
- * No place/vote/music forms — agents drive the API.
+ * Viewer-only full-screen mosaic (desktop + mobile).
+ * Pan / pinch-zoom. No place/vote UI — agents drive the API.
  */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
@@ -17,6 +17,13 @@
   let scale = 1;
   let panX = 0;
   let panY = 0;
+
+  /** Active pointers for pan + pinch */
+  const pointers = new Map();
+  let dragging = false;
+  let last = null;
+  let pinchStartDist = 0;
+  let pinchStartScale = 1;
 
   function decodeBoard(b64) {
     const bin = atob(b64);
@@ -66,14 +73,36 @@
     boardEl.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px))`;
   }
 
-  function fitCover() {
+  function viewportSize() {
+    const vv = window.visualViewport;
+    if (vv && vv.width > 0 && vv.height > 0) {
+      return { w: vv.width, h: vv.height };
+    }
     const rect = wrap.getBoundingClientRect();
-    const w = Math.max(1, rect.width);
-    const h = Math.max(1, rect.height);
-    scale = Math.max(2, Math.ceil(Math.max(w, h) / size));
+    return {
+      w: Math.max(1, rect.width || window.innerWidth || 1),
+      h: Math.max(1, rect.height || window.innerHeight || 1),
+    };
+  }
+
+  function fitCover() {
+    const { w, h } = viewportSize();
+    // Cover both axes so the mosaic fills phones in portrait and landscape
+    const cover = Math.max(w / size, h / size);
+    scale = Math.max(2, Math.ceil(cover));
     panX = 0;
     panY = 0;
     applyTransform();
+  }
+
+  function clampScale(s) {
+    return Math.min(96, Math.max(2, s));
+  }
+
+  function pointerDistance() {
+    const pts = [...pointers.values()];
+    if (pts.length < 2) return 0;
+    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
   }
 
   async function fetchCanvas() {
@@ -112,36 +141,104 @@
     }
   }
 
-  // Optional pan/zoom for looking around (view only — no place)
-  let dragging = false;
-  let last = null;
-  wrap.addEventListener("pointerdown", (ev) => {
-    dragging = true;
-    last = { x: ev.clientX, y: ev.clientY };
-    wrap.setPointerCapture(ev.pointerId);
+  wrap.addEventListener(
+    "pointerdown",
+    (ev) => {
+      // Don't steal events from the logo link
+      if (ev.target && ev.target.closest && ev.target.closest(".brand-logo")) return;
+      pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      try {
+        wrap.setPointerCapture(ev.pointerId);
+      } catch {
+        /* ignore */
+      }
+      if (pointers.size === 1) {
+        dragging = true;
+        last = { x: ev.clientX, y: ev.clientY };
+      } else if (pointers.size >= 2) {
+        dragging = false;
+        pinchStartDist = pointerDistance() || 1;
+        pinchStartScale = scale;
+      }
+    },
+    { passive: true }
+  );
+
+  wrap.addEventListener(
+    "pointermove",
+    (ev) => {
+      if (!pointers.has(ev.pointerId)) return;
+      pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+
+      if (pointers.size >= 2) {
+        const dist = pointerDistance();
+        if (pinchStartDist > 0 && dist > 0) {
+          scale = clampScale(pinchStartScale * (dist / pinchStartDist));
+          applyTransform();
+        }
+        return;
+      }
+
+      if (!dragging || !last) return;
+      panX += ev.clientX - last.x;
+      panY += ev.clientY - last.y;
+      last = { x: ev.clientX, y: ev.clientY };
+      applyTransform();
+    },
+    { passive: true }
+  );
+
+  function endPointer(ev) {
+    pointers.delete(ev.pointerId);
+    if (pointers.size < 2) {
+      pinchStartDist = 0;
+    }
+    if (pointers.size === 0) {
+      dragging = false;
+      last = null;
+    } else if (pointers.size === 1) {
+      // Resume pan with remaining finger
+      const p = [...pointers.values()][0];
+      dragging = true;
+      last = { x: p.x, y: p.y };
+    }
+  }
+
+  wrap.addEventListener("pointerup", endPointer);
+  wrap.addEventListener("pointercancel", endPointer);
+  wrap.addEventListener("pointerleave", (ev) => {
+    if (ev.pointerType === "mouse") endPointer(ev);
   });
-  wrap.addEventListener("pointermove", (ev) => {
-    if (!dragging || !last) return;
-    panX += ev.clientX - last.x;
-    panY += ev.clientY - last.y;
-    last = { x: ev.clientX, y: ev.clientY };
-    applyTransform();
-  });
-  wrap.addEventListener("pointerup", () => {
-    dragging = false;
-    last = null;
-  });
+
+  // Desktop wheel zoom
   wrap.addEventListener(
     "wheel",
     (ev) => {
       ev.preventDefault();
-      scale = Math.min(64, Math.max(2, scale * (ev.deltaY > 0 ? 0.9 : 1.1)));
+      scale = clampScale(scale * (ev.deltaY > 0 ? 0.9 : 1.1));
       applyTransform();
     },
     { passive: false }
   );
 
+  // Block page scroll / iOS rubber-band while interacting with mosaic
+  wrap.addEventListener(
+    "touchmove",
+    (ev) => {
+      ev.preventDefault();
+    },
+    { passive: false }
+  );
+
+  // Refit when phone chrome shows/hides or orientation changes
   window.addEventListener("resize", fitCover);
+  window.addEventListener("orientationchange", () => {
+    setTimeout(fitCover, 120);
+  });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", fitCover);
+  }
+
   fitCover();
   fetchCanvas().catch(() => {});
   setInterval(() => {

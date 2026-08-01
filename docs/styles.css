@@ -79,7 +79,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border: 0;
 }
 
-/* MOSAIC ONLY — humans watch; no control chrome */
+/* MOSAIC ONLY — humans watch; no control chrome · mobile-first full bleed */
 html.placemat-html,
 body.placemat,
 body.mosaic-only {
@@ -89,21 +89,32 @@ body.mosaic-only {
   height: 100%;
   margin: 0;
   padding: 0;
+  /* Lock page scroll / rubber-band on iOS */
+  position: fixed;
+  inset: 0;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
 }
 body.mosaic-only .mosaic-app {
   max-width: none !important;
   margin: 0 !important;
   padding: 0 !important;
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   height: 100dvh;
+  height: -webkit-fill-available;
+  position: relative;
 }
 body.mosaic-only .canvas-wrap {
   position: fixed !important;
   inset: 0 !important;
-  width: 100vw !important;
-  height: 100vh !important;
+  /* Prefer % + dvh over 100vw (avoids mobile scrollbar/gutter issues) */
+  width: 100% !important;
+  height: 100% !important;
   height: 100dvh !important;
+  height: -webkit-fill-available !important;
   aspect-ratio: auto !important;
   border: none !important;
   border-radius: 0 !important;
@@ -116,6 +127,13 @@ body.mosaic-only .canvas-wrap {
   background-position: 0 0, 0 8px, 8px -8px, -8px 0;
   background-color: #05070a;
   cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+body.mosaic-only .canvas-wrap:active {
+  cursor: grabbing;
 }
 body.mosaic-only #board {
   position: absolute;
@@ -125,6 +143,11 @@ body.mosaic-only #board {
   image-rendering: pixelated;
   image-rendering: crisp-edges;
   background: transparent;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  /* GPU layer for smoother pan on mobile */
+  will-change: transform;
 }
 /* Full embed size off-viewport (1×1 breaks Spotify/YT autoplay in some browsers) */
 body.mosaic-only .player-hosts {
@@ -144,36 +167,71 @@ body.mosaic-only #yt-player-inner {
   height: 160px;
 }
 
-/* Brand mark — upper left, transparent logo over mosaic (no chrome / no edit UI) */
+/* Brand mark — upper left, transparent logo; notch-safe on phones */
 .brand-logo {
   position: fixed;
-  top: max(0.75rem, env(safe-area-inset-top));
-  left: max(0.75rem, env(safe-area-inset-left));
+  top: max(0.65rem, calc(env(safe-area-inset-top, 0px) + 0.4rem));
+  left: max(0.65rem, calc(env(safe-area-inset-left, 0px) + 0.4rem));
   z-index: 80;
   display: block;
   line-height: 0;
   background: transparent !important;
   border: none;
-  padding: 0;
+  padding: 0.15rem;
   margin: 0;
   text-decoration: none;
   pointer-events: auto;
-  opacity: 0.92;
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+  opacity: 0.94;
+  /* Readable over light tiles without a solid chrome bar */
+  filter:
+    drop-shadow(0 1px 2px rgba(0, 0, 0, 0.75))
+    drop-shadow(0 0 10px rgba(0, 0, 0, 0.35));
   transition: opacity 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
 }
-.brand-logo:hover {
+.brand-logo:hover,
+.brand-logo:focus-visible {
   opacity: 1;
+  outline: none;
 }
 .brand-logo img {
   display: block;
-  width: min(160px, 42vw);
+  width: min(168px, 40vw);
   height: auto;
+  max-height: 40px;
   background: transparent !important;
   border: 0;
   pointer-events: none;
   user-select: none;
   -webkit-user-drag: none;
+}
+
+/* Phones — slightly smaller logo, stronger contrast, bigger safe padding */
+@media (max-width: 480px) {
+  .brand-logo {
+    top: max(0.5rem, calc(env(safe-area-inset-top, 0px) + 0.35rem));
+    left: max(0.5rem, calc(env(safe-area-inset-left, 0px) + 0.3rem));
+    filter:
+      drop-shadow(0 1px 3px rgba(0, 0, 0, 0.85))
+      drop-shadow(0 0 14px rgba(0, 0, 0, 0.45));
+  }
+  .brand-logo img {
+    width: min(128px, 48vw);
+    max-height: 34px;
+  }
+}
+/* Very small / landscape phones */
+@media (max-width: 380px), (max-height: 420px) {
+  .brand-logo img {
+    width: min(108px, 44vw);
+    max-height: 28px;
+  }
+}
+@media (hover: none) and (pointer: coarse) {
+  .brand-logo {
+    /* Avoid hover-sticky opacity on touch devices */
+    opacity: 0.96;
+  }
 }
 
 /* Kill any leftover edit / control chrome if old CSS paths load */
@@ -795,3 +853,4 @@ button.vote.report {
   margin-top: 1.1rem; color: var(--muted); font-size: 0.85rem;
 }
 /* 20260801020137 */
+/* mobile-v2 1785552070 */
