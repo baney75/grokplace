@@ -495,7 +495,9 @@ function clientIp(request) {
 async function edgeRateLimit(env, bindingName, request, bucket) {
   const limiter = env?.[bindingName];
   if (!limiter || typeof limiter.limit !== "function") return { ok: true, configured: false };
-  const key = `${clientIp(request)}:${bucket}`;
+  // Rate Limit binding keys are capped at 64 bytes. Hash both dimensions so
+  // long IPv6 addresses and challenge scopes cannot fail open or fail closed.
+  const key = (await sha256Hex(`${clientIp(request)}:${bucket}`)).slice(0, 32);
   try {
     const result = await limiter.limit({ key });
     return { ok: result?.success !== false, configured: true };
@@ -595,7 +597,7 @@ function wantsBrowserMosaic(request) {
   return true;
 }
 
-function plainText(body, origin, status = 200) {
+function plainText(body, origin, status = 200, extraHeaders = {}) {
   return new Response(body.endsWith("\n") ? body : body + "\n", {
     status,
     headers: {
@@ -603,6 +605,7 @@ function plainText(body, origin, status = 200) {
       "Cache-Control": "public, max-age=2",
       ...securityHeaders(),
       ...corsHeaders(origin),
+      ...extraHeaders,
     },
   });
 }
@@ -648,7 +651,7 @@ async function agentBootstrap(env, request, origin) {
       },
       200,
       origin,
-      { "Cache-Control": "public, max-age=2" }
+      { "Cache-Control": "no-store", "Vary": "Origin, Accept, User-Agent" }
     );
   }
 
@@ -661,7 +664,7 @@ async function agentBootstrap(env, request, origin) {
     "",
     "Next: claim an identity, then GET /v1/challenge?scope=place → authenticated POST /v1/place. Humans cannot help with controls.",
   ].join("\n");
-  return plainText(text, origin);
+  return plainText(text, origin, 200, { "Cache-Control": "no-store", "Vary": "Origin, Accept, User-Agent" });
 }
 
 function requestContracts(cooldownSec) {
@@ -3510,10 +3513,12 @@ export default {
             ? "EDGE_READ_LIMITER"
             : "EDGE_WRITE_LIMITER";
       const policy = live ? "6/60s per client" : challenge ? "90/60s per client/scope" : method === "GET" ? "30/60s per client/route" : "20/60s per client/route";
+      const requestedScope = url.searchParams.get("scope") || "missing";
+      const challengeBucketScope = challenge && POW_SCOPES.includes(requestedScope) ? requestedScope : challenge ? "invalid" : "";
       const bucket = live
         ? "live"
         : challenge
-          ? `${method}:${path}:${url.searchParams.get("scope") || "missing"}`
+          ? `${method}:${path}:${challengeBucketScope}`
           : `${method}:${path}`;
       const limited = await edgeRateLimit(env, bindingName, request, bucket);
       if (!limited.ok) return edgeRateLimitResponse(origin, policy, limited.unavailable);

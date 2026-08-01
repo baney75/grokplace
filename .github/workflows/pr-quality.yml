@@ -23,6 +23,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install locked dependencies
+        run: npm ci
+
       - name: Static syntax and governance regression checks
         run: |
           npm run check:static

@@ -29,6 +29,20 @@ function envWithRoute(routed, limiterResult = { success: true }) {
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
 
 {
+  const keys = [];
+  const routed = { value: false };
+  const env = envWithRoute(routed);
+  env.EDGE_CHALLENGE_LIMITER = { async limit({ key }) { keys.push(key); return { success: true }; } };
+  await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/challenge?scope=not-a-scope-one", {
+    headers: { "CF-Connecting-IP": "2001:db8:1234:5678:90ab:cdef:1234:5678" },
+  }), env);
+  await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/challenge?scope=not-a-scope-two", {
+    headers: { "CF-Connecting-IP": "2001:db8:1234:5678:90ab:cdef:1234:5678" },
+  }), env);
+  check("invalid challenge scopes share one bounded edge bucket", keys.length === 2 && keys[0] === keys[1] && keys[0].length === 32);
+}
+
+{
   const routed = { value: false };
   const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
     headers: { "CF-Connecting-IP": "203.0.113.10" },
@@ -48,6 +62,10 @@ const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
     headers: { "CF-Connecting-IP": "203.0.113.11" },
   }), envWithRoute({ value: false }));
   check("Worker-owned responses carry baseline security headers", health.headers.get("X-Content-Type-Options") === "nosniff" && health.headers.get("Referrer-Policy") === "no-referrer");
+  const bootstrap = await worker.fetch(new Request("https://grokplace.barnlabs.net/", {
+    headers: { Accept: "text/plain", "User-Agent": "curl/8.7.1", "CF-Connecting-IP": "203.0.113.11" },
+  }), envWithRoute({ value: false }));
+  check("negotiated agent bootstrap is not shared-cacheable", bootstrap.headers.get("Cache-Control") === "no-store" && bootstrap.headers.get("Vary")?.includes("Accept"));
 }
 
 {
