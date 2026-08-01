@@ -217,56 +217,58 @@
     }
   }
 
-  const muteBtn = document.getElementById("mute-btn");
+  const soundBtn = document.getElementById("sound-btn");
 
-  function syncMuteUi() {
-    if (!muteBtn) return;
-    const icon = muteBtn.querySelector(".mute-icon");
-    const label = muteBtn.querySelector(".mute-label");
-    muteBtn.setAttribute("aria-pressed", muted ? "true" : "false");
-    muteBtn.setAttribute("aria-label", muted ? "Unmute" : "Mute");
-    muteBtn.classList.toggle("is-unmuted", !muted);
-    if (icon) icon.textContent = muted ? "🔇" : "🔊";
-    if (label) label.textContent = muted ? "Muted" : "Sound";
+  function syncSoundUi() {
+    if (!soundBtn) return;
+    const icon = soundBtn.querySelector(".sound-icon");
+    const label = soundBtn.querySelector(".sound-label");
+    soundBtn.classList.toggle("needs-enable", muted);
+    soundBtn.classList.toggle("is-on", !muted);
+    soundBtn.setAttribute("aria-pressed", muted ? "false" : "true");
+    if (muted) {
+      soundBtn.setAttribute("aria-label", "Enable sound");
+      soundBtn.title = "Enable sound";
+      if (icon) icon.textContent = "🔊";
+      if (label) label.textContent = "Enable sound";
+    } else {
+      soundBtn.setAttribute("aria-label", "Mute sound");
+      soundBtn.title = "Mute sound";
+      if (icon) icon.textContent = "🔊";
+      if (label) label.textContent = "Sound on";
+    }
   }
 
   function setMuted(next) {
     muted = Boolean(next);
     applyAudio();
     if (!muted && nowTrack) renderNow(nowTrack);
-    syncMuteUi();
+    syncSoundUi();
     return muted;
   }
 
-  function unlockAudio() {
-    if (!muted) return;
+  function enableSound() {
+    // User gesture → unlock autoplay + unmute
     setMuted(false);
   }
 
-  // Explicit mute button (always visible)
-  if (muteBtn) {
-    muteBtn.addEventListener("click", (ev) => {
+  // Primary control: Enable sound (then toggles mute)
+  if (soundBtn) {
+    soundBtn.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      setMuted(!muted);
+      if (muted) enableSound();
+      else setMuted(true);
     });
-    syncMuteUi();
+    syncSoundUi();
   }
-
-  // First canvas pan/tap can unmute for autoplay policy (button still works either way)
-  document.getElementById("canvas-wrap")?.addEventListener(
-    "pointerdown",
-    () => {
-      /* gesture only — do not force unmute; user controls via mute button */
-    },
-    { once: true }
-  );
 
   window.grokplaceToggleMute = () => setMuted(!muted);
   window.grokplaceSetMuted = setMuted;
+  window.grokplaceEnableSound = enableSound;
 
   loadYtApi();
   fetchMusic();
   setInterval(fetchMusic, 4000);
-  syncMuteUi();
+  syncSoundUi();
 })();

@@ -499,9 +499,9 @@ function mosaicHtml() {
     <a class="brand-logo" href="#view" id="brand-logo" aria-label="grok/place — tap to reset view" title="Tap to reset view">
       <img src="/logo.svg" width="148" height="30" alt="grok/place" draggable="false" decoding="async" />
     </a>
-    <button type="button" class="mute-btn" id="mute-btn" aria-label="Unmute" title="Mute / unmute" aria-pressed="true">
-      <span class="mute-icon" aria-hidden="true">🔇</span>
-      <span class="mute-label">Muted</span>
+    <button type="button" class="sound-btn needs-enable" id="sound-btn" aria-label="Enable sound" title="Enable sound" aria-pressed="false">
+      <span class="sound-icon" aria-hidden="true">🔊</span>
+      <span class="sound-label">Enable sound</span>
     </button>
   </div>
   <div class="app mosaic-app">

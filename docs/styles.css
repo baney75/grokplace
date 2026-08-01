@@ -162,57 +162,74 @@ body.mosaic-only #yt-player-inner {
   -webkit-user-drag: none;
 }
 
-.mute-btn {
+/* Enable sound — primary when muted; quieter when sound is on */
+.sound-btn {
   pointer-events: auto !important;
   display: inline-flex !important;
   visibility: visible !important;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.45rem;
   margin: 0;
   margin-left: auto;
-  padding: 0.55rem 0.9rem;
+  padding: 0.6rem 1rem;
   border-radius: 999px;
-  border: 1px solid var(--glass-border);
-  background: var(--glass) !important;
+  border: 1px solid rgba(45, 212, 191, 0.55);
+  background: linear-gradient(135deg, rgba(20, 184, 166, 0.95), rgba(14, 165, 233, 0.9)) !important;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  color: var(--text) !important;
+  box-shadow:
+    0 8px 28px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+  color: #041016 !important;
   font: inherit;
-  font-size: 0.88rem;
-  font-weight: 600;
+  font-size: 0.9rem;
+  font-weight: 700;
   letter-spacing: 0.01em;
   cursor: pointer;
-  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
   -webkit-tap-highlight-color: transparent;
 }
 
-.mute-btn:hover,
-.mute-btn:focus-visible {
-  border-color: rgba(45, 212, 191, 0.45);
-  background: rgba(16, 22, 32, 0.88) !important;
+.sound-btn:hover,
+.sound-btn:focus-visible {
   outline: none;
   transform: translateY(-1px);
+  box-shadow:
+    0 10px 32px rgba(0, 0, 0, 0.45),
+    0 0 20px rgba(45, 212, 191, 0.25);
 }
 
-.mute-btn:active {
+.sound-btn:active {
   transform: translateY(0);
 }
 
-.mute-btn .mute-icon {
+.sound-btn .sound-icon {
   font-size: 1.05rem;
   line-height: 1;
 }
 
-.mute-btn .mute-label {
+.sound-btn .sound-label {
   line-height: 1;
+  white-space: nowrap;
 }
 
-.mute-btn.is-unmuted {
-  border-color: rgba(45, 212, 191, 0.35);
+/* After sound is on — secondary mute control */
+.sound-btn.is-on {
+  border: 1px solid var(--glass-border);
+  background: var(--glass) !important;
+  color: var(--text) !important;
+  font-weight: 600;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
 }
 
-.mute-btn.is-unmuted .mute-label {
+.sound-btn.is-on:hover,
+.sound-btn.is-on:focus-visible {
+  border-color: rgba(45, 212, 191, 0.45);
+  background: rgba(16, 22, 32, 0.88) !important;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.sound-btn.is-on .sound-label {
   color: var(--accent);
 }
 
@@ -229,21 +246,18 @@ body.mosaic-only #yt-player-inner {
     width: min(118px, 40vw);
     max-height: 26px;
   }
-  .mute-btn {
-    padding: 0.5rem 0.75rem;
-    font-size: 0.82rem;
-  }
-  .mute-btn .mute-label {
-    /* keep label on mobile — user asked for a mute button */
+  .sound-btn {
+    padding: 0.55rem 0.85rem;
+    font-size: 0.84rem;
   }
 }
 
 @media (max-width: 360px) {
-  .mute-btn .mute-label {
-    display: none;
+  .sound-btn .sound-label {
+    /* keep “Enable sound” readable — slightly shorter ok */
   }
-  .mute-btn {
-    padding: 0.55rem 0.65rem;
+  .sound-btn {
+    padding: 0.55rem 0.75rem;
   }
 }
 
