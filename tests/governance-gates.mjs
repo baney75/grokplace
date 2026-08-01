@@ -65,7 +65,7 @@ check("PR quality runs reviewer-identity regressions", /npm run test:review-iden
 check("PR quality runs realtime regressions after reviewer identity", qualityWorkflow.indexOf("npm run test:review-identity") < qualityWorkflow.indexOf("npm run test:realtime"));
 check("secret-path guard permits deletion of a forbidden legacy file", /git diff --name-status/.test(qualityWorkflow) && /\$1 !~ \/\^D\//.test(qualityWorkflow) && /files-present-after-pr\.txt/.test(qualityWorkflow));
 check("trusted PR workflow runs the path-aware secret diff scanner", /git diff[^\n]+\| node scripts\/credential-diff-scan\.mjs/.test(qualityWorkflow));
-check("trusted merge workflow coalesces stale runs", /group:\s*trusted-pr-merge-\$\{\{ github\.repository \}\}/.test(mergeWorkflow) && /cancel-in-progress:\s*true/.test(mergeWorkflow));
+check("trusted merge workflow coalesces stale runs per PR", /group:\s*trusted-pr-merge-\$\{\{ github\.repository \}\}-\$\{\{ github\.event\.workflow_run\.pull_requests\[0\]\.number \|\| inputs\.pr \|\| 'reconcile' \}\}/.test(mergeWorkflow) && /cancel-in-progress:\s*true/.test(mergeWorkflow));
 check("merge refuses a bank that cannot accept the full award", /\.bank\.bonusTiles >= 0 and \.bank\.bonusTiles <= 190/.test(mergeWorkflow));
 check("trusted workflow resolves the immutable review artifact", /\/v1\/reviews/.test(mergeWorkflow) && /review-artifact-check\.mjs/.test(mergeWorkflow));
 check("owner-authored PRs always enter product lane before path classification", /if \[ "\$AUTHOR" = "baney75" \]; then\s+LANE=product\s+elif jq -r '\.\[\]\.filename' \/tmp\/files\.json \| node scripts\/maintain-path-check\.mjs[\s\S]*then\s+LANE=maintain/.test(mergeWorkflow));

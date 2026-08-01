@@ -24,8 +24,8 @@ on:
 permissions: {}
 
 concurrency:
-  group: trusted-pr-merge-${{ github.repository }}
-  # Multiple edited/ready events for one head must collapse to one API reader.
+  group: trusted-pr-merge-${{ github.repository }}-${{ github.event.workflow_run.pull_requests[0].number || inputs.pr || 'reconcile' }}
+  # Multiple events for one PR collapse, but separate PRs never cancel each other.
   cancel-in-progress: true
 
 jobs:
