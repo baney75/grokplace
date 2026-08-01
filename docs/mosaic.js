@@ -32,7 +32,27 @@
   let canvasRequest = null;
   let feedRequest = null;
   let pollingStopped = false;
+  let pollingPaused = Boolean(document.hidden);
+  let liveSocket = null;
+  let liveRetryTimer = 0;
+  let liveConnected = false;
+  let liveFailures = 0;
+  let canvasFailures = 0;
+  let feedFailures = 0;
+  let canvasReadThisVisibility = false;
+  let feedReadThisVisibility = false;
+  let canvasRefreshQueued = false;
+  let feedRefreshQueued = false;
   const VIEW_KEY = "grokplace-view-v1";
+  // Disconnected viewers retain this critic-reviewed 12/min fallback budget.
+  const CANVAS_POLL_MS = 12_000;
+  const FEED_POLL_MS = 30_000;
+  const POLL_BACKOFF_MAX_MS = 60_000;
+  const LIVE_CANVAS_RECONCILE_MS = 60_000;
+  const LIVE_FEED_RECONCILE_MS = 120_000;
+  const LIVE_RETRY_BASE_MS = 1_000;
+  const LIVE_RETRY_MAX_MS = 30_000;
+  const LIVE_MESSAGE_MAX_CHARS = 96;
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
   const VOID = { r: 10, g: 12, b: 16 };
@@ -318,58 +338,266 @@
       if (!hasFitted || sizeChanged) fitContain(true);
       else applyTransform();
     }
+    canvasReadThisVisibility = true;
   }
 
   async function fetchFeed(signal) {
     const res = await fetch(`${API}/v1/feed`, { cache: "no-store", signal });
-    if (!res.ok) return;
+    if (!res.ok) throw new Error(`feed ${res.status}`);
     const data = await res.json();
-    if (data.ok && Array.isArray(data.feed)) pushTicker(data.feed);
+    if (data.ok && Array.isArray(data.feed)) {
+      pushTicker(data.feed);
+      feedReadThisVisibility = true;
+    }
+  }
+
+  function liveUrl() {
+    const url = new URL(API);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/v1/live`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  }
+
+  function isLiveActive() {
+    return isPollingActive() && typeof window.WebSocket === "function";
+  }
+
+  function dispatchLive(detail) {
+    if (typeof window.CustomEvent !== "function" || typeof window.dispatchEvent !== "function") return;
+    window.dispatchEvent(new window.CustomEvent("grokplace:live", { detail }));
+  }
+
+  function parseLiveMessage(value) {
+    if (typeof value !== "string" || value.length > LIVE_MESSAGE_MAX_CHARS) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const keys = Object.keys(parsed);
+    if (keys.length !== 2 || !keys.includes("t") || !keys.includes("v")) return null;
+    if (!new Set(["ready", "canvas", "activity", "music"]).has(parsed.t)) return null;
+    if (!Number.isSafeInteger(parsed.v) || parsed.v < 0 || parsed.v > 2_147_483_647) return null;
+    return { t: parsed.t, v: parsed.v };
+  }
+
+  function liveCanvasInterval() {
+    return liveConnected ? LIVE_CANVAS_RECONCILE_MS : CANVAS_POLL_MS;
+  }
+
+  function liveFeedInterval() {
+    return liveConnected ? LIVE_FEED_RECONCILE_MS : FEED_POLL_MS;
+  }
+
+  function liveRetryDelay() {
+    const base = Math.min(LIVE_RETRY_MAX_MS, LIVE_RETRY_BASE_MS * (2 ** Math.min(Math.max(0, liveFailures - 1), 5)));
+    return Math.round(base * (0.8 + Math.random() * 0.4));
+  }
+
+  function scheduleLiveReconnect() {
+    if (!isLiveActive() || liveSocket || liveRetryTimer) return;
+    liveRetryTimer = setTimeout(() => {
+      liveRetryTimer = 0;
+      ensureLiveSocket();
+    }, liveRetryDelay());
+  }
+
+  function restoreFallbackPolling() {
+    if (!isPollingActive()) return;
+    if (canvasRequest) canvasRefreshQueued = true;
+    else scheduleCanvasPoll(0);
+    if (feedRequest) feedRefreshQueued = true;
+    else scheduleFeedPoll(0);
+  }
+
+  function disconnectLiveSocket(socket, reconnect) {
+    if (socket && socket !== liveSocket) return;
+    const wasConnected = liveConnected;
+    liveSocket = null;
+    liveConnected = false;
+    if (wasConnected) {
+      dispatchLive({ t: "disconnected" });
+      restoreFallbackPolling();
+    }
+    if (reconnect && isLiveActive()) {
+      liveFailures = Math.min(liveFailures + 1, 32);
+      scheduleLiveReconnect();
+    }
+  }
+
+  function closeLiveSocket() {
+    clearTimeout(liveRetryTimer);
+    liveRetryTimer = 0;
+    const socket = liveSocket;
+    disconnectLiveSocket(socket, false);
+    try { socket?.close(1000, "hidden"); } catch { /* socket already closed */ }
+  }
+
+  function handleLiveMessage(socket, value) {
+    if (socket !== liveSocket) return;
+    const event = parseLiveMessage(value);
+    if (!event) return;
+    dispatchLive(event);
+    if (event.t === "ready") {
+      const resources = [];
+      if (!canvasReadThisVisibility && !canvasRequest) resources.push("canvas");
+      if (!feedReadThisVisibility && !feedRequest) resources.push("activity");
+      if (resources.length) refreshPollingNow(resources);
+    }
+    else if (event.t === "canvas") refreshPollingNow(["canvas"]);
+    else if (event.t === "activity") refreshPollingNow(["activity"]);
+  }
+
+  function ensureLiveSocket() {
+    if (!isLiveActive() || liveSocket || liveRetryTimer) return;
+    let socket;
+    try {
+      socket = new window.WebSocket(liveUrl());
+    } catch {
+      liveFailures = Math.min(liveFailures + 1, 32);
+      scheduleLiveReconnect();
+      return;
+    }
+    liveSocket = socket;
+    socket.onopen = () => {
+      if (socket !== liveSocket) return;
+      liveConnected = true;
+      liveFailures = 0;
+      dispatchLive({ t: "connected" });
+    };
+    socket.onmessage = (event) => handleLiveMessage(socket, event?.data);
+    socket.onerror = () => {
+      if (socket !== liveSocket) return;
+      try { socket.close(); } catch { /* close is best effort */ }
+      disconnectLiveSocket(socket, true);
+    };
+    socket.onclose = () => disconnectLiveSocket(socket, true);
+  }
+
+  function isPollingActive() {
+    return !pollingStopped && !pollingPaused && !document.hidden;
+  }
+
+  function backoffDelay(base, failures) {
+    return Math.min(Math.max(POLL_BACKOFF_MAX_MS, base), base * (2 ** Math.min(failures, 3)));
+  }
+
+  function scheduleCanvasPoll(delay) {
+    if (!isPollingActive()) return;
+    clearTimeout(canvasTimer);
+    canvasTimer = setTimeout(() => {
+      canvasTimer = 0;
+      void pollCanvas();
+    }, delay);
+  }
+
+  function scheduleFeedPoll(delay) {
+    if (!isPollingActive()) return;
+    clearTimeout(feedTimer);
+    feedTimer = setTimeout(() => {
+      feedTimer = 0;
+      void pollFeed();
+    }, delay);
   }
 
   async function pollCanvas() {
-    if (pollingStopped || canvasRequest) return;
+    if (!isPollingActive()) return;
+    if (canvasRequest) {
+      canvasRefreshQueued = true;
+      return;
+    }
     const controller = new AbortController();
     canvasRequest = controller;
     try {
       await fetchCanvas(controller.signal);
+      canvasFailures = 0;
       if (document.title.includes("reconnecting")) document.title = "grok/place · live mosaic";
     } catch (error) {
-      if (error?.name !== "AbortError") document.title = "grok/place · reconnecting…";
+      if (error?.name !== "AbortError") {
+        canvasFailures++;
+        document.title = "grok/place · reconnecting…";
+      }
     } finally {
       if (canvasRequest === controller) canvasRequest = null;
-      if (!pollingStopped) canvasTimer = setTimeout(pollCanvas, 1400);
+      if (isPollingActive()) {
+        const delay = canvasRefreshQueued ? 0 : backoffDelay(liveCanvasInterval(), canvasFailures);
+        canvasRefreshQueued = false;
+        scheduleCanvasPoll(delay);
+      }
     }
   }
 
   async function pollFeed() {
-    if (pollingStopped || feedRequest) return;
+    if (!isPollingActive()) return;
+    if (feedRequest) {
+      feedRefreshQueued = true;
+      return;
+    }
     const controller = new AbortController();
     feedRequest = controller;
     try {
       await fetchFeed(controller.signal);
-    } catch {
-      /* Feed failure must not affect the canvas. */
+      feedFailures = 0;
+    } catch (error) {
+      if (error?.name !== "AbortError") feedFailures++;
     } finally {
       if (feedRequest === controller) feedRequest = null;
-      if (!pollingStopped) feedTimer = setTimeout(pollFeed, 3500);
+      if (isPollingActive()) {
+        const delay = feedRefreshQueued ? 0 : backoffDelay(liveFeedInterval(), feedFailures);
+        feedRefreshQueued = false;
+        scheduleFeedPoll(delay);
+      }
+    }
+  }
+
+  function refreshPollingNow(resources = ["canvas", "activity"]) {
+    if (!isPollingActive()) return;
+    if (resources.includes("canvas")) {
+      if (canvasRequest) canvasRefreshQueued = true;
+      else scheduleCanvasPoll(0);
+    }
+    if (resources.includes("activity")) {
+      if (feedRequest) feedRefreshQueued = true;
+      else scheduleFeedPoll(0);
     }
   }
 
   function startPolling() {
     pollingStopped = false;
-    if (!canvasRequest && !canvasTimer) pollCanvas();
-    if (!feedRequest && !feedTimer) pollFeed();
+    pollingPaused = Boolean(document.hidden);
+    refreshPollingNow();
+    ensureLiveSocket();
   }
 
-  function stopPolling() {
-    pollingStopped = true;
+  function pausePolling() {
+    pollingPaused = true;
+    canvasRefreshQueued = false;
+    feedRefreshQueued = false;
+    canvasReadThisVisibility = false;
+    feedReadThisVisibility = false;
     clearTimeout(canvasTimer);
     clearTimeout(feedTimer);
     canvasTimer = 0;
     feedTimer = 0;
     canvasRequest?.abort();
     feedRequest?.abort();
+    closeLiveSocket();
+  }
+
+  function resumePolling() {
+    if (pollingStopped || document.hidden || !pollingPaused) return;
+    pollingPaused = false;
+    refreshPollingNow();
+    ensureLiveSocket();
+  }
+
+  function stopPolling() {
+    pollingStopped = true;
+    pausePolling();
   }
 
   // --- Gestures ---
@@ -552,7 +780,16 @@
 
   // Invite agent — Web Share first, then clipboard, then a readable fallback.
   shareBtn?.addEventListener("click", async () => {
-    const text = `${API} — give your agent a short goal and let it paint (instructions: ${API}/llms.txt)`;
+    const text = [
+      "You are the receiving agent for grok/place.",
+      "Goal: [what to draw]",
+      "",
+      `1. Read ${API}/llms.txt.`,
+      "2. Claim your agent name.",
+      "3. Inspect the live board.",
+      "4. Preserve coherent art; place up to 5 empty tiles.",
+      "5. If the goal is blank, ask the human what to draw.",
+    ].join("\n");
     let label = "";
     try {
       if (navigator.share) {
@@ -613,6 +850,14 @@
   });
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) startPolling();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) pausePolling();
+    else resumePolling();
+  });
+  window.addEventListener("focus", () => {
+    resumePolling();
+    ensureLiveSocket();
   });
 
   window.grokplaceFitView = () => {
