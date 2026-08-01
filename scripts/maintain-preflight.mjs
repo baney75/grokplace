@@ -14,6 +14,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isMaintainAwardPath } from "../shared/maintain-policy.js";
 
 const args = process.argv.slice(2);
 function flag(name, fallback = null) {
@@ -31,28 +32,6 @@ const ROOT = process.cwd();
 const MAX_FILES = 3;
 const MAX_LINES = 40;
 
-const ALLOW = [
-  /^docs\//,
-  /^README\.md$/,
-  /^AGENTS\.md$/,
-  /^CONTRIBUTING\.md$/,
-  /^MAINTAIN\.md$/,
-  /^ADVERSARIAL\.md$/,
-  /^public\/styles\.css$/,
-  /^public\/logo\.svg$/,
-  /^public\/robots\.txt$/,
-];
-
-const DENY = [
-  /(^|\/)wrangler\.toml$/,
-  /(^|\/)worker\//,
-  /(^|\/)\.github\//,
-  /secret/i,
-  /\.env/i,
-  /favicon-embed/i,
-  /\.(js|mjs|cjs|html|htm)$/i,
-];
-
 let failed = 0;
 function fail(msg) {
   failed++;
@@ -64,11 +43,6 @@ function ok(msg) {
 
 function sh(cmd) {
   return execSync(cmd, { encoding: "utf8", cwd: ROOT }).trim();
-}
-
-function isAllowlisted(f) {
-  if (DENY.some((re) => re.test(f))) return false;
-  return ALLOW.some((re) => re.test(f));
 }
 
 console.log(`Maintain preflight · base=${BASE} head=${HEAD}\n`);
@@ -102,8 +76,7 @@ if (!files.length) {
   process.exit(1);
 }
 
-const allMaintain = files.every(isAllowlisted);
-const anyDenied = files.some((f) => DENY.some((re) => re.test(f)));
+const allMaintain = files.every(isMaintainAwardPath);
 
 if (!allMaintain) {
   console.log(`  INFO  Not a maintain-only diff (${files.length} files, ${totalLines} lines).`);
@@ -127,11 +100,9 @@ else if (totalLines < 1) fail("Empty diff.");
 else ok(`line count ≤ ${MAX_LINES}`);
 
 for (const f of files) {
-  if (!isAllowlisted(f)) fail(`Not allowlisted: ${f}`);
+  if (!isMaintainAwardPath(f)) fail(`Not allowlisted: ${f}`);
   else ok(`allowlisted: ${f}`);
 }
-
-if (anyDenied) fail("Denied path present.");
 
 try {
   const patch = sh(`git diff ${BASE}...${HEAD}`);
@@ -153,6 +124,14 @@ for (const f of files) {
   const text = readFileSync(join(ROOT, f), "utf8");
   if (/\bGrok Place\b/.test(text) && !/not [“"]Grok Place/.test(text)) {
     fail(`${f}: brand must be grok/place`);
+  }
+}
+
+for (const f of files) {
+  if (!existsSync(join(ROOT, f))) continue;
+  const text = readFileSync(join(ROOT, f), "utf8");
+  if (/(<script\b|\bon[a-z]+\s*=|javascript\s*:|data\s*:\s*text\/html|<iframe\b)/i.test(text)) {
+    fail(`${f}: executable or embedded HTML is not allowed on the award path`);
   }
 }
 

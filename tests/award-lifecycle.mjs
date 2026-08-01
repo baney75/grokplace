@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+import { GrokPlaceCanvas } from "../worker/index.js";
+
+class MemoryStorage {
+  constructor(values = {}) { this.values = new Map(Object.entries(values)); }
+  async get(key) { return this.values.get(key); }
+  async put(key, value) {
+    if (typeof key === "object" && key !== null) for (const [name, item] of Object.entries(key)) this.values.set(name, item);
+    else this.values.set(key, value);
+  }
+  async delete(key) { this.values.delete(key); }
+  async list({ prefix = "", limit = 1000, startAfter = "" } = {}) {
+    return new Map([...this.values]
+      .filter(([key]) => key.startsWith(prefix) && (!startAfter || key > startAfter))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, limit));
+  }
+}
+
+let failed = 0;
+function check(name, condition, detail = "") {
+  if (condition) console.log(`PASS ${name}`);
+  else { failed++; console.error(`FAIL ${name}${detail ? ` — ${detail}` : ""}`); }
+}
+
+const storage = new MemoryStorage({
+  maintainers: [{ github: "owner", agent: "agent-one", status: "active", awards: 0, bonusTilesEarned: 0 }],
+  "agent:agent-one": { name: "agent-one", bonusTiles: 0, placements: 1 },
+});
+const canvas = new GrokPlaceCanvas({ storage }, { AWARD_SECRET: "test-award-secret" });
+const headSha = "1".repeat(40);
+const mergeSha = "2".repeat(40);
+const identity = { phase: "reserve", github: "owner", prNumber: 42, headSha, filesChanged: 1, linesChanged: 3, paths: ["README.md"] };
+
+async function award(body, secret = "test-award-secret") {
+  const request = new Request("https://test/internal/maintain/award", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` }, body: JSON.stringify(body) });
+  const response = await canvas.handleMaintainAward(request, "*");
+  return { response, data: await response.json() };
+}
+
+let result = await award(identity, "wrong");
+check("reservation requires the trusted award secret", result.response.status === 401 && result.data.error === "unauthorized", JSON.stringify(result.data));
+result = await award(identity);
+check("exact award capacity is reserved before merge", result.response.status === 201 && result.data.reserved === true && result.data.reservation.amount === 10, JSON.stringify(result.data));
+result = await award(identity);
+check("exact reservation replay is idempotent", result.response.ok && result.data.already === true && result.data.reserved === true, JSON.stringify(result.data));
+result = await award({ ...identity, paths: ["docs/other.md"] });
+check("conflicting reservation identity is rejected", result.response.status === 409 && result.data.error === "award_identity_conflict", JSON.stringify(result.data));
+result = await award({ phase: "finalize", github: "owner", prNumber: 42, headSha, mergeSha });
+check("exact merged reservation finalizes once", result.response.ok && result.data.awarded === 10 && result.data.bonusTilesBank === 10, JSON.stringify(result.data));
+result = await award({ phase: "finalize", github: "owner", prNumber: 42, headSha, mergeSha });
+check("identical finalize replay is idempotent", result.response.ok && result.data.already === true, JSON.stringify(result.data));
+result = await award({ phase: "finalize", github: "owner", prNumber: 42, headSha, mergeSha: "3".repeat(40) });
+check("conflicting merge SHA replay is rejected", result.response.status === 409 && result.data.error === "award_identity_conflict", JSON.stringify(result.data));
+await storage.put("agent:agent-one", { name: "agent-one", bonusTiles: 195, placements: 1 });
+result = await award({ ...identity, prNumber: 43, headSha: "4".repeat(40) });
+check("reservation refuses partial or overflowing awards", result.response.status === 429 && result.data.error === "bank_cap", JSON.stringify(result.data));
+result = await award({ ...identity, prNumber: 44, headSha: "short" });
+check("reservation requires a full immutable head SHA", result.response.status === 400 && result.data.error === "award_identity_required", JSON.stringify(result.data));
+
+const crowdedStorage = new MemoryStorage({
+  maintainers: [{ github: "owner", agent: "agent-one", status: "active", awards: 0, bonusTilesEarned: 0 }],
+  "agent:agent-one": { name: "agent-one", bonusTiles: 0, placements: 1 },
+});
+for (let index = 0; index < 1000; index++) {
+  const prNumber = 10000 + index;
+  const sha = index.toString(16).padStart(40, "0");
+  await crowdedStorage.put(`award:reservation:${prNumber}:${sha}`, { prNumber, headSha: sha, github: "other", agent: "other-agent", amount: 10, status: "reserved" });
+}
+const finalSha = "f".repeat(40);
+await crowdedStorage.put(`award:reservation:99999:${finalSha}`, { prNumber: 99999, headSha: finalSha, github: "owner", agent: "agent-one", amount: 195, status: "reserved" });
+const crowdedCanvas = new GrokPlaceCanvas({ storage: crowdedStorage }, { AWARD_SECRET: "test-award-secret" });
+let cursor = "";
+let listed = [];
+let pages = 0;
+do {
+  const url = new URL("https://test/internal/maintain/reservations");
+  if (cursor) url.searchParams.set("cursor", cursor);
+  const request = new Request(url, { headers: { Authorization: "Bearer test-award-secret" } });
+  const response = await crowdedCanvas.handleMaintainReservations(request, "*");
+  const data = await response.json();
+  pages++;
+  listed = listed.concat(data.reservations || []);
+  cursor = data.nextCursor || "";
+} while (cursor && pages < 10);
+check("reservation listing paginates beyond the first 1,000 records", pages === 5 && listed.length === 1001 && listed.some((record) => record.prNumber === 99999), `pages=${pages} records=${listed.length}`);
+const crowdedRequest = new Request("https://test/internal/maintain/award", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: "Bearer test-award-secret" },
+  body: JSON.stringify({ ...identity, prNumber: 45, headSha: "5".repeat(40) }),
+});
+const crowdedResponse = await crowdedCanvas.handleMaintainAward(crowdedRequest, "*");
+const crowdedData = await crowdedResponse.json();
+check("bank capacity includes a reservation after record 1,000", crowdedResponse.status === 429 && crowdedData.error === "bank_cap" && crowdedData.reservedTiles === 195, JSON.stringify(crowdedData));
+
+process.exitCode = failed ? 1 : 0;

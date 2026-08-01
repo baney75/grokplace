@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Gate: PR body must prove a SEPARATE adversarial agent reviewed this HEAD
- * and issued VERDICT: SHIP. Blocks template rubber-stamps and stale SHIPs.
+ * Gate: PR body must name an immutable review artifact for this exact HEAD.
+ * Trusted CI resolves the artifact through /v1/reviews before merge.
  *
  * Usage:
  *   node scripts/adversarial-review-check.mjs --body-file path.txt [--head-sha SHA]
@@ -59,14 +59,14 @@ if (!/##\s*Adversarial review/i.test(naked)) {
 if (/VERDICT:\s*PENDING\b/i.test(naked) || /VERDICT:\s*___/i.test(naked)) {
   fail("VERDICT still PENDING / unfilled — spawn separate agent first.");
 }
-if (/subagent_id\s*[:=]\s*(\*\*REQUIRED|\.\.\.|TBD|TODO|paste|xxx|your.?id)/i.test(body)) {
-  fail("subagent_id is still a placeholder.");
+if (/review_artifact_id\s*[:=]\s*(\*\*REQUIRED|\.\.\.|TBD|TODO|paste|xxx|your.?id)/i.test(body)) {
+  fail("review_artifact_id is still a placeholder.");
 }
 if (/Residual risk:\s*$/im.test(naked) || /Residual risk:\s*(\*\*|<!--|\.\.\.)/i.test(body)) {
   fail("Residual risk is empty or placeholder.");
 }
 
-// Separate agent claim + real-looking id
+// Separate agent claim + platform artifact identifier
 const independent =
   /separate\s+(adversarial\s+)?(review\s+)?agent/i.test(naked) ||
   /independent\s+(adversarial\s+)?reviewer/i.test(naked) ||
@@ -77,20 +77,9 @@ if (!independent) {
   ok("claims separate reviewer");
 }
 
-const idMatch = naked.match(/subagent[_\s-]?id\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9._:-]{7,80})/i);
-if (!idMatch) {
-  fail("Need subagent_id: <real id ≥8 chars> from the separate review agent session.");
-} else {
-  const id = idMatch[1];
-  if (
-    /^(test|example|sample|placeholder|required|null|undefined)$/i.test(id) ||
-    /PASTE|HERE|YOUR|XXX|TODO|TBD|REAL_ID|session/i.test(id)
-  ) {
-    fail(`subagent_id looks fake/placeholder: ${id}`);
-  } else {
-    ok(`subagent_id=${id.slice(0, 24)}…`);
-  }
-}
+const artifactMatches = [...naked.matchAll(/^\s*-?\s*review_artifact_id\s*:\s*(rv_[a-f0-9]{32})\s*$/gim)];
+if (artifactMatches.length !== 1) fail("Need exactly one review_artifact_id: rv_<32 lowercase hex> field.");
+else ok(`review_artifact_id=${artifactMatches[0][1]}`);
 
 // VERDICT must be its own line (ignore "replace with VERDICT: SHIP" prose)
 if (/^\s*VERDICT:\s*BLOCK\s*$/im.test(naked)) {
@@ -101,19 +90,11 @@ if (/^\s*VERDICT:\s*BLOCK\s*$/im.test(naked)) {
   ok("VERDICT: SHIP");
 }
 
-// Head SHA bind — prevent stale SHIP after new commits (CI always passes HEAD_SHA)
-if (headSha) {
-  const short = headSha.slice(0, 7).toLowerCase();
-  const full = headSha.toLowerCase();
-  const lower = naked.toLowerCase();
-  if (!lower.includes(short) && !lower.includes(full)) {
-    fail(`Body must include this PR head SHA (${short}…) so SHIP cannot be reused after new pushes.`);
-  } else {
-    ok(`bound to head ${short}`);
-  }
-} else {
-  ok("no HEAD_SHA in env (local) — CI will require it");
-}
+// Exact normalized full-SHA field; incidental or abbreviated SHA text never binds a review.
+const shaMatches = [...naked.matchAll(/^\s*-?\s*head_sha\s*:\s*([a-f0-9]{40})\s*$/gim)];
+if (shaMatches.length !== 1) fail("Need exactly one head_sha: <full 40-character commit SHA> field.");
+else if (headSha && shaMatches[0][1].toLowerCase() !== headSha.toLowerCase()) fail("head_sha does not equal the current PR head.");
+else ok(`bound to full head ${shaMatches[0][1].toLowerCase()}`);
 
 // Findings / residual substance
 const residual = naked.match(/Residual risk:\s*(.+)/i);
@@ -161,8 +142,8 @@ if (!/allowlist|worker\/|sensitive path|\.github/i.test(naked)) {
 
 // Known empty template fingerprint (exact default without fills)
 if (
-  /subagent_id \/ session:\s*$/im.test(naked) ||
-  (naked.includes("VERDICT: SHIP") && /subagent_id \/ session:\s*$/im.test(body.replace(/<!--[\s\S]*?-->/g, "\n")))
+  /review_artifact_id:\s*$/im.test(naked) ||
+  (naked.includes("VERDICT: SHIP") && /review_artifact_id:\s*$/im.test(body.replace(/<!--[\s\S]*?-->/g, "\n")))
 ) {
   fail("Looks like unfilled PR template — paste a real review.");
 }
@@ -173,5 +154,5 @@ if (failed) {
   console.error("Spawn a SEPARATE review agent on THIS head, paste id + SHA + VERDICT: SHIP.");
   process.exit(1);
 }
-console.log("Adversarial gate OK.");
+console.log("Adversarial body gate OK; trusted CI must resolve the immutable artifact.");
 process.exit(0);

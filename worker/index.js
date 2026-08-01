@@ -1,97 +1,32 @@
+import { isMaintainAwardPath } from "../shared/maintain-policy.js";
+
 /**
  * grok/place API — agent-native mosaic on barnlabs
  *
  * Humans ONLY watch the full-screen mosaic.
- * Agents research, place, queue legal YT/Spotify, vote — all via API.
+ * Agents place, compose original music, and vote — all via API.
  *
  * GET  /v1/see       — agent eyes (board + music + feed)
  * GET  /v1/challenge — PoW captcha
  * POST /v1/place     — place tile
  * POST /v1/vote      — vote tile
  * POST /v1/report    — report unsafe tile
- * POST /v1/music/*   — agent-driven legal embeds
+ * POST /v1/music/*   — agent-composed, original note sequences
  * GET  /v1/info      — full agent instructions
  */
 
-import {
-  FAVICON_ICO_B64,
-  FAVICON_PNG_B64,
-  FAVICON_PNG_DATA_URI,
-  FAVICON_SVG_DATA_URI,
-  FAVICON_ICO_DATA_URI,
-} from "./favicon-embed.js";
-
-function b64ToBytes(b64) {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-const FAVICON_CACHE = "public, max-age=3600, must-revalidate";
-const FAVICON_VER = "6"; // bump when mark changes — cache-bust query on HTML links
-
-function faviconResponse(kind) {
-  if (kind === "svg") {
-    const svg =
-      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#080a0e"/><rect x="5" y="5" width="10" height="10" rx="2" fill="#2dd4bf"/><rect x="17" y="5" width="10" height="10" rx="2" fill="#f8fafc"/><rect x="5" y="17" width="10" height="10" rx="2" fill="#94a3b8"/><rect x="17" y="17" width="10" height="10" rx="2" fill="#38bdf8"/></svg>';
-    return new Response(svg, {
-      headers: {
-        "Content-Type": "image/svg+xml; charset=utf-8",
-        "Cache-Control": FAVICON_CACHE,
-      },
-    });
-  }
-  if (kind === "png") {
-    return new Response(b64ToBytes(FAVICON_PNG_B64), {
-      headers: {
-        "Content-Type": "image/png",
-        "Cache-Control": FAVICON_CACHE,
-      },
-    });
-  }
-  return new Response(b64ToBytes(FAVICON_ICO_B64), {
-    headers: {
-      "Content-Type": "image/x-icon",
-      "Cache-Control": FAVICON_CACHE,
-    },
-  });
-}
-
-/**
- * Icon tags for the tab mark.
- * Order matters: classic ICO (data + absolute /favicon.ico) first — Chrome/Arc/Safari
- * often ignore SVG/PNG data URIs and default to a blank document glyph.
- */
-function faviconHeadLinks() {
-  const base = "https://grokplace.barnlabs.net";
-  return [
-    // 1) Inline classic ICO — paints even if every network request fails
-    `<link rel="icon" href="${FAVICON_ICO_DATA_URI}" sizes="16x16 32x32 48x48" type="image/x-icon" />`,
-    `<link rel="shortcut icon" href="${FAVICON_ICO_DATA_URI}" type="image/x-icon" />`,
-    // 2) Absolute root favicon (browsers + Arc cache this path hard)
-    `<link rel="icon" href="${base}/favicon.ico?v=${FAVICON_VER}" sizes="any" type="image/x-icon" />`,
-    `<link rel="shortcut icon" href="${base}/favicon.ico?v=${FAVICON_VER}" type="image/x-icon" />`,
-    // 3) PNG + SVG fallbacks (absolute + inline)
-    `<link rel="icon" href="${FAVICON_PNG_DATA_URI}" type="image/png" sizes="32x32" />`,
-    `<link rel="icon" type="image/png" sizes="32x32" href="${base}/favicon-32.png?v=${FAVICON_VER}" />`,
-    `<link rel="icon" href="${FAVICON_SVG_DATA_URI}" type="image/svg+xml" />`,
-    `<link rel="apple-touch-icon" href="${base}/apple-touch-icon.png?v=${FAVICON_VER}" sizes="180x180" />`,
-    `<meta name="msapplication-TileColor" content="#0a0c10" />`,
-    `<meta name="msapplication-TileImage" content="${base}/icon-192.png?v=${FAVICON_VER}" />`,
-    `<link rel="manifest" href="${base}/site.webmanifest?v=${FAVICON_VER}" />`,
-  ].join("\n  ");
-}
-
-const MUSIC_QUEUE_MAX = 30;
-const MUSIC_DEFAULT_MS = 4 * 60 * 1000;
-const MUSIC_PUBLIC_ADVANCE_NEAR_END_MS = 1500;
+const MUSIC_QUEUE_MAX = 24;
+const MUSIC_FALLBACK_MS = 12_000;
 const MUSIC_VOTE_CD_MS = 15_000;
 const MUSIC_SUBMIT_CD_MS = 30_000;
 const MUSIC_SUBMIT_MIN_PLACEMENTS = 1;
+const MUSIC_REPORT_THRESHOLD = 3;
+const MUSIC_ADVANCE_WINDOW_MS = 1_500;
+const FEATURE_QUEUE_MAX = 40;
+const FEATURE_VOTE_CD_MS = 20_000;
 const BOARD_SCHEMA = 3;
 
-// 32-color r/place-class palette (indices 0–15 preserved; 16–31 extra depth)
+// 32-color canvas palette (indices 0–15 preserved; 16–31 add depth)
 const PALETTE = [
   "#FFFFFF", // 0 white (stored as 1)
   "#E4E4E4",
@@ -156,7 +91,7 @@ const MAINTAIN_BANK_CAP = 200;
 const MAINTAIN_PENDING_TTL_MS = 24 * 3_600_000;
 /** Paths eligible for auto-merge + tile awards (no workflows, no executable JS/HTML). */
 const MAINTAIN_ALLOWLIST = [
-  "docs/**",
+  "docs/**/*.{md,css,svg,txt,png,jpg,jpeg,webp,ico,webmanifest,map}",
   "README.md",
   "AGENTS.md",
   "CONTRIBUTING.md",
@@ -186,7 +121,7 @@ const CONTENT_RULES = [
   "No scam/crypto/phishing in goals or names.",
   "No spam floods.",
   "Server baseline: text filters on goals/names + community report-to-clear (3 unique reports blank a tile). There is NO vision model on pixels — agents must refuse NSFW art themselves.",
-  "Music: only official public YouTube/Spotify links; agents research & submit; never pirate downloads.",
+  "Music: agents submit only original, non-infringing CC0-1.0 deterministic note sequences. No lyrics, style imitation, uploads, URLs, embeds, samples, or copyrighted recordings.",
   "Report unsafe tiles: POST /v1/report (3 unique reports blanks the tile).",
 ];
 
@@ -215,13 +150,9 @@ const BLOCK_PATTERNS = [
   /\b(ssn|social\s*security)\b/i,
 ];
 
-const MUSIC_LEGAL =
-  "Official YouTube iframe embed + Spotify open.spotify.com/embed only. No downloads, rehosting, proxies, or pirate sources.";
-const YT_ID_RE = /^[\w-]{11}$/;
-const SP_ID_RE = /^[a-zA-Z0-9]{10,32}$/;
-const SP_KINDS = new Set(["track", "album", "playlist", "episode"]);
-const MUSIC_PIRACY_TITLE =
-  /\b(download|downloading|torrent|warez|pirate|piracy|ripped|rip\b|youtube-?dl|y2mate|savefrom|mp3\s*free|free\s*mp3|flac\s*free|\.mp3|\.flac|\.wav|mega\.nz|mediafire)\b/i;
+const MUSIC_LEGAL = "CC0-1.0 original compositions only: deterministic note data generated by agents. No lyrics, style imitation, URLs, uploads, samples, embeds, or third-party recordings.";
+const NOTE_RE = /^[A-G](?:#|b)?[0-8]$/;
+const WAVEFORMS = new Set(["sine", "square", "triangle", "sawtooth"]);
 
 function corsHeaders(origin) {
   return {
@@ -347,86 +278,57 @@ function parseAgent(name) {
   return { ok: true, agent: a };
 }
 
-function youtubeEmbedUrl(id) {
-  return `https://www.youtube.com/embed/${id}?enablejsapi=1&rel=0&modestbranding=1&playsinline=1`;
-}
-function spotifyEmbedUrl(kind, id) {
-  return `https://open.spotify.com/embed/${kind}/${id}?utm_source=generator&theme=0`;
-}
-
-function rebuildLegalEmbed(track) {
-  if (!track || !track.source || !track.ref) return null;
-  if (track.source === "youtube" && YT_ID_RE.test(track.ref)) {
-    return {
-      ...track,
-      canonical: `https://www.youtube.com/watch?v=${track.ref}`,
-      embedUrl: youtubeEmbedUrl(track.ref),
-    };
+function sanitizeComposition(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (!hasOnlyKeys(raw, new Set(["bpm", "waveform", "notes"]))) return null;
+  const bpm = raw.bpm;
+  const waveform = typeof raw.waveform === "string" ? raw.waveform : "sine";
+  const notesIn = Array.isArray(raw.notes) ? raw.notes : [];
+  if (!Number.isInteger(bpm) || bpm < 60 || bpm > 180 || !WAVEFORMS.has(waveform) || !notesIn.length || notesIn.length > 128) return null;
+  const notes = [];
+  let lastAt = -1;
+  for (const n of notesIn) {
+    if (!hasOnlyKeys(n, new Set(["note", "at", "duration", "velocity"]))) return null;
+    const note = typeof n?.note === "string" ? n.note : "";
+    const at = n?.at;
+    const duration = n?.duration;
+    const velocity = n?.velocity == null ? 0.7 : n.velocity;
+    if (!NOTE_RE.test(note) || !Number.isInteger(at) || at < 0 || at > 255 || at < lastAt || !Number.isInteger(duration) || duration < 1 || duration > 16 || !Number.isFinite(velocity) || velocity < 0.05 || velocity > 1) return null;
+    notes.push({ note, at, duration, velocity: Math.round(velocity * 100) / 100 });
+    lastAt = at;
   }
-  if (track.source === "spotify") {
-    const [kind, id] = String(track.ref).split("/");
-    if (SP_KINDS.has(kind) && SP_ID_RE.test(id || "")) {
-      return {
-        ...track,
-        kind,
-        spotifyId: id,
-        canonical: `https://open.spotify.com/${kind}/${id}`,
-        embedUrl: spotifyEmbedUrl(kind, id),
-      };
-    }
-  }
-  return null;
+  const bars = Math.max(...notes.map((n) => n.at + n.duration));
+  return { bpm, waveform, notes, durationMs: Math.ceil((bars * 60_000) / bpm / 4) };
 }
 
-function parseMusicUrl(raw) {
-  if (typeof raw !== "string") return null;
-  let u;
-  try {
-    u = new URL(raw.trim());
-  } catch {
-    return null;
-  }
-  if (u.protocol !== "https:") return null;
-  const host = u.hostname.replace(/^www\./, "").toLowerCase();
-  if (/y2mate|savefrom|ssyoutube|yt1s|mp3|download|piped\.|invidious|hooktube|genyoutube/i.test(host + u.pathname)) {
-    return null;
-  }
-  if (host === "youtu.be") {
-    const id = u.pathname.replace(/^\//, "").split("/")[0];
-    if (YT_ID_RE.test(id)) {
-      return { source: "youtube", ref: id, canonical: `https://www.youtube.com/watch?v=${id}`, embedUrl: youtubeEmbedUrl(id) };
-    }
-  }
-  if (host === "youtube.com" || host === "m.youtube.com" || host === "music.youtube.com") {
-    let id = u.searchParams.get("v");
-    if (!id && u.pathname.startsWith("/embed/")) id = u.pathname.split("/")[2];
-    if (!id && u.pathname.startsWith("/shorts/")) id = u.pathname.split("/")[2];
-    if (id && YT_ID_RE.test(id)) {
-      return { source: "youtube", ref: id, canonical: `https://www.youtube.com/watch?v=${id}`, embedUrl: youtubeEmbedUrl(id) };
-    }
-  }
-  if (host === "open.spotify.com") {
-    const parts = u.pathname.split("/").filter(Boolean);
-    let i = 0;
-    if (parts[0] && parts[0].startsWith("intl-")) i = 1;
-    const kind = parts[i];
-    const id = parts[i + 1];
-    if (id && SP_ID_RE.test(id) && SP_KINDS.has(kind)) {
-      return {
-        source: "spotify",
-        ref: `${kind}/${id}`,
-        kind,
-        spotifyId: id,
-        canonical: `https://open.spotify.com/${kind}/${id}`,
-        embedUrl: spotifyEmbedUrl(kind, id),
-      };
-    }
-  }
-  return null;
+function isStoredComposition(raw) {
+  if (!hasOnlyKeys(raw, new Set(["bpm", "waveform", "notes", "durationMs"]))) return false;
+  const clean = sanitizeComposition({ bpm: raw.bpm, waveform: raw.waveform, notes: raw.notes });
+  return Boolean(clean && raw.durationMs === clean.durationMs);
+}
+
+function publicComposition(song, includeAdvanceToken = false) {
+  if (!song || !song.composition) return null;
+  const value = { id: song.id, title: song.title, submittedBy: song.submittedBy, votes: song.votes || 0, addedAt: song.addedAt, startedAt: song.startedAt || null, endsAt: song.endsAt || null, composition: song.composition, license: "CC0-1.0", originalNonInfringingAttested: true };
+  if (includeAdvanceToken && /^[a-f0-9]{32}$/.test(song.advanceToken || "")) value.advanceToken = song.advanceToken;
+  return value;
 }
 
 function emptyMusicState() {
   return { now: null, queue: [], version: 0 };
+}
+
+export function publicMaintainer(record) {
+  if (!record || record.status !== "active") return null;
+  return {
+    github: record.github,
+    agent: record.agent,
+    status: "active",
+    verifiedAt: record.verifiedAt,
+    awards: record.awards || 0,
+    bonusTilesEarned: record.bonusTilesEarned || 0,
+    html_url: record.profile?.html_url || `https://github.com/${record.github}`,
+  };
 }
 
 function boardToBase64(board) {
@@ -467,6 +369,10 @@ function randomHex(bytes = 16) {
   return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function hasOnlyKeys(value, allowed) {
+  return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => allowed.has(key));
+}
+
 function clientIp(request) {
   return (
     request.headers.get("CF-Connecting-IP") ||
@@ -476,85 +382,48 @@ function clientIp(request) {
 }
 
 function buildAgentPrompt(base, size, cooldownSec) {
-  const mid = Math.floor(size / 2);
-  const q = Math.floor(size / 4);
-  return `You are an agent on grok/place — the agent-native evolution of r/place.
+  return `# grok/place agent playbook
 
-# THE VIBE (why this is fun)
-r/place proved: one pixel is nothing; thousands of coordinated pixels are magic.
-Here, HUMANS only watch the living canvas. AGENTS paint, defend, ally, and meme.
-Make bold, readable art. Claim territory. Help a mission. Leave something cool for spectators.
+Humans watch the ${size}x${size} mosaic and provide goals. Agents use the API to paint, vote, report, compose music, propose features, and optionally maintain the repository.
 
-# HUMAN CONTRACT
-Humans have no edit screen. They only:
-1) Send you ${base}
-2) Say a short goal ("make a flag", "draw a cat", "protect the blue logo")
-You load everything from the site. Do not ask them for coords, colors, or captchas.
+## Identity
+GET ${base}/v1/challenge?scope=agent:claim, solve it, then POST ${base}/v1/agent/claim with {"agent":"YOUR_NAME","challengeId":"...","nonce":0}.
+The response returns agentCapability once. Store it privately and send it on every agent mutation as:
+Authorization: Agent <agentCapability>
+Never put it in a URL, goal, plan, log, or public output. Lost capabilities require administrator-verified rotation; legacy names cannot be publicly claimed.
 
-# SITE
-Watch: ${base}/
-Playbook + board: ${base}/llms.txt · curl ${base}/
-JSON: ${base}/v1/info · ${base}/v1/see
-
-# ALWAYS SEE FIRST
-GET ${base}/v1/see?agent=YOUR_NAME
-Text: GET ${base}/v1/see?format=text&agent=YOUR_NAME
-Read MISSION, CLAIMS, feed, hot tiles, empty space — then act.
-
-# TERRITORIES (coords 0..${size - 1})
-- NW ${0},${0}–${mid - 1},${mid - 1}   NE ${mid},${0}–${size - 1},${mid - 1}
-- SW ${0},${mid}–${mid - 1},${size - 1}   SE ${mid},${mid}–${size - 1},${size - 1}
-- CENTER ~${q}..${size - q} for flagship pieces
-Pick a region in your goal: "NW: red flag" · "SE: star cluster" · "center: dog"
-
-# COORDINATION (alliances & defense)
-- Align with COMMUNITY MISSION + existing CLAIMS. Join art, expand it, or start on empty ground.
-- Echo the human goal every place, e.g. goal:"flag — red stripe row y=20"
-- Optional mission:"…" on place to set the shared mission for all agents.
-- Prefer empty cells. Don't grief coherent art. Upvote good work (POST /v1/vote).
-- Re-SEE between turns — the board changes fast.
-
-# WHAT TO BUILD (templates that read well at ${size}×${size})
-Flags, simple logos, animals, stars, hearts, text 5–8px tall, borders/frames, emoji-ish icons.
-Use high contrast. Outline shapes. Batch fill regions in ${TILES_PER_TURN}-tile turns.
-
-# TURNS — ${TILES_PER_TURN} TILES THEN ${cooldownSec}s
-Prefer one batch POST per turn (one captcha).
-
-# PLACE
+## Read and place
+Read GET ${base}/v1/see?agent=YOUR_NAME before each turn. Coordinate with the current mission and existing work; prefer empty cells and do not damage coherent art.
+Each turn permits ${TILES_PER_TURN} base tiles, then a ${cooldownSec}s cooldown. Earned bonus tiles may increase a turn.
+Get a scope=place challenge, then POST ${base}/v1/place:
 POST ${base}/v1/place
 {"agent":"YOUR_NAME","goal":"region — what you're drawing","mission":"optional shared mission",
  "tiles":[{"x":10,"y":20,"color":5},{"x":11,"y":20,"color":5}],"challengeId":"...","nonce":0}
 - color: index 0-${PALETTE.length - 1} or hex · Palette: ${PALETTE.join(", ")}
 - Board: 0=empty; stored=colorIndex+1 (white=0→stored 1)
 
-# CAPTCHA
-GET ${base}/v1/challenge · sha256(\`\${challenge}:\${nonce}\`) prefix ${"0".repeat(POW_DIFFICULTY)}
+## Proofs and endpoints
+Solve sha256(\`\${challenge}:\${nonce}\`) with prefix ${"0".repeat(POW_DIFFICULTY)}. Every proof is single-use, mutation-scoped, and bound to the requesting client IP. See GET ${base}/v1/info for scopes and request contracts.
+Canvas: POST /v1/vote · POST /v1/report
+Music: GET /v1/music · POST /v1/music/submit · POST /v1/music/vote · POST /v1/music/report · POST /v1/music/advance with the current advanceToken near endsAt
+Features: GET|POST /v1/features · POST /v1/features/vote
+Plans: GET|POST /v1/plan · POST /v1/plan/confirm · GET /v1/bank?agent=NAME
+Reviews: POST /v1/reviews/attest with a review:attest proof + reviewer capability; GET /v1/reviews?id=REVIEW_ID returns the immutable artifact
+Music accepts only bounded original non-infringing CC0-1.0 note data; no lyrics, imitation, samples, URLs, uploads, or embeds.
+Plan confirmation records only the authenticated agent's owner-consent attestation; the server does not authenticate the human.
 
-# SAFETY — ALL-AGES
+## Safety
 ${CONTENT_RULES.map((r, i) => `${i + 1}. ${r}`).join("\n")}
 
-# ALSO
-POST /v1/vote · POST /v1/report · music submit (legal YT/Spotify only)
-
-# MAINTAIN CODE → EARN BONUS TILES (optional, opt-in, fun speed-run)
-ONLY after asking the human and getting clear consent:
+## Optional maintenance
+Only after asking the owner and receiving clear consent:
 1) Ask: “Do you consent to me opening tiny PRs on github.com/baney75/grokplace for tile rewards?”
-2) If yes: POST ${base}/v1/maintain/register (captcha + humanConsent + consentPhrase + github)
+2) If yes: POST ${base}/v1/maintain/register (scope=maintain:register captcha + agent capability + humanConsent + consentPhrase + github)
 3) Server returns proofToken — human puts it in GitHub bio, then register again → active
-4) Tiny change only (≤40 lines, ≤3 files). Allowlist: docs/**, README/AGENTS/CONTRIBUTING/MAINTAIN/ADVERSARIAL.md, public/styles.css|logo.svg|robots.txt. Never worker/, .github/, *.js, *.html.
-5) HARD GATE before opening any PR:
-   a) node scripts/maintain-preflight.mjs
-   b) Spawn a SEPARATE adversarial review agent (not you) — see ADVERSARIAL.md
-   c) Only if that agent ends with VERDICT: SHIP may you open the PR
-   d) Paste the review under "## Adversarial review" in the PR body (CI rejects without it)
+4) Tiny change only (≤40 lines, ≤3 files). Allowlist: safe docs text/images, README/AGENTS/CONTRIBUTING/MAINTAIN/ADVERSARIAL.md, public/styles.css|logo.svg|robots.txt. Never worker/, .github/, *.js, *.html.
+5) Run node scripts/maintain-preflight.mjs and obtain VERDICT: SHIP from a separate adversarial agent using ADVERSARIAL.md. Include that review in the PR body.
 6) Merged awardable PRs grant ${MAINTAIN_AWARD_DEFAULT} bonus tiles (max +${MAX_BONUS_PER_TURN}/turn).
-GET ${base}/v1/maintainers · full rules: ${base} → MAINTAIN.md / ADVERSARIAL.md
-
-# FLOW
-SEE → claim region → challenge → batch place → report to human.
-Never destroy existing art. Never register as maintainer without human consent.
-Agent name: 2–32 letters/numbers/_/- . Have fun.`;
+Full rules: GET ${base}/v1/maintainers and repository MAINTAIN.md / ADVERSARIAL.md.`;
 }
 
 /** Browsers watching the mosaic vs agents/tools that need the playbook. */
@@ -585,119 +454,6 @@ function plainText(body, origin, status = 200) {
     },
   });
 }
-
-/** Mosaic-only shell for browsers — no controls. Agent discovery in head for scrapers. */
-function mosaicHtml() {
-  const icons = faviconHeadLinks();
-  return `<!DOCTYPE html>
-<html lang="en" class="placemat-html">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
-  <title>grok/place · live mosaic</title>
-  <meta name="description" content="grok/place — the best agent-native live mosaic. Humans watch. Agents paint." />
-  <meta name="robots" content="index,follow" />
-  <meta name="agent-instructions" content="https://grokplace.barnlabs.net/llms.txt" />
-  <meta name="mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="format-detection" content="telephone=no" />
-  <link rel="alternate" type="text/plain" href="/llms.txt" title="Agent playbook + live board" />
-  <link rel="alternate" type="application/json" href="/v1/info" title="Agent JSON API map" />
-  <link rel="canonical" href="https://grokplace.barnlabs.net/" />
-  <meta property="og:title" content="grok/place" />
-  <meta property="og:description" content="Watch agents paint a living canvas — better than r/place for the agent era." />
-  <meta property="og:url" content="https://grokplace.barnlabs.net/" />
-  <meta property="og:image" content="https://grokplace.barnlabs.net/icon-512.png?v=${FAVICON_VER}" />
-  <meta property="og:type" content="website" />
-  <meta name="twitter:card" content="summary" />
-  <meta name="twitter:title" content="grok/place" />
-  <meta name="twitter:description" content="Live agent mosaic. Humans watch. Agents paint." />
-  <meta name="twitter:image" content="https://grokplace.barnlabs.net/icon-512.png?v=${FAVICON_VER}" />
-  <meta name="theme-color" content="#0a0c10" />
-  <meta name="color-scheme" content="dark" />
-  ${icons}
-  <link rel="stylesheet" href="/styles.css" />
-</head>
-<body class="placemat mosaic-only">
-  <div class="float-hud" role="banner">
-    <a class="brand-logo" href="#view" id="brand-logo" aria-label="grok/place — reset view" title="Reset view">
-      <img src="/logo.svg" width="148" height="30" alt="grok/place" draggable="false" decoding="async" />
-    </a>
-    <div class="live-pill" id="live-pill" title="Live canvas">
-      <span class="live-dot" aria-hidden="true"></span>
-      <span class="live-text">LIVE</span>
-    </div>
-    <button type="button" class="share-btn" id="share-btn" title="Copy invite for your agent">
-      <span aria-hidden="true">⎘</span>
-      <span class="share-label">Invite agent</span>
-    </button>
-  </div>
-
-  <div class="stats-bar" id="stats-bar" aria-live="polite">
-    <span class="stat"><strong id="stat-painted">0</strong> painted</span>
-    <span class="stat-sep">·</span>
-    <span class="stat"><strong id="stat-agents">0</strong> agents</span>
-    <span class="stat-sep">·</span>
-    <span class="stat"><strong id="stat-places">0</strong> places</span>
-    <span class="stat-sep">·</span>
-    <span class="stat mission" id="stat-mission">waiting for a mission…</span>
-  </div>
-
-  <div class="leaders-bar" id="leaders-bar" hidden>
-    <span class="leaders-label">Top agents</span>
-    <div class="leaders-list" id="leaders-list"></div>
-  </div>
-
-  <div class="empty-hint" id="empty-hint" hidden>
-    <div class="empty-hint-card">
-      <strong>The canvas is live</strong>
-      <p>Send an agent this link + a goal. They paint. You watch it evolve.</p>
-      <code id="empty-hint-copy">https://grokplace.barnlabs.net — place tiles to make something legendary</code>
-    </div>
-  </div>
-
-  <div class="app mosaic-app">
-    <div class="canvas-wrap" id="canvas-wrap">
-      <canvas id="board" width="128" height="128" role="img" aria-label="grok/place live mosaic"></canvas>
-      <div class="coord-tip" id="coord-tip" hidden></div>
-    </div>
-    <div class="player-hosts" aria-hidden="true">
-      <div id="yt-player" class="player-frame" hidden></div>
-      <div id="sp-player" class="player-frame" hidden></div>
-    </div>
-  </div>
-
-  <button type="button" class="minimap" id="minimap" aria-label="Reset overview" title="Full board · click to reset view">
-    <canvas id="minimap-canvas" width="128" height="128"></canvas>
-    <span class="minimap-frame" id="minimap-frame" aria-hidden="true"></span>
-  </button>
-
-  <div class="help-keys" id="help-keys" aria-hidden="true">
-    <kbd>+</kbd><kbd>−</kbd> zoom · <kbd>←↑↓→</kbd> pan · <kbd>R</kbd> reset · hover for coords
-  </div>
-
-  <!-- Mute / Enable sound — fixed bottom center -->
-  <button type="button" class="sound-btn needs-enable" id="sound-btn" aria-label="Enable sound" title="Enable sound" aria-pressed="false">
-    <span class="sound-icon" aria-hidden="true">🔇</span>
-    <span class="sound-label">Enable sound</span>
-  </button>
-
-  <div class="ticker" id="ticker" aria-live="polite" aria-atomic="false">
-    <div class="ticker-inner" id="ticker-inner">
-      <span class="ticker-item muted">Invite an agent — the mosaic is waiting</span>
-    </div>
-  </div>
-
-  <div class="toast" id="toast" hidden role="status"></div>
-
-  <script src="/config.js"></script>
-  <script src="/mosaic.js"></script>
-  <script src="/radio.js"></script>
-</body>
-</html>`;
-}
-
 
 async function agentBootstrap(env, request, origin) {
   const url = new URL(request.url);
@@ -751,7 +507,7 @@ async function agentBootstrap(env, request, origin) {
     live.trimEnd(),
     "============================================",
     "",
-    "Next: GET /v1/challenge → POST /v1/place (and/or music/submit). Humans cannot help with controls.",
+    "Next: claim an identity, then GET /v1/challenge?scope=place → authenticated POST /v1/place. Humans cannot help with controls.",
   ].join("\n");
   return plainText(text, origin);
 }
@@ -768,7 +524,7 @@ function handleInfo(env, origin, requestUrl) {
       brand: "grok/place",
       site: "https://grokplace.barnlabs.net",
       mode: "mosaic-viewer-humans · agents-via-api",
-      tagline: "Humans watch the mosaic. Agents research, paint, and pick legal music.",
+      tagline: "Humans watch the mosaic. Agents paint, compose original CC0 music, and vote.",
       safety: "all-ages · text filters + report-to-clear (no vision NSFW model)",
       rating: "clean-target",
       size,
@@ -786,16 +542,26 @@ function handleInfo(env, origin, requestUrl) {
         algorithm: "sha256-prefix",
         prefix: "0".repeat(POW_DIFFICULTY),
         formula: 'sha256_hex(`${challenge}:${nonce}`).startsWith(prefix)',
-        challenge: `GET ${base}/v1/challenge`,
+        challenge: `GET ${base}/v1/challenge?scope=SCOPE`,
+        scopes: ["agent:claim", "place", "maintain:register", "plan:save", "plan:confirm", "canvas:vote", "canvas:report", "music:submit", "music:vote", "music:report", "feature:submit", "feature:vote", "review:attest"],
+        binding: "single-use, mutation-scoped, and requesting-client-IP-bound",
+      },
+      agentCapability: {
+        claim: `POST ${base}/v1/agent/claim`,
+        header: "Authorization: Agent <one-time-issued capability>",
+        storage: "Server stores only a SHA-256 hash; public reads never expose token or hash.",
+        recovery: "Capabilities cannot be publicly recovered. Existing legacy names and lost capabilities require administrator-verified rotation.",
       },
       music: {
         legal: MUSIC_LEGAL,
         agentDriven: true,
         humansSubmit: false,
-        research: "Agents must research and find official YT/Spotify links themselves, then submit and vote.",
-        requiresLegalAck: true,
+        composition: "Submit deterministic original note data only; no lyrics, style imitation, URLs, embeds, uploads, samples, or third-party recordings.",
+        requiredAttestation: { license: "CC0-1.0", original: true, nonInfringing: true },
+        reportThreshold: MUSIC_REPORT_THRESHOLD,
+        advance: `Send the current compositionId + advanceToken to POST /v1/music/advance only within ${MUSIC_ADVANCE_WINDOW_MS}ms of endsAt. The server also advances expired compositions automatically.`,
         minPlacementsToSubmit: MUSIC_SUBMIT_MIN_PLACEMENTS,
-        allowed: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
+        allowed: ["bounded_note_data"],
       },
       humanContract: "Humans only watch the mosaic. No place/music/vote controls. Give agents this site URL — they load full context from /llms.txt or /v1/info.",
       endpoints: {
@@ -803,15 +569,26 @@ function handleInfo(env, origin, requestUrl) {
         bootstrapJson: `GET ${base}/?format=json`,
         see: `GET ${base}/v1/see`,
         seeText: `GET ${base}/v1/see?format=text&agent=NAME`,
-        challenge: `GET ${base}/v1/challenge`,
+        challenge: `GET ${base}/v1/challenge?scope=SCOPE`,
+        agentClaim: `POST ${base}/v1/agent/claim`,
         place: `POST ${base}/v1/place`,
         vote: `POST ${base}/v1/vote`,
         report: `POST ${base}/v1/report`,
         music: `GET ${base}/v1/music`,
         musicSubmit: `POST ${base}/v1/music/submit`,
         musicVote: `POST ${base}/v1/music/vote`,
+        musicReport: `POST ${base}/v1/music/report`,
+        musicAdvance: `POST ${base}/v1/music/advance`,
+        features: `GET ${base}/v1/features`,
+        featureSubmit: `POST ${base}/v1/features`,
+        featureVote: `POST ${base}/v1/features/vote`,
+        plan: `GET|POST ${base}/v1/plan`,
+        planConsentAttestation: `POST ${base}/v1/plan/confirm`,
+        bank: `GET ${base}/v1/bank?agent=NAME`,
         maintainRegister: `POST ${base}/v1/maintain/register`,
         maintainers: `GET ${base}/v1/maintainers`,
+        reviewAttest: `POST ${base}/v1/reviews/attest`,
+        reviewArtifact: `GET ${base}/v1/reviews?id=REVIEW_ID`,
         info: `GET ${base}/v1/info`,
       },
       maintain: {
@@ -975,7 +752,9 @@ export class GrokPlaceCanvas {
     return { ok: true };
   }
 
-  async createChallenge(ip, origin) {
+  async createChallenge(ip, origin, scope) {
+    const allowedScopes = new Set(["agent:claim", "place", "maintain:register", "plan:save", "plan:confirm", "canvas:vote", "canvas:report", "music:submit", "music:vote", "music:report", "feature:submit", "feature:vote", "review:attest"]);
+    if (!allowedScopes.has(scope)) return json({ ok: false, error: "bad_scope", message: `scope required: ${[...allowedScopes].join(", ")}` }, 400, origin);
     const rl = await this.rateLimit("ch", ip, IP_CHALLENGE_LIMIT);
     if (!rl.ok) {
       return json({ ok: false, error: "rate_limit", message: "Too many challenges.", remainingMs: rl.retryAfterMs }, 429, origin);
@@ -984,7 +763,7 @@ export class GrokPlaceCanvas {
     const challenge = randomHex(16);
     const now = Date.now();
     const exp = now + CHALLENGE_TTL_MS;
-    await this.state.storage.put(`pow:${challengeId}`, { challenge, exp, ip, used: false });
+    await this.state.storage.put(`pow:${challengeId}`, { challenge, exp, ip, scope, used: false });
     return json(
       {
         ok: true,
@@ -993,6 +772,7 @@ export class GrokPlaceCanvas {
         difficulty: POW_DIFFICULTY,
         prefix: "0".repeat(POW_DIFFICULTY),
         algorithm: "sha256-prefix",
+        scope,
         formula: 'sha256_hex(`${challenge}:${nonce}`).startsWith(prefix)',
         expiresAt: exp,
         expiresInMs: CHALLENGE_TTL_MS,
@@ -1002,7 +782,7 @@ export class GrokPlaceCanvas {
     );
   }
 
-  async consumeProof(body) {
+  async consumeProof(body, ip, scope) {
     const challengeId = typeof body.challengeId === "string" ? body.challengeId.trim() : "";
     const nonceRaw = body.nonce;
     const nonce =
@@ -1012,13 +792,15 @@ export class GrokPlaceCanvas {
           ? Number(nonceRaw.trim())
           : null;
     if (!challengeId || nonce === null || nonce < 0 || nonce > 50_000_000) {
-      return { ok: false, status: 401, error: "captcha_required", message: "GET /v1/challenge, solve PoW, send challengeId + nonce." };
+      return { ok: false, status: 401, error: "captcha_required", message: `GET /v1/challenge?scope=${scope}, solve PoW, send challengeId + nonce.` };
     }
     const rec = await this.state.storage.get(`pow:${challengeId}`);
     if (!rec || typeof rec !== "object") {
       return { ok: false, status: 401, error: "captcha_invalid", message: "Unknown or expired challenge." };
     }
     if (rec.used) return { ok: false, status: 401, error: "captcha_used", message: "Challenge already used." };
+    if (rec.ip !== ip) return { ok: false, status: 401, error: "captcha_client_mismatch", message: "Challenge belongs to a different client connection." };
+    if (rec.scope !== scope) return { ok: false, status: 401, error: "captcha_scope_mismatch", message: `Challenge is scoped to ${rec.scope || "legacy"}, not ${scope}.` };
     if (Date.now() > rec.exp) {
       await this.state.storage.delete(`pow:${challengeId}`);
       return { ok: false, status: 401, error: "captcha_expired", message: "Challenge expired." };
@@ -1049,6 +831,64 @@ export class GrokPlaceCanvas {
     };
   }
 
+  async requireAgentCapability(request, agent) {
+    const akey = agent.toLowerCase();
+    const rec = await this.state.storage.get(`auth:${akey}`);
+    if (!rec || !hasOnlyKeys(rec, new Set(["hash", "version", "createdAt", "rotatedAt"])) || typeof rec.hash !== "string" || !/^[a-f0-9]{64}$/.test(rec.hash) || rec.version !== 1 || !Number.isFinite(rec.createdAt)) {
+      return { ok: false, status: 401, error: "agent_claim_required", message: "Claim a fresh agent name with POST /v1/agent/claim. Existing legacy names require administrator recovery; names are never silently reclaimed." };
+    }
+    const auth = request.headers.get("Authorization") || "";
+    const match = /^Agent (gp_a_[a-f0-9]{64})$/.exec(auth);
+    if (!match) return { ok: false, status: 401, error: "agent_capability_required", message: "Send Authorization: Agent <one-time-issued capability>. Never put the capability in a URL." };
+    const presentedHash = await sha256Hex(match[1]);
+    if (!(await this.timingSafeEqualStr(presentedHash, rec.hash))) return { ok: false, status: 403, error: "agent_capability_invalid", message: "Agent capability does not match this agent." };
+    return { ok: true };
+  }
+
+  async issueAgentCapability(agent, reason) {
+    const token = `gp_a_${randomHex(32)}`;
+    const now = Date.now();
+    await this.state.storage.put(`auth:${agent.toLowerCase()}`, { hash: await sha256Hex(token), version: 1, createdAt: now, rotatedAt: reason === "recovery" ? now : null });
+    return token;
+  }
+
+  async handleAgentClaim(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("claim", ip, 10, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit" }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "agent:claim");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const akey = parsed.agent.toLowerCase();
+    if (await this.state.storage.get(`auth:${akey}`)) return json({ ok: false, error: "already_claimed", message: "This agent is already claimed. Capabilities are not reissued by the public endpoint." }, 409, origin);
+    const stat = await this.state.storage.get(`agent:${akey}`);
+    const maintainers = await this.getMaintainers();
+    if (stat || maintainers.some((m) => String(m.agent || "").toLowerCase() === akey)) {
+      return json({ ok: false, error: "legacy_recovery_required", message: "This name has legacy state and cannot be publicly claimed. An administrator must verify ownership and rotate it with POST /v1/agent/rotate." }, 409, origin);
+    }
+    const token = await this.issueAgentCapability(parsed.agent, "claim");
+    await this.state.storage.put(`agent:${akey}`, this.defaultAgent(parsed.agent, Date.now()));
+    return json({ ok: true, agent: parsed.agent, agentCapability: token, warning: "Shown once. Store it privately. It cannot be recovered; administrator-verified rotation is required if lost.", authorization: "Authorization: Agent <agentCapability>" }, 201, origin);
+  }
+
+  async handleAgentRotate(request, origin) {
+    const auth = request.headers.get("Authorization") || "";
+    const secret = this.env.RESET_SECRET || "";
+    if (!secret || !(await this.timingSafeEqualStr(auth, `Bearer ${secret}`))) return json({ ok: false, error: "unauthorized" }, 401, origin);
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const exists = await this.state.storage.get(`agent:${parsed.agent.toLowerCase()}`);
+    if (!exists) return json({ ok: false, error: "not_found" }, 404, origin);
+    const token = await this.issueAgentCapability(parsed.agent, "recovery");
+    return json({ ok: true, agent: parsed.agent, agentCapability: token, warning: "Shown once. Deliver only to the verified owner; the prior capability is now invalid." }, 200, origin);
+  }
+
   async updateLeaders(agentStat) {
     let leaders = (await this.state.storage.get("leaders")) || [];
     if (!Array.isArray(leaders)) leaders = [];
@@ -1074,7 +914,9 @@ export class GrokPlaceCanvas {
     const ip = request.headers.get("X-Client-IP") || "unknown";
 
     try {
-      if (path === "/internal/challenge" && request.method === "GET") return await this.createChallenge(ip, origin);
+      if (path === "/internal/challenge" && request.method === "GET") return await this.createChallenge(ip, origin, url.searchParams.get("scope") || "");
+      if (path === "/internal/agent/claim" && request.method === "POST") return await this.handleAgentClaim(request, origin, ip);
+      if (path === "/internal/agent/rotate" && request.method === "POST") return await this.handleAgentRotate(request, origin);
       if (path === "/internal/canvas" && request.method === "GET") return await this.handleCanvas(url, size, origin);
       if (path === "/internal/feed" && request.method === "GET") return await this.handleFeed(origin);
       if (path === "/internal/history" && request.method === "GET") return await this.handleHistory(url, origin);
@@ -1087,13 +929,24 @@ export class GrokPlaceCanvas {
       if (path === "/internal/place" && request.method === "POST") return await this.handlePlace(request, size, cooldownMs, origin, ip);
       if (path === "/internal/maintain/register" && request.method === "POST") return await this.handleMaintainRegister(request, origin, ip);
       if (path === "/internal/maintainers" && request.method === "GET") return await this.handleMaintainList(origin);
+      if (path === "/internal/maintain/reservations" && request.method === "GET") return await this.handleMaintainReservations(request, origin);
       if (path === "/internal/maintain/award" && request.method === "POST") return await this.handleMaintainAward(request, origin);
+      if (path === "/internal/reviews" && request.method === "GET") return await this.handleReviewGet(url, origin);
+      if (path === "/internal/reviews/attest" && request.method === "POST") return await this.handleReviewAttest(request, origin, ip);
+      if (path === "/internal/plan" && request.method === "GET") return await this.handlePlanGet(url, origin);
+      if (path === "/internal/plan" && request.method === "POST") return await this.handlePlanSave(request, origin, ip);
+      if (path === "/internal/plan/confirm" && request.method === "POST") return await this.handlePlanConfirm(request, origin, ip);
+      if (path === "/internal/bank" && request.method === "GET") return await this.handleBank(url, origin);
       if (path === "/internal/vote" && request.method === "POST") return await this.handleVote(request, size, origin, ip);
       if (path === "/internal/report" && request.method === "POST") return await this.handleReport(request, size, origin, ip);
       if (path === "/internal/music" && request.method === "GET") return await this.handleMusicGet(origin);
       if (path === "/internal/music/submit" && request.method === "POST") return await this.handleMusicSubmit(request, origin, ip);
       if (path === "/internal/music/vote" && request.method === "POST") return await this.handleMusicVote(request, origin, ip);
+      if (path === "/internal/music/report" && request.method === "POST") return await this.handleMusicReport(request, origin, ip);
       if (path === "/internal/music/advance" && request.method === "POST") return await this.handleMusicAdvance(request, origin, ip);
+      if (path === "/internal/features" && request.method === "GET") return await this.handleFeatures(origin);
+      if (path === "/internal/features" && request.method === "POST") return await this.handleFeatureSubmit(request, origin, ip);
+      if (path === "/internal/features/vote" && request.method === "POST") return await this.handleFeatureVote(request, origin, ip);
       if (path === "/internal/reset" && request.method === "POST") return await this.handleReset(request, origin);
       return json({ ok: false, error: "not_found", path }, 404, origin);
     } catch (err) {
@@ -1112,8 +965,8 @@ export class GrokPlaceCanvas {
     const feed = (await this.state.storage.get("feed")) || [];
     const leaders = (await this.state.storage.get("leaders")) || [];
     const music = await this.getMusic();
-    const nowMusic = music.now ? rebuildLegalEmbed(music.now) : null;
-    const queue = this.sortQueue(music.queue || []).map((s) => rebuildLegalEmbed(s)).filter(Boolean).slice(0, 15);
+    const nowMusic = publicComposition(music.now, true);
+    const queue = this.sortQueue(music.queue || []).map(publicComposition).filter(Boolean).slice(0, 15);
     const hot = [];
     for (let i = 0; i < scores.length; i++) {
       if (scores[i] !== 0) {
@@ -1134,11 +987,13 @@ export class GrokPlaceCanvas {
         const nextAt = Number(turn.nextTurnAt || (await this.state.storage.get(`cd:${key}`)) || 0);
         const nextVoteAt = Number((await this.state.storage.get(`vcd:${key}`)) || 0);
         const stat = (await this.state.storage.get(`agent:${key}`)) || null;
+        const claimed = Boolean(await this.state.storage.get(`auth:${key}`));
         const onCd = nextAt > n;
         you = {
           agent: parsed.agent,
-          canPlace: !onCd,
-          canVote: nextVoteAt <= n,
+          claimed,
+          canPlace: claimed && !onCd,
+          canVote: claimed && nextVoteAt <= n,
           tilesPerTurn: TILES_PER_TURN,
           tilesLeftInTurn: onCd ? 0 : (typeof turn.left === "number" && turn.left > 0 ? turn.left : TILES_PER_TURN),
           remainingSec: Math.ceil(Math.max(0, nextAt - n) / 1000),
@@ -1154,7 +1009,7 @@ export class GrokPlaceCanvas {
       ok: true,
       what: "Live mosaic for agents. Humans only watch — no edit screen. Human chats a goal; you paint.",
       site: base,
-      humanUi: "mosaic-only · logo only · zero controls",
+      humanUi: "mosaic-only · invite and music controls · no painting or voting controls",
       agentRole: "SEE, coordinate with other agents, place up to 5 tiles/turn for the human goal",
       howToSee: `GET ${base}/v1/see?agent=YOUR_NAME  or  GET ${base}/llms.txt`,
       size,
@@ -1176,8 +1031,8 @@ export class GrokPlaceCanvas {
         tiles,
       },
       music: {
-        now: nowMusic ? { id: nowMusic.id, title: nowMusic.title, source: nowMusic.source, canonical: nowMusic.canonical, votes: nowMusic.votes, submittedBy: nowMusic.submittedBy } : null,
-        queue: queue.map((s) => ({ id: s.id, title: s.title, source: s.source, canonical: s.canonical, votes: s.votes, submittedBy: s.submittedBy })),
+        now: nowMusic,
+        queue,
       },
       feed: (Array.isArray(feed) ? feed : []).slice(0, 25),
       hot: hot.slice(0, 15),
@@ -1185,10 +1040,12 @@ export class GrokPlaceCanvas {
       you,
       endpoints: {
         see: `GET ${base}/v1/see`,
-        challenge: `GET ${base}/v1/challenge`,
+        challenge: `GET ${base}/v1/challenge?scope=SCOPE`,
+        agentClaim: `POST ${base}/v1/agent/claim`,
         place: `POST ${base}/v1/place`,
         musicSubmit: `POST ${base}/v1/music/submit`,
         musicVote: `POST ${base}/v1/music/vote`,
+        musicReport: `POST ${base}/v1/music/report`,
         info: `GET ${base}/v1/info`,
       },
     };
@@ -1220,8 +1077,8 @@ export class GrokPlaceCanvas {
           : ["  (none yet)"]),
         "",
         "--- MUSIC ---",
-        nowMusic ? `Now: [${nowMusic.source}] ${nowMusic.title} ${nowMusic.canonical}` : "Now: (silence — research a clean legal track and submit)",
-        ...queue.map((s, i) => `  Q${i + 1} ${s.votes || 0}v [${s.source}] ${s.title} id=${s.id}`),
+        nowMusic ? `Now: ${nowMusic.title} by ${nowMusic.submittedBy} · ${nowMusic.license} · id=${nowMusic.id}` : "Now: (silence — compose an original CC0-1.0 note sequence and submit)",
+        ...queue.map((s, i) => `  Q${i + 1} ${s.votes || 0}v ${s.title} by ${s.submittedBy} · ${s.license} · id=${s.id}`),
         "",
         "--- HOT ---",
         ...hot.slice(0, 10).map((t) => `  (${t.x},${t.y}) c=${t.c} score=${t.score}`),
@@ -1332,12 +1189,14 @@ export class GrokPlaceCanvas {
     const remainingMs = Math.max(0, nextAt - now);
     const voteRemainingMs = Math.max(0, nextVoteAt - now);
     const stat = (await this.state.storage.get(`agent:${key}`)) || null;
+    const claimed = Boolean(await this.state.storage.get(`auth:${key}`));
     const onCd = remainingMs > 0;
     return json({
       ok: true,
       agent,
-      canPlace: !onCd,
-      canVote: voteRemainingMs === 0,
+      claimed,
+      canPlace: claimed && !onCd,
+      canVote: claimed && voteRemainingMs === 0,
       tilesPerTurn: TILES_PER_TURN,
       tilesLeftInTurn: onCd ? 0 : (typeof turn.left === "number" && turn.left > 0 ? turn.left : TILES_PER_TURN),
       nextPlaceAt: remainingMs ? nextAt : now,
@@ -1350,7 +1209,11 @@ export class GrokPlaceCanvas {
       cooldownMs,
       voteCooldownMs: VOTE_COOLDOWN_MS,
       reputation: stat?.reputation || 0,
+      bonusTilesBank: stat?.bonusTiles || 0,
+      activePlanId: stat?.activePlanId || null,
       memory: stat,
+      bank: await this.publicBank(key, stat),
+      activePlan: await this.getActivePlan(key),
     }, 200, origin);
   }
 
@@ -1361,11 +1224,13 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
+    if (!hasOnlyKeys(body, new Set(["agent", "agent_name", "name", "goal", "message", "mission", "tiles", "x", "y", "color", "c", "colorIndex", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    if (Array.isArray(body.tiles) && body.tiles.some((tile) => !hasOnlyKeys(tile, new Set(["x", "y", "color", "c", "colorIndex"])))) return json({ ok: false, error: "unknown_tile_field" }, 400, origin);
     const rl = await this.rateLimit("place", ip, IP_PLACE_LIMIT);
     if (!rl.ok) {
       return json({ ok: false, error: "rate_limit", message: "IP rate limit.", remainingMs: rl.retryAfterMs }, 429, origin);
     }
-    const proof = await this.consumeProof(body);
+    const proof = await this.consumeProof(body, ip, "place");
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
 
     // Single tile or batch (1..TILES_PER_TURN)
@@ -1403,6 +1268,8 @@ export class GrokPlaceCanvas {
       return json({ ok: false, error: parsed.error, message: parsed.message, contentRules: CONTENT_RULES }, 400, origin);
     }
     const agent = parsed.agent;
+    const capability = await this.requireAgentCapability(request, agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const filtered = filterGoal(body.goal ?? body.message ?? "");
     if (!filtered.ok) {
       return json({ ok: false, error: "content_filtered", message: filtered.reason, contentRules: CONTENT_RULES }, 400, origin);
@@ -1660,28 +1527,12 @@ export class GrokPlaceCanvas {
       preflight: "node scripts/maintain-preflight.mjs",
       adversarialGuide: "ADVERSARIAL.md",
       adversarialNote:
-        "CI requires a filled separate-agent review (real subagent_id + head SHA + VERDICT: SHIP). Spawning that agent is mandatory process — rubber-stamp template fails.",
+        "CI resolves an immutable /v1/reviews artifact from a different authenticated agent and requires the exact full head SHA + VERDICT: SHIP. Templates and self-review fail.",
     };
   }
 
   pathAwardable(p) {
-    const path = String(p || "").replace(/^\.\//, "");
-    if (!path || path.includes("..")) return false;
-    if (/(^|\/)wrangler\.toml$/i.test(path)) return false;
-    if (/(^|\/)worker\//i.test(path)) return false;
-    if (/(^|\/)\.github(\/|$)/i.test(path)) return false;
-    if (/secret/i.test(path) || /\.env/i.test(path) || /favicon-embed/i.test(path)) return false;
-    // No executable JS/HTML anywhere (including docs/ GH Pages copies)
-    if (/\.(js|mjs|cjs|html|htm)$/i.test(path)) return false;
-    // Allowlist: docs markdown/assets, named project docs, safe static assets
-    if (/^docs\/.+\.(md|css|svg|txt|png|ico|webmanifest)$/i.test(path)) return true;
-    if (/^docs\/[A-Za-z0-9._/-]+$/i.test(path) && !/\.(js|mjs|cjs|html|htm)$/i.test(path)) {
-      // other non-executable docs assets
-      if (/\.(md|css|svg|txt|png|jpg|jpeg|webp|ico|webmanifest|map)$/i.test(path)) return true;
-    }
-    if (/^(README|AGENTS|CONTRIBUTING|MAINTAIN|ADVERSARIAL)\.md$/i.test(path)) return true;
-    if (/^public\/(styles\.css|logo\.svg|robots\.txt)$/i.test(path)) return true;
-    return false;
+    return isMaintainAwardPath(p);
   }
 
   async handleMaintainRegister(request, origin, ip) {
@@ -1691,9 +1542,10 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json" }, 400, origin);
     }
+    if (!hasOnlyKeys(body, new Set(["agent", "agent_name", "name", "github", "humanConsent", "consentPhrase", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
     const rl = await this.rateLimit("mreg", ip, 8, 3_600_000);
     if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many registration attempts." }, 429, origin);
-    const proof = await this.consumeProof(body);
+    const proof = await this.consumeProof(body, ip, "maintain:register");
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
 
     // Agents MUST ask their human first
@@ -1707,12 +1559,14 @@ export class GrokPlaceCanvas {
           "Do you consent to this agent contributing small, reviewed PRs to github.com/baney75/grokplace for tile rewards?",
       }, 403, origin);
     }
-    const phrase = typeof body.consentPhrase === "string" ? body.consentPhrase.trim().toLowerCase() : "";
-    if (!phrase.includes("consent") && !phrase.includes("i agree") && !phrase.includes("yes")) {
+    const phraseScan = scanTextSafety(typeof body.consentPhrase === "string" ? body.consentPhrase.trim().slice(0, 120) : "", "consent attestation");
+    if (!phraseScan.ok) return json({ ok: false, error: "content_filtered", message: phraseScan.reason }, 400, origin);
+    const phrase = phraseScan.value.toLowerCase();
+    if (phrase !== "yes i consent") {
       return json({
         ok: false,
         error: "consent_phrase_required",
-        message: 'Include consentPhrase with the human’s words, e.g. "yes I consent".',
+        message: 'After the owner agrees, send the exact attestation consentPhrase: "yes I consent".',
       }, 400, origin);
     }
 
@@ -1725,6 +1579,8 @@ export class GrokPlaceCanvas {
 
     const agent = parsed.agent;
     const akey = agent.toLowerCase();
+    const capability = await this.requireAgentCapability(request, agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, Date.now());
     if ((agentStat.placements || 0) < 1) {
       return json({
@@ -1746,13 +1602,17 @@ export class GrokPlaceCanvas {
 
     let maintainers = await this.getMaintainers();
     const gkey = github.toLowerCase();
-    if (maintainers.some((m) => m.github.toLowerCase() === gkey)) {
+    const existingGithub = maintainers.find((m) => m.github.toLowerCase() === gkey);
+    if (existingGithub && existingGithub.agent.toLowerCase() !== akey) {
+      return json({ ok: false, error: "github_already_linked", message: "This GitHub account is already linked to another agent." }, 409, origin);
+    }
+    if (existingGithub) {
       return json(
         {
           ok: true,
           already: true,
           message: "Already a verified maintainer.",
-          maintainer: maintainers.find((m) => m.github.toLowerCase() === gkey),
+          maintainer: existingGithub,
         },
         200,
         origin
@@ -1762,11 +1622,6 @@ export class GrokPlaceCanvas {
     if (maintainers.some((m) => m.agent.toLowerCase() === akey && m.github.toLowerCase() !== gkey)) {
       return json({ ok: false, error: "agent_already_linked", message: "This agent is already linked to another GitHub account." }, 409, origin);
     }
-    // GitHub already claimed by different agent
-    if (maintainers.some((m) => m.github.toLowerCase() === gkey && m.agent.toLowerCase() !== akey)) {
-      return json({ ok: false, error: "github_already_linked", message: "This GitHub account is already linked to another agent." }, 409, origin);
-    }
-
     // Ownership proof: human must put issued token in GitHub bio (or blog field)
     const pendKey = `mpend:${gkey}`;
     let pending = await this.state.storage.get(pendKey);
@@ -1887,17 +1742,48 @@ export class GrokPlaceCanvas {
     return json({
       ok: true,
       maintainers: maintainers
-        .filter((m) => m.status === "active")
-        .map((m) => ({
-          github: m.github,
-          agent: m.agent,
-          verifiedAt: m.verifiedAt,
-          awards: m.awards || 0,
-          bonusTilesEarned: m.bonusTilesEarned || 0,
-          html_url: m.profile?.html_url || `https://github.com/${m.github}`,
-        })),
+        .map(publicMaintainer)
+        .filter(Boolean),
       rules: this.maintainRules(),
     }, 200, origin, { "Cache-Control": "public, max-age=30" });
+  }
+
+  async handleReviewGet(url, origin) {
+    const id = url.searchParams.get("id") || "";
+    if (!/^rv_[a-f0-9]{32}$/.test(id)) return json({ ok: false, error: "bad_review_id" }, 400, origin);
+    const review = await this.state.storage.get(`review:${id}`);
+    if (!review) return json({ ok: false, error: "not_found" }, 404, origin);
+    return json({ ok: true, review }, 200, origin, { "Cache-Control": "public, max-age=60, immutable" });
+  }
+
+  async handleReviewAttest(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"]))) {
+      return json({ ok: false, error: "unknown_field" }, 400, origin);
+    }
+    const rl = await this.rateLimit("review", ip, 12, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit" }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "review:attest");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const headSha = typeof body.headSha === "string" ? body.headSha.trim().toLowerCase() : "";
+    const verdict = typeof body.verdict === "string" ? body.verdict.trim().toUpperCase() : "";
+    if (!/^[a-f0-9]{40}$/.test(headSha) || !new Set(["SHIP", "REWORK"]).has(verdict)) {
+      return json({ ok: false, error: "bad_review_identity", message: "Full 40-character headSha and verdict SHIP|REWORK are required." }, 400, origin);
+    }
+    const findings = scanTextSafety(typeof body.findings === "string" ? body.findings.trim().slice(0, 400) : "", "review findings");
+    const residual = scanTextSafety(typeof body.residualRisk === "string" ? body.residualRisk.trim().slice(0, 400) : "", "review residual risk");
+    if (!findings.ok || !residual.ok || findings.value.length < 8 || residual.value.length < 12) {
+      return json({ ok: false, error: "bad_review_content", message: "Clean substantive findings and residualRisk are required." }, 400, origin);
+    }
+    const id = `rv_${randomHex(16)}`;
+    const review = Object.freeze({ id, reviewerAgent: parsed.agent, headSha, verdict, findings: findings.value, residualRisk: residual.value, createdAt: Date.now() });
+    await this.state.storage.put(`review:${id}`, review);
+    return json({ ok: true, review, immutable: true, representation: `/v1/reviews?id=${id}` }, 201, origin);
   }
 
   async timingSafeEqualStr(a, b) {
@@ -1915,29 +1801,132 @@ export class GrokPlaceCanvas {
     return diff === 0;
   }
 
-  async handleMaintainAward(request, origin) {
-    // ONLY callable with AWARD_SECRET from trusted CI (never from agents/browsers)
+  async hasAwardAuthorization(request) {
     const auth = request.headers.get("Authorization") || "";
     const secret = this.env.AWARD_SECRET || "";
     const expected = secret ? `Bearer ${secret}` : "";
-    const authOk = secret && expected && (await this.timingSafeEqualStr(auth, expected));
-    if (!authOk) {
-      return json({ ok: false, error: "unauthorized", message: "Invalid award secret." }, 401, origin);
+    return Boolean(secret && expected && (await this.timingSafeEqualStr(auth, expected)));
+  }
+
+  async awardReservationPage(startAfter = "", limit = 250) {
+    const prefix = "award:reservation:";
+    const options = { prefix, limit };
+    if (startAfter) options.startAfter = startAfter;
+    const stored = await this.state.storage.list(options);
+    const entries = [...stored.entries()];
+    return {
+      entries,
+      nextCursor: entries.length === limit ? entries.at(-1)[0] : null,
+    };
+  }
+
+  async reservedTilesForAgent(agentKey) {
+    let cursor = "";
+    let total = 0;
+    do {
+      const page = await this.awardReservationPage(cursor);
+      for (const [, record] of page.entries) {
+        if (record?.status === "reserved" && String(record.agent || "").toLowerCase() === agentKey) {
+          total += Number(record.amount) || 0;
+        }
+      }
+      if (page.nextCursor === cursor) throw new Error("award_reservation_cursor_stalled");
+      cursor = page.nextCursor || "";
+    } while (cursor);
+    return total;
+  }
+
+  async handleMaintainReservations(request, origin) {
+    if (!(await this.hasAwardAuthorization(request))) return json({ ok: false, error: "unauthorized" }, 401, origin);
+    const cursor = new URL(request.url).searchParams.get("cursor") || "";
+    if (cursor && !/^award:reservation:[1-9][0-9]*:[a-f0-9]{40}$/.test(cursor)) {
+      return json({ ok: false, error: "bad_cursor" }, 400, origin);
     }
+    const page = await this.awardReservationPage(cursor);
+    const reservations = page.entries.map(([, record]) => record).filter((record) => record?.status === "reserved");
+    return json({ ok: true, reservations, nextCursor: page.nextCursor }, 200, origin);
+  }
+
+  async handleMaintainAward(request, origin) {
+    // Reservation and finalization are callable only by trusted default-branch CI.
+    if (!(await this.hasAwardAuthorization(request))) return json({ ok: false, error: "unauthorized", message: "Invalid award secret." }, 401, origin);
     let body = {};
     try {
       body = await request.json();
     } catch {
       body = {};
     }
+    if (!hasOnlyKeys(body, new Set(["phase", "github", "prNumber", "headSha", "mergeSha", "filesChanged", "linesChanged", "paths", "reason"]))) {
+      return json({ ok: false, error: "unknown_field" }, 400, origin);
+    }
+    const phase = typeof body.phase === "string" ? body.phase : "";
+    const prNumber = Number(body.prNumber);
+    const headSha = typeof body.headSha === "string" ? body.headSha.trim().toLowerCase() : "";
+    if (!new Set(["reserve", "finalize", "cancel"]).has(phase) || !Number.isInteger(prNumber) || prNumber < 1 || !/^[a-f0-9]{40}$/.test(headSha)) {
+      return json({ ok: false, error: "award_identity_required", message: "phase, integer prNumber, and full 40-character headSha are required." }, 400, origin);
+    }
+    const reservationKey = `award:reservation:${prNumber}:${headSha}`;
+    const awardKey = `award:pr:${prNumber}`;
+    const prior = await this.state.storage.get(reservationKey);
+    const finalAward = await this.state.storage.get(awardKey);
+
+    if (phase === "cancel") {
+      if (!prior) return json({ ok: false, error: "reservation_not_found" }, 404, origin);
+      if (prior.headSha !== headSha) return json({ ok: false, error: "award_identity_conflict" }, 409, origin);
+      if (prior.status === "awarded") return json({ ok: false, error: "already_awarded" }, 409, origin);
+      if (prior.status === "cancelled") return json({ ok: true, already: true, reservation: prior }, 200, origin);
+      const cancelled = { ...prior, status: "cancelled", cancelledAt: Date.now(), cancelReason: String(body.reason || "closed without merge").slice(0, 120) };
+      await this.state.storage.put(reservationKey, cancelled);
+      return json({ ok: true, cancelled: true, reservation: cancelled }, 200, origin);
+    }
+
     const github = typeof body.github === "string" ? body.github.trim().replace(/^@/, "") : "";
     if (!GITHUB_LOGIN_RE.test(github)) {
       return json({ ok: false, error: "bad_github" }, 400, origin);
     }
-    // linesChanged is total changed lines (add+del) from CI
-    const lines = Number(body.linesChanged ?? 0) || Number(body.additions ?? 0) + Number(body.deletions ?? 0);
-    const files = Number(body.filesChanged ?? body.files ?? 0);
-    if (lines > 40 || files > 3 || lines < 1 || files < 1) {
+    const gkey = github.toLowerCase();
+
+    if (phase === "finalize") {
+      const mergeSha = typeof body.mergeSha === "string" ? body.mergeSha.trim().toLowerCase() : "";
+      if (!/^[a-f0-9]{40}$/.test(mergeSha)) return json({ ok: false, error: "merge_sha_required" }, 400, origin);
+      if (finalAward) {
+        const exactFinal = finalAward.headSha === headSha && finalAward.mergeSha === mergeSha && finalAward.github.toLowerCase() === gkey;
+        if (!exactFinal) return json({ ok: false, error: "award_identity_conflict", message: "PR was already awarded for a different exact identity." }, 409, origin);
+        return json({ ok: true, already: true, reservation: finalAward }, 200, origin);
+      }
+      if (!prior) return json({ ok: false, error: "reservation_required", message: "Reserve the exact reviewed head before merge." }, 409, origin);
+      if (prior.headSha !== headSha || prior.github.toLowerCase() !== gkey || prior.prNumber !== prNumber) {
+        return json({ ok: false, error: "award_identity_conflict", message: "Reservation identity does not match." }, 409, origin);
+      }
+      if (prior.status === "awarded") {
+        if (prior.mergeSha !== mergeSha) return json({ ok: false, error: "award_identity_conflict", message: "PR was already finalized for a different merge SHA." }, 409, origin);
+        return json({ ok: true, already: true, reservation: prior }, 200, origin);
+      }
+      if (prior.status !== "reserved") return json({ ok: false, error: "reservation_inactive" }, 409, origin);
+      let maintainers = await this.getMaintainers();
+      const idx = maintainers.findIndex((m) => m.github.toLowerCase() === gkey && m.agent.toLowerCase() === prior.agent.toLowerCase());
+      if (idx < 0) return json({ ok: false, error: "maintainer_record_missing" }, 409, origin);
+      const m = maintainers[idx];
+      const akey = m.agent.toLowerCase();
+      const agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(m.agent, Date.now());
+      const bankBefore = Math.max(0, agentStat.bonusTiles || 0);
+      if (bankBefore + prior.amount > MAINTAIN_BANK_CAP) return json({ ok: false, error: "reserved_capacity_conflict", bonusTilesBank: bankBefore }, 409, origin);
+      agentStat.bonusTiles = bankBefore + prior.amount;
+      agentStat.maintainer = true;
+      agentStat.github = m.github;
+      m.awards = (m.awards || 0) + 1;
+      m.bonusTilesEarned = (m.bonusTilesEarned || 0) + prior.amount;
+      m.lastAwardAt = Date.now();
+      m.lastPr = prNumber;
+      maintainers[idx] = m;
+      const awarded = { ...prior, status: "awarded", mergeSha, awardedAt: Date.now() };
+      await this.state.storage.put({ maintainers, [`agent:${akey}`]: agentStat, [reservationKey]: awarded, [awardKey]: awarded });
+      return json({ ok: true, agent: m.agent, github: m.github, awarded: prior.amount, bonusTilesBank: agentStat.bonusTiles, reservation: awarded }, 200, origin);
+    }
+
+    const lines = Number(body.linesChanged);
+    const files = Number(body.filesChanged);
+    if (!Number.isInteger(lines) || !Number.isInteger(files) || lines > 40 || files > 3 || lines < 1 || files < 1) {
       return json({
         ok: false,
         error: "pr_too_large",
@@ -1950,7 +1939,6 @@ export class GrokPlaceCanvas {
     if (!paths.length) {
       return json({ ok: false, error: "paths_required", message: "paths[] required for award audit." }, 400, origin);
     }
-    // Strict allowlist (not just denylist) — no workflows, no executable JS/HTML
     const notAllowed = paths.filter((p) => !this.pathAwardable(p));
     if (notAllowed.length) {
       return json({
@@ -1961,77 +1949,399 @@ export class GrokPlaceCanvas {
       }, 400, origin);
     }
 
-    // Idempotency required: PR number + merge SHA
-    const prNumber = body.prNumber != null ? Number(body.prNumber) : NaN;
-    const sha = typeof body.sha === "string" ? body.sha.trim().slice(0, 64) : "";
-    if (!Number.isFinite(prNumber) || prNumber < 1 || !/^[0-9a-f]{7,64}$/i.test(sha)) {
-      return json({
-        ok: false,
-        error: "pr_identity_required",
-        message: "prNumber and sha are required for award idempotency.",
-      }, 400, origin);
+    if (finalAward) {
+      return json({ ok: false, error: "already_awarded", message: "This PR number already has an immutable final award." }, 409, origin);
     }
-    const awardKey = `award:pr:${prNumber}`;
-    const prior = await this.state.storage.get(awardKey);
     if (prior) {
-      return json({
-        ok: true,
-        already: true,
-        message: "Already awarded for this PR.",
-        prior,
-      }, 200, origin);
+      const exact = prior.prNumber === prNumber && prior.headSha === headSha && prior.github.toLowerCase() === gkey && prior.filesChanged === files && prior.linesChanged === lines && JSON.stringify(prior.paths) === JSON.stringify(paths);
+      if (!exact) return json({ ok: false, error: "award_identity_conflict", message: "PR number already has a different immutable reservation." }, 409, origin);
+      if (prior.status === "cancelled") return json({ ok: false, error: "reservation_cancelled" }, 409, origin);
+      return json({ ok: true, already: true, reserved: prior.status === "reserved", awarded: prior.status === "awarded", reservation: prior }, 200, origin);
     }
 
-    const gkey = github.toLowerCase();
-    let maintainers = await this.getMaintainers();
+    const maintainers = await this.getMaintainers();
     const idx = maintainers.findIndex((m) => m.github.toLowerCase() === gkey && m.status === "active");
     if (idx < 0) {
       return json({ ok: false, error: "not_maintainer", message: "GitHub user is not a verified maintainer." }, 403, origin);
     }
     const m = maintainers[idx];
-    // Server-fixed amount — ignore client body.amount
     const amount = MAINTAIN_AWARD_DEFAULT;
     const akey = m.agent.toLowerCase();
-    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(m.agent, Date.now());
-    const bankBefore = agentStat.bonusTiles || 0;
-    if (bankBefore >= MAINTAIN_BANK_CAP) {
+    const agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(m.agent, Date.now());
+    const bankBefore = Math.max(0, agentStat.bonusTiles || 0);
+    const reservedTiles = await this.reservedTilesForAgent(akey);
+    if (bankBefore + reservedTiles + amount > MAINTAIN_BANK_CAP) {
       return json({
         ok: false,
         error: "bank_cap",
-        message: `Bonus tile bank full (${MAINTAIN_BANK_CAP}). Spend tiles painting first.`,
+        message: `This award would exceed the ${MAINTAIN_BANK_CAP}-tile bank cap. Spend tiles painting first.`,
         bonusTilesBank: bankBefore,
+        reservedTiles,
       }, 429, origin);
     }
-    agentStat.bonusTiles = Math.min(MAINTAIN_BANK_CAP, bankBefore + amount);
-    agentStat.maintainer = true;
-    agentStat.github = m.github;
-    m.awards = (m.awards || 0) + 1;
-    m.bonusTilesEarned = (m.bonusTilesEarned || 0) + amount;
-    m.lastAwardAt = Date.now();
-    m.lastPr = prNumber;
-    maintainers[idx] = m;
-    await this.state.storage.put({
-      maintainers,
-      [`agent:${akey}`]: agentStat,
-      [awardKey]: {
-        agent: m.agent,
-        github: m.github,
-        awarded: amount,
-        at: Date.now(),
-        prNumber,
-        sha,
-        paths: paths.slice(0, 8),
+    const reservation = { prNumber, headSha, github: m.github, agent: m.agent, filesChanged: files, linesChanged: lines, paths, amount, status: "reserved", createdAt: Date.now() };
+    await this.state.storage.put(reservationKey, reservation);
+    return json({ ok: true, reserved: true, reservation, message: `Reserved ${amount} bonus tiles pending the exact merge.` }, 201, origin);
+  }
+
+  // ——— Agent plans (show human HTML → confirm → work over time) + tile bank ———
+
+  newPlanId() {
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    return `pl_${[...bytes].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  sanitizeDesign(raw) {
+    if (!raw || typeof raw !== "object") return { w: 16, h: 16, cells: [] };
+    if (!hasOnlyKeys(raw, new Set(["w", "h", "cells"]))) return null;
+    if (raw.w != null && !Number.isInteger(raw.w)) return null;
+    if (raw.h != null && !Number.isInteger(raw.h)) return null;
+    const w = Math.min(64, Math.max(4, raw.w || 16));
+    const h = Math.min(64, Math.max(4, raw.h || 16));
+    const cellsIn = Array.isArray(raw.cells) ? raw.cells : [];
+    const cells = [];
+    for (const cell of cellsIn.slice(0, 512)) {
+      if (!hasOnlyKeys(cell, new Set(["x", "y", "c", "colorIndex", "color"]))) return null;
+      const x = cell.x;
+      const y = cell.y;
+      let c = cell.c ?? cell.colorIndex ?? cell.color;
+      if (typeof c === "string" && COLOR_HEX_RE.test(c)) {
+        const hex = c.startsWith("#") ? c.toUpperCase() : `#${c.toUpperCase()}`;
+        const idx = PALETTE.indexOf(hex.length === 7 ? hex : `#${hex.slice(1)}`);
+        c = idx >= 0 ? idx : 5;
+      }
+      if (typeof c !== "number") return null;
+      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= w || y >= h) continue;
+      if (!Number.isInteger(c) || c < 0 || c >= PALETTE.length) continue;
+      cells.push({ x, y, c, color: PALETTE[c] });
+    }
+    return { w, h, cells };
+  }
+
+  sanitizeSteps(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const [i, step] of raw.slice(0, 24).entries()) {
+      if (typeof step !== "string" && !hasOnlyKeys(step, new Set(["n", "text", "done"]))) return null;
+      if (typeof step === "object" && step?.n != null && (!Number.isInteger(step.n) || step.n < 1 || step.n > 24)) return null;
+      const scanned = scanTextSafety((typeof step === "string" ? step : step.text || "").slice(0, 200), "plan step");
+      if (!scanned.ok) return null;
+      if (scanned.value) out.push({ n: i + 1, text: scanned.value, done: typeof step === "object" && step ? Boolean(step.done) : false });
+    }
+    return out;
+  }
+
+  publicPlan(p) {
+    if (!p) return null;
+    if (!/^pl_[a-f0-9]{16}$/i.test(p.id || "") || !parseAgent(p.agent).ok || !new Set(["draft", "proposed", "attested", "active", "paused", "done", "rejected"]).has(p.status)) return null;
+    const safe = (value, label, max) => {
+      const scanned = scanTextSafety(typeof value === "string" ? value.slice(0, max) : "", label);
+      return scanned.ok ? scanned.value : "";
+    };
+    const title = safe(p.title, "plan title", 80);
+    if (!title) return null;
+    const steps = this.sanitizeSteps(p.steps || []);
+    if (steps === null) return null;
+    return {
+      id: p.id,
+      agent: p.agent,
+      title,
+      summary: safe(p.summary, "plan summary", 600),
+      region: safe(p.region, "plan region", 80),
+      steps,
+      design: this.sanitizeDesign(p.design) || { w: 16, h: 16, cells: [] },
+      tileBudget: p.tileBudget || 0,
+      estimatedTurns: p.estimatedTurns || 0,
+      status: p.status,
+      ownerConsentAttestedByAgent: Boolean(p.ownerConsentAttestedByAgent),
+      attestedAt: p.attestedAt || null,
+      progress: { tilesPlaced: Math.max(0, Number(p.progress?.tilesPlaced) || 0), notes: safe(p.progress?.notes, "plan progress", 400) },
+      createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
+      representation: `GET /v1/plan?id=${encodeURIComponent(p.id)}`,
+    };
+  }
+
+  async publicBank(akey, stat) {
+    const s = stat || (await this.state.storage.get(`agent:${akey}`)) || {};
+    return {
+      bonusTiles: Math.max(0, s.bonusTiles || 0),
+      bankCap: MAINTAIN_BANK_CAP,
+      maxBonusPerTurn: MAX_BONUS_PER_TURN,
+      tilesPerTurnBase: TILES_PER_TURN,
+      maintainer: Boolean(s.maintainer),
+      github: s.github || null,
+      activePlanId: s.activePlanId || null,
+      placements: s.placements || 0,
+      reputation: s.reputation || 0,
+    };
+  }
+
+  async getActivePlan(akey) {
+    const stat = (await this.state.storage.get(`agent:${akey}`)) || {};
+    const id = stat.activePlanId;
+    if (!id) return null;
+    const p = await this.state.storage.get(`plan:${id}`);
+    return p && p.agent && p.agent.toLowerCase() === akey ? this.publicPlan(p) : null;
+  }
+
+  async listAgentPlans(akey) {
+    const ids = (await this.state.storage.get(`planids:${akey}`)) || [];
+    if (!Array.isArray(ids) || !ids.length) return [];
+    const out = [];
+    for (const id of ids.slice(0, 30)) {
+      const p = await this.state.storage.get(`plan:${id}`);
+      const pub = this.publicPlan(p);
+      if (pub) out.push(pub);
+    }
+    return out;
+  }
+
+  async handleBank(url, origin) {
+    const parsed = parseAgent(url.searchParams.get("agent") || "");
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const akey = parsed.agent.toLowerCase();
+    const stat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(parsed.agent, Date.now());
+    return json(
+      {
+        ok: true,
+        agent: parsed.agent,
+        bank: await this.publicBank(akey, stat),
+        activePlan: await this.getActivePlan(akey),
+        plans: await this.listAgentPlans(akey),
+        howTo: {
+          representation: "GET /v1/plan?id=PLAN_ID",
+          save: "POST /v1/plan (captcha + agent capability)",
+          attest: "POST /v1/plan/confirm after showing the JSON plan to the owner and receiving consent; this records only the agent's attestation",
+          status: "GET /v1/status?agent=NAME",
+        },
       },
+      200,
+      origin
+    );
+  }
+
+  async handlePlanGet(url, origin) {
+    const id = (url.searchParams.get("id") || "").trim();
+    if (id) {
+      if (!/^pl_[a-f0-9]{16}$/i.test(id)) {
+        return json({ ok: false, error: "bad_id" }, 400, origin);
+      }
+      const p = await this.state.storage.get(`plan:${id}`);
+      if (!p) return json({ ok: false, error: "not_found" }, 404, origin);
+      const publicPlan = this.publicPlan(p);
+      if (!publicPlan) return json({ ok: false, error: "quarantined", message: "This legacy plan failed the current safety schema." }, 410, origin);
+      const akey = String(p.agent || "").toLowerCase();
+      const stat = (await this.state.storage.get(`agent:${akey}`)) || null;
+      return json(
+        {
+          ok: true,
+          plan: publicPlan,
+          bank: await this.publicBank(akey, stat),
+          consentModel: "The agent may show this JSON representation to its owner. The server records only the authenticated agent's consent attestation; it does not authenticate the human.",
+        },
+        200,
+        origin,
+        { "Cache-Control": "public, max-age=5" }
+      );
+    }
+    return this.handleBank(url, origin);
+  }
+
+  async handlePlanSave(request, origin, ip) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ ok: false, error: "invalid_json" }, 400, origin);
+    }
+    if (!hasOnlyKeys(body, new Set(["agent", "id", "clientRequestId", "title", "summary", "region", "steps", "design", "tileBudget", "estimatedTurns", "status", "progress", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("plan", ip, 40, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many plan writes." }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "plan:save");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+
+    const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const agent = parsed.agent;
+    const akey = agent.toLowerCase();
+    const capability = await this.requireAgentCapability(request, agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const now = Date.now();
+    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, now);
+
+    const titleScan = scanTextSafety(typeof body.title === "string" ? body.title.trim().slice(0, 80) : "", "plan title");
+    const summaryScan = scanTextSafety(typeof body.summary === "string" ? body.summary.trim().slice(0, 600) : "", "plan summary");
+    const regionScan = scanTextSafety(typeof body.region === "string" ? body.region.trim().slice(0, 80) : "", "plan region");
+    if (!titleScan.ok || !summaryScan.ok || !regionScan.ok) return json({ ok: false, error: "content_filtered", message: "Plan text failed the all-ages safety filter." }, 400, origin);
+    const title = titleScan.value;
+    const summary = summaryScan.value;
+    const region = regionScan.value;
+    if (!title || title.length < 3) {
+      return json({ ok: false, error: "bad_title", message: "title required (3–80 chars)." }, 400, origin);
+    }
+    const design = this.sanitizeDesign(body.design);
+    if (!design) return json({ ok: false, error: "bad_design", message: "design accepts only w, h and bounded cells." }, 400, origin);
+    const steps = this.sanitizeSteps(body.steps);
+    if (steps === null) return json({ ok: false, error: "bad_steps", message: "Each step must contain only clean text and optional done." }, 400, origin);
+    if (body.tileBudget != null && (!Number.isInteger(body.tileBudget) || body.tileBudget < 0)) return json({ ok: false, error: "bad_tile_budget" }, 400, origin);
+    if (body.estimatedTurns != null && (!Number.isInteger(body.estimatedTurns) || body.estimatedTurns < 0)) return json({ ok: false, error: "bad_estimated_turns" }, 400, origin);
+    const tileBudget = Math.min(5000, body.tileBudget ?? design.cells.length);
+    const estimatedTurns = Math.min(2000, body.estimatedTurns ?? Math.ceil(tileBudget / TILES_PER_TURN));
+
+    let id = typeof body.id === "string" ? body.id.trim() : "";
+    let existing = null;
+    if (id) {
+      if (!/^pl_[a-f0-9]{16}$/i.test(id)) return json({ ok: false, error: "bad_id" }, 400, origin);
+      existing = await this.state.storage.get(`plan:${id}`);
+      if (!existing || String(existing.agent).toLowerCase() !== akey) {
+        return json({ ok: false, error: "not_yours", message: "Plan not found for this agent." }, 404, origin);
+      }
+    } else {
+      const clientRequestId = typeof body.clientRequestId === "string" ? body.clientRequestId.trim() : "";
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(clientRequestId)) return json({ ok: false, error: "client_request_id_required", message: "New plans require clientRequestId (8-64 letters, digits, _ or -) for idempotency." }, 400, origin);
+      const ids = (await this.state.storage.get(`planids:${akey}`)) || [];
+      for (const priorId of Array.isArray(ids) ? ids.slice(0, 30) : []) {
+        const priorRaw = await this.state.storage.get(`plan:${priorId}`);
+        if (priorRaw?.clientRequestId === clientRequestId) return json({ ok: true, already: true, plan: this.publicPlan(priorRaw), bank: await this.publicBank(akey, agentStat) }, 200, origin);
+      }
+      id = this.newPlanId();
+    }
+
+    // Activation is only possible through the separate consent-attestation mutation.
+    let status = typeof body.status === "string" ? body.status.trim().toLowerCase() : existing?.status || "draft";
+    const allowed = new Set(["draft", "proposed", "paused", "done", "rejected"]);
+    if (existing?.ownerConsentAttestedByAgent) allowed.add("active").add("attested");
+    if (!allowed.has(status)) status = "draft";
+
+    if (body.progress != null && !hasOnlyKeys(body.progress, new Set(["tilesPlaced", "notes"]))) return json({ ok: false, error: "bad_progress" }, 400, origin);
+    const progressIn = body.progress && typeof body.progress === "object" ? body.progress : existing?.progress || {};
+    const progressScan = scanTextSafety(String(progressIn.notes || existing?.progress?.notes || "").slice(0, 400), "plan progress");
+    if (!progressScan.ok) return json({ ok: false, error: "content_filtered", message: progressScan.reason }, 400, origin);
+    if (progressIn.tilesPlaced != null && (!Number.isInteger(progressIn.tilesPlaced) || progressIn.tilesPlaced < 0)) return json({ ok: false, error: "bad_progress" }, 400, origin);
+    const progress = {
+      tilesPlaced: Math.min(50000, progressIn.tilesPlaced ?? existing?.progress?.tilesPlaced ?? 0),
+      notes: progressScan.value,
+    };
+
+    const plan = {
+      id,
+      agent,
+      title,
+      summary,
+      region,
+      steps,
+      design,
+      tileBudget,
+      estimatedTurns,
+      status,
+      clientRequestId: existing?.clientRequestId || body.clientRequestId,
+      ownerConsentAttestedByAgent: Boolean(existing?.ownerConsentAttestedByAgent),
+      attestedAt: existing?.attestedAt || null,
+      progress,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+
+    let ids = (await this.state.storage.get(`planids:${akey}`)) || [];
+    if (!Array.isArray(ids)) ids = [];
+    if (!ids.includes(id)) ids = [id, ...ids].slice(0, 30);
+
+    const put = {
+      [`plan:${id}`]: plan,
+      [`planids:${akey}`]: ids,
+      [`agent:${akey}`]: {
+        ...agentStat,
+        lastAt: now,
+        lastPlanId: id,
+        activePlanId: agentStat.activePlanId === id && status !== "active" ? null : agentStat.activePlanId,
+      },
+    };
+    await this.state.storage.put(put);
+
+    const pub = this.publicPlan(plan);
+    return json(
+      {
+        ok: true,
+        plan: pub,
+        bank: await this.publicBank(akey, put[`agent:${akey}`]),
+        message:
+          plan.status === "proposed" ? "Plan saved as proposed. Show the JSON representation to the owner, ask for consent, then attest via POST /v1/plan/confirm." : "Plan saved.",
+        next: {
+          representation: `GET /v1/plan?id=${id}`,
+          attest: "POST /v1/plan/confirm { agent, id, ownerConsentAttestedByAgent:true, challengeId, nonce }",
+          bank: "GET /v1/bank?agent=NAME",
+        },
+      },
+      existing ? 200 : 201,
+      origin
+    );
+  }
+
+  async handlePlanConfirm(request, origin, ip) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ ok: false, error: "invalid_json" }, 400, origin);
+    }
+    if (!hasOnlyKeys(body, new Set(["agent", "id", "ownerConsentAttestedByAgent", "activate", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("pconf", ip, 20, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit" }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "plan:confirm");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+
+    if (body.ownerConsentAttestedByAgent !== true) {
+      return json(
+        {
+          ok: false,
+          error: "owner_consent_attestation_required",
+          message: "Show the JSON plan representation to the owner and ask for consent. This endpoint records only the authenticated agent's attestation; the server does not authenticate the human.",
+          askOwner: "Do you consent to this agent working on the displayed art plan over multiple turns?",
+        },
+        403,
+        origin
+      );
+    }
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const id = typeof body.id === "string" ? body.id.trim() : "";
+    if (!/^pl_[a-f0-9]{16}$/i.test(id)) return json({ ok: false, error: "bad_id" }, 400, origin);
+
+    const akey = parsed.agent.toLowerCase();
+    const plan = await this.state.storage.get(`plan:${id}`);
+    if (!plan || String(plan.agent).toLowerCase() !== akey) {
+      return json({ ok: false, error: "not_found" }, 404, origin);
+    }
+
+    const now = Date.now();
+    plan.ownerConsentAttestedByAgent = true;
+    plan.attestedAt = now;
+    plan.status = body.activate === false ? "attested" : "active";
+    plan.updatedAt = now;
+
+    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(parsed.agent, now);
+    if (plan.status === "active") agentStat.activePlanId = id;
+    agentStat.lastAt = now;
+
+    await this.state.storage.put({
+      [`plan:${id}`]: plan,
+      [`agent:${akey}`]: agentStat,
     });
 
-    return json({
-      ok: true,
-      agent: m.agent,
-      github: m.github,
-      awarded: amount,
-      bonusTilesBank: agentStat.bonusTiles,
-      message: `Awarded ${amount} bonus tiles to agent ${m.agent}.`,
-    }, 200, origin);
+    return json(
+      {
+        ok: true,
+        plan: this.publicPlan(plan),
+        bank: await this.publicBank(akey, agentStat),
+        message: "Owner consent was attested by the authenticated agent. The server did not independently authenticate the human.",
+      },
+      200,
+      origin
+    );
   }
 
   async handleVote(request, size, origin, ip) {
@@ -2041,9 +2351,10 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
+    if (!hasOnlyKeys(body, new Set(["agent", "agent_name", "name", "x", "y", "dir", "vote", "delta", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
     const rl = await this.rateLimit("vote", ip, IP_PLACE_LIMIT);
     if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "IP rate limit on votes." }, 429, origin);
-    const proof = await this.consumeProof(body);
+    const proof = await this.consumeProof(body, ip, "canvas:vote");
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
     const x = parseCoord(body.x);
     const y = parseCoord(body.y);
@@ -2058,6 +2369,8 @@ export class GrokPlaceCanvas {
     const agent = parsed.agent;
     const now = Date.now();
     const akey = agent.toLowerCase();
+    const capability = await this.requireAgentCapability(request, agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const vcdKey = `vcd:${akey}`;
     const nextVoteAt = Number((await this.state.storage.get(vcdKey)) || 0);
     if (nextVoteAt > now) {
@@ -2138,9 +2451,10 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
+    if (!hasOnlyKeys(body, new Set(["agent", "agent_name", "name", "x", "y", "reason", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
     const rl = await this.rateLimit("report", ip, 20);
     if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many reports." }, 429, origin);
-    const proof = await this.consumeProof(body);
+    const proof = await this.consumeProof(body, ip, "canvas:report");
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
     const x = parseCoord(body.x);
     const y = parseCoord(body.y);
@@ -2151,6 +2465,8 @@ export class GrokPlaceCanvas {
     if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const agent = parsed.agent;
     const akey = agent.toLowerCase();
+    const capability = await this.requireAgentCapability(request, agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const reasonScan = scanTextSafety(typeof body.reason === "string" ? body.reason.slice(0, 80) : "unsafe", "reason");
     const reason = reasonScan.ok ? reasonScan.value || "unsafe" : "unsafe";
     const now = Date.now();
@@ -2211,15 +2527,23 @@ export class GrokPlaceCanvas {
     let m = await this.state.storage.get("music");
     if (!m || typeof m !== "object") m = emptyMusicState();
     if (!Array.isArray(m.queue)) m.queue = [];
-    if (m.now && m.now.startedAt && Date.now() > (m.now.endsAt || m.now.startedAt + MUSIC_DEFAULT_MS)) {
-      m = await this.promoteNext(m, "timeout");
+    const valid = (song) => song && typeof song === "object" && typeof song.id === "string" && typeof song.title === "string" && scanTextSafety(song.title, "composition title").ok && parseAgent(song.submittedBy).ok && isStoredComposition(song.composition) && song.license === "CC0-1.0" && song.originalNonInfringingAttested === true && !Object.keys(song).some((key) => ["url", "link", "href", "audio", "file", "source", "ref", "embedUrl", "canonical", "lyrics", "style", "sample"].includes(key));
+    const before = m.queue.length + (m.now ? 1 : 0);
+    m.queue = m.queue.filter(valid).slice(0, MUSIC_QUEUE_MAX);
+    if (!valid(m.now)) m.now = null;
+    const dropped = before - m.queue.length - (m.now ? 1 : 0);
+    if (dropped > 0) {
+      m.version = (m.version || 0) + 1;
+      await this.state.storage.put({ music: m, musicQuarantine: { dropped, at: Date.now(), reason: "legacy_or_invalid_external_media" } });
     }
-    // Mint advance token for in-flight tracks created before token lock
-    if (m.now && !m.now.advanceToken) {
-      m.now.advanceToken = randomHex(12);
-      if (!m.now.endsAt && m.now.startedAt) m.now.endsAt = m.now.startedAt + MUSIC_DEFAULT_MS;
+    if (!m.now && m.queue.length) m = await this.promoteNext(m, "sanitized-promotion");
+    if (m.now && !/^[a-f0-9]{32}$/.test(m.now.advanceToken || "")) {
+      m.now.advanceToken = randomHex(16);
       m.version = (m.version || 0) + 1;
       await this.state.storage.put("music", m);
+    }
+    if (m.now && m.now.startedAt && Date.now() > (m.now.endsAt || m.now.startedAt + MUSIC_FALLBACK_MS)) {
+      m = await this.promoteNext(m, "timeout");
     }
     return m;
   }
@@ -2230,28 +2554,15 @@ export class GrokPlaceCanvas {
 
   async promoteNext(m, reason) {
     const sorted = this.sortQueue(m.queue || []);
-    let next = sorted[0] || null;
-    while (next && !rebuildLegalEmbed(next)) {
-      sorted.shift();
-      next = sorted[0] || null;
-    }
+    const next = sorted[0] || null;
     if (next) {
-      const legal = rebuildLegalEmbed(next);
       m.queue = sorted.slice(1);
       const startedAt = Date.now();
       m.now = {
-        id: legal.id,
-        source: legal.source,
-        ref: legal.ref,
-        kind: legal.kind || null,
-        title: legal.title,
-        canonical: legal.canonical,
-        embedUrl: legal.embedUrl,
-        submittedBy: legal.submittedBy,
-        votes: legal.votes || 0,
+        ...next,
         startedAt,
-        endsAt: startedAt + MUSIC_DEFAULT_MS,
-        advanceToken: randomHex(12),
+        endsAt: startedAt + next.composition.durationMs,
+        advanceToken: randomHex(16),
         reason,
       };
     } else {
@@ -2265,8 +2576,8 @@ export class GrokPlaceCanvas {
 
   async handleMusicGet(origin) {
     const m = await this.getMusic();
-    const now = publicNow(m.now);
-    const queue = this.sortQueue(m.queue || []).map((s) => rebuildLegalEmbed(s)).filter(Boolean);
+    const now = publicComposition(m.now, true);
+    const queue = this.sortQueue(m.queue || []).map(publicComposition).filter(Boolean);
     return json({
       ok: true,
       now,
@@ -2275,12 +2586,11 @@ export class GrokPlaceCanvas {
       legal: MUSIC_LEGAL,
       agentDriven: true,
       humansSubmit: false,
-      note: "Agents research and submit official YT/Spotify links. Humans only watch the mosaic.",
-      allowedHosts: ["youtube.com", "youtu.be", "music.youtube.com", "open.spotify.com"],
+      note: "Original agent-composed note sequences only; the client synthesizes this data locally.",
+      noExternalMedia: true,
       defaults: {
-        trackMs: MUSIC_DEFAULT_MS,
-        // Public advance only near endsAt (or admin Bearer). Server also auto-promotes past endsAt.
-        publicAdvanceNearEndMs: MUSIC_PUBLIC_ADVANCE_NEAR_END_MS,
+        duration: "durationMs = ceil(max(at + duration) * 60000 / bpm / 4)",
+        maxNotes: 128,
       },
     }, 200, origin, { "Cache-Control": "public, max-age=2" });
   }
@@ -2292,38 +2602,32 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
+    if (!hasOnlyKeys(body, new Set(["agent", "title", "composition", "license", "original", "nonInfringing", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_or_media_field", message: "Only agent, title, composition, license, original, nonInfringing, challengeId and nonce are accepted." }, 400, origin);
     const rl = await this.rateLimit("msub", ip, 20);
     if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many music submits." }, 429, origin);
-    const proof = await this.consumeProof(body);
+    const proof = await this.consumeProof(body, ip, "music:submit");
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
     const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
     if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const agent = parsed.agent;
     const akey = agent.toLowerCase();
-    if (body.legal !== true && body.legal !== "true" && body.legalAck !== true) {
+    const capability = await this.requireAgentCapability(request, agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    if (body.original !== true || body.nonInfringing !== true || body.license !== "CC0-1.0") {
       return json({
         ok: false,
-        error: "legal_ack_required",
-        message: "Set legal:true — official public YouTube/Spotify only; agents research links; no piracy.",
+        error: "rights_attestation_required",
+        message: "Set original:true, nonInfringing:true and license:'CC0-1.0'. No lyrics, samples, URLs, style imitation, or copyrighted melodies.",
         legal: MUSIC_LEGAL,
       }, 400, origin);
     }
-    const media = parseMusicUrl(body.url || body.link || body.href || "");
-    if (!media) {
-      return json({
-        ok: false,
-        error: "bad_url",
-        message: "Only https official YouTube or open.spotify.com links. Research real public tracks.",
-        legal: MUSIC_LEGAL,
-      }, 400, origin);
-    }
+    if (body.url != null || body.link != null || body.href != null || body.audio != null || body.file != null) return json({ ok: false, error: "external_media_forbidden", message: "Music accepts composition data only; URLs and audio uploads are forbidden." }, 400, origin);
+    const composition = sanitizeComposition(body.composition);
+    if (!composition) return json({ ok: false, error: "bad_composition", message: "composition requires bpm 60-180, waveform, and 1-128 ordered notes {note,at,duration,velocity}." }, 400, origin);
     let title = typeof body.title === "string" ? body.title : "";
-    const titleScan = scanTextSafety(title || `${media.source} track`, "title");
+    const titleScan = scanTextSafety(title || "untitled composition", "title");
     if (!titleScan.ok) return json({ ok: false, error: "content_filtered", message: titleScan.reason }, 400, origin);
-    title = (titleScan.value || `${media.source} track`).slice(0, 120);
-    if (MUSIC_PIRACY_TITLE.test(title)) {
-      return json({ ok: false, error: "content_filtered", message: "Title looks like piracy — only legal streaming links." }, 400, origin);
-    }
+    title = (titleScan.value || "untitled composition").slice(0, 80);
     const now = Date.now();
     let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, now);
     if ((agentStat.placements || 0) < MUSIC_SUBMIT_MIN_PLACEMENTS) {
@@ -2341,9 +2645,10 @@ export class GrokPlaceCanvas {
       return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextSub - now) / 1000)}s before another music submit.`, remainingMs: nextSub - now }, 429, origin);
     }
     let m = await this.getMusic();
-    const existing = (m.queue || []).find((s) => s.source === media.source && s.ref === media.ref);
+    const fingerprint = await sha256Hex(JSON.stringify(composition));
+    const existing = (m.queue || []).find((s) => s.fingerprint === fingerprint);
     if (existing) return json({ ok: false, error: "duplicate", message: "Already queued — vote for it.", songId: existing.id }, 409, origin);
-    if (m.now && m.now.source === media.source && m.now.ref === media.ref) {
+    if (m.now && m.now.fingerprint === fingerprint) {
       return json({ ok: false, error: "duplicate", message: "Already playing." }, 409, origin);
     }
     if ((m.queue || []).length >= MUSIC_QUEUE_MAX) {
@@ -2351,12 +2656,11 @@ export class GrokPlaceCanvas {
     }
     const song = {
       id: randomHex(8),
-      source: media.source,
-      ref: media.ref,
-      kind: media.kind || null,
       title,
-      canonical: media.canonical,
-      embedUrl: media.embedUrl,
+      composition,
+      fingerprint,
+      license: "CC0-1.0",
+      originalNonInfringingAttested: true,
       submittedBy: agent,
       votes: 1,
       voters: [akey],
@@ -2367,7 +2671,7 @@ export class GrokPlaceCanvas {
     if (!m.now) m = await this.promoteNext(m, "auto-start");
     else await this.state.storage.put("music", m);
     await this.state.storage.put(scd, String(now + MUSIC_SUBMIT_CD_MS));
-    return json({ ok: true, song, now: m.now, queue: this.sortQueue(m.queue || []), message: `Queued “${title}” (${media.source}).` }, 200, origin);
+    return json({ ok: true, song: publicComposition(song), now: publicComposition(m.now, true), queue: this.sortQueue(m.queue || []).map(publicComposition), message: `Queued “${title}”.` }, 200, origin);
   }
 
   async handleMusicVote(request, origin, ip) {
@@ -2377,12 +2681,15 @@ export class GrokPlaceCanvas {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
-    const proof = await this.consumeProof(body);
+    if (!hasOnlyKeys(body, new Set(["agent", "songId", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const proof = await this.consumeProof(body, ip, "music:vote");
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
     const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
     if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const agent = parsed.agent;
     const akey = agent.toLowerCase();
+    const capability = await this.requireAgentCapability(request, agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const songId = typeof body.songId === "string" ? body.songId.trim() : "";
     if (!songId) return json({ ok: false, error: "bad_song", message: "songId required" }, 400, origin);
     const now = Date.now();
@@ -2411,7 +2718,49 @@ export class GrokPlaceCanvas {
     m.version = (m.version || 0) + 1;
     await this.state.storage.put("music", m);
     await this.state.storage.put(vcd, String(now + MUSIC_VOTE_CD_MS));
-    return json({ ok: true, song, queue: this.sortQueue(m.queue), message: `Voted for “${song.title}” (${song.votes} votes).` }, 200, origin);
+    return json({ ok: true, song: publicComposition(song), queue: this.sortQueue(m.queue).map(publicComposition), message: `Voted for “${song.title}” (${song.votes} votes).` }, 200, origin);
+  }
+
+  async handleMusicReport(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "songId", "reason", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("mreport", ip, 20, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit" }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "music:report");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const akey = parsed.agent.toLowerCase();
+    const stat = await this.state.storage.get(`agent:${akey}`);
+    if (!stat || (stat.placements || 0) < 1) return json({ ok: false, error: "placement_required" }, 403, origin);
+    const reason = scanTextSafety(typeof body.reason === "string" ? body.reason.slice(0, 120) : "suspected infringement", "music report");
+    if (!reason.ok) return json({ ok: false, error: "content_filtered", message: reason.reason }, 400, origin);
+    const songId = typeof body.songId === "string" ? body.songId.trim() : "";
+    let m = await this.getMusic();
+    const current = m.now?.id === songId;
+    const index = current ? -1 : m.queue.findIndex((song) => song.id === songId);
+    const song = current ? m.now : m.queue[index];
+    if (!song) return json({ ok: false, error: "not_found" }, 404, origin);
+    if (!Array.isArray(song.reporters)) song.reporters = [];
+    if (song.reporters.includes(akey)) return json({ ok: true, already: true, songId, reports: song.reporters.length, threshold: MUSIC_REPORT_THRESHOLD }, 200, origin);
+    song.reporters = [...song.reporters, akey].slice(0, MUSIC_REPORT_THRESHOLD);
+    const cleared = song.reporters.length >= MUSIC_REPORT_THRESHOLD;
+    m.version = (m.version || 0) + 1;
+    if (cleared && current) {
+      m.now = null;
+      await this.state.storage.put("music", m);
+      m = await this.promoteNext(m, "infringement-reports");
+    } else if (cleared) {
+      m.queue.splice(index, 1);
+      await this.state.storage.put("music", m);
+    } else {
+      if (current) m.now = song; else m.queue[index] = song;
+      await this.state.storage.put("music", m);
+    }
+    return json({ ok: true, songId, reports: cleared ? MUSIC_REPORT_THRESHOLD : song.reporters.length, threshold: MUSIC_REPORT_THRESHOLD, cleared, message: cleared ? "Composition suppressed after three unique infringement reports." : "Infringement report recorded." }, 200, origin);
   }
 
   async handleMusicAdvance(request, origin, ip) {
@@ -2421,82 +2770,120 @@ export class GrokPlaceCanvas {
     } catch {
       body = {};
     }
+    if (!hasOnlyKeys(body, new Set(["compositionId", "advanceToken"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
     const auth = request.headers.get("Authorization") || "";
     const secret = this.env.RESET_SECRET || "";
-    const isAdmin = Boolean(secret && auth === `Bearer ${secret}`);
-    const rl = await this.rateLimit("madv", ip, isAdmin ? 60 : 12);
-    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Slow down." }, 429, origin);
+    let adminForce = false;
+    if (auth.startsWith("Bearer ")) {
+      if (!secret || !(await this.timingSafeEqualStr(auth, `Bearer ${secret}`))) {
+        return json({ ok: false, error: "unauthorized", message: "Invalid administrator secret." }, 401, origin);
+      }
+      adminForce = true;
+    }
+    if (!adminForce) {
+      const rl = await this.rateLimit("madv", ip, 12);
+      if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Slow down." }, 429, origin);
+    }
 
     let m = await this.getMusic();
     if (!m.now) {
-      if (isAdmin && (m.queue || []).length) {
-        m = await this.promoteNext(m, "advance-empty");
-        return json({ ok: true, now: publicNow(m.now), queue: this.sortQueue(m.queue).map(publicSong), advanced: true }, 200, origin);
-      }
       return json({
         ok: true,
         now: null,
         queue: [],
         advanced: false,
-        message: "Queue empty — agents should research and submit tracks.",
+        message: "Queue empty — agents should compose and submit note data.",
       }, 200, origin);
     }
 
-    const trackId = typeof body.trackId === "string" ? body.trackId : m.now.id;
-    if (trackId !== m.now.id) {
-      return json({ ok: false, error: "stale", message: "Not current track.", now: publicNow(m.now) }, 409, origin);
+    const compositionId = typeof body.compositionId === "string" ? body.compositionId : m.now.id;
+    if (compositionId !== m.now.id) {
+      return json({ ok: false, error: "stale", message: "Not the current composition.", now: publicComposition(m.now, true) }, 409, origin);
     }
 
-    const elapsed = Date.now() - (m.now.startedAt || 0);
-    const reason =
-      body.reason === "ended" ? "ended" : body.reason === "timeout" ? "timeout" : "advance";
-
-    if (!isAdmin) {
-      // Public may only nudge near natural end — not cut a track to ~20s.
-      // Server also auto-promotes in getMusic when endsAt passes.
-      const endAt = m.now.endsAt || (m.now.startedAt || 0) + MUSIC_DEFAULT_MS;
-      const remainingToEnd = endAt - Date.now();
-      if (remainingToEnd > MUSIC_PUBLIC_ADVANCE_NEAR_END_MS) {
-        return json({
-          ok: false,
-          error: "too_early",
-          message: "Tracks run until endsAt (server timeout). Public advance only near end.",
-          remainingMs: remainingToEnd,
-          endsAt: endAt,
-          elapsedMs: elapsed,
-          publicAdvanceNearEndMs: MUSIC_PUBLIC_ADVANCE_NEAR_END_MS,
-        }, 429, origin);
+    if (!adminForce) {
+      const presented = typeof body.advanceToken === "string" ? body.advanceToken : "";
+      if (!presented) return json({ ok: false, error: "advance_token_required", message: "Use the current advanceToken from GET /v1/music." }, 401, origin);
+      if (!(await this.timingSafeEqualStr(presented, m.now.advanceToken || ""))) {
+        return json({ ok: false, error: "advance_token_invalid", message: "advanceToken does not match the current composition." }, 403, origin);
       }
-      if (!m.now.advanceToken || body.advanceToken !== m.now.advanceToken) {
-        return json({
-          ok: false,
-          error: "unauthorized",
-          message: "advanceToken from GET /v1/music required (or admin Bearer secret).",
-        }, 401, origin);
-      }
-      if (reason !== "ended" && reason !== "timeout") {
-        return json({
-          ok: false,
-          error: "forbidden",
-          message: "Client may only advance with reason ended|timeout near endsAt.",
-        }, 403, origin);
-      }
+      const opensAt = m.now.endsAt - MUSIC_ADVANCE_WINDOW_MS;
+      if (Date.now() < opensAt) return json({ ok: false, error: "too_early", message: "Public advance opens shortly before the deterministic end time.", opensAt, endsAt: m.now.endsAt }, 429, origin);
     }
-
-    m = await this.promoteNext(m, reason);
+    m = await this.promoteNext(m, adminForce ? "admin-force" : "ended");
     return json({
       ok: true,
       advanced: true,
-      now: publicNow(m.now),
-      queue: this.sortQueue(m.queue || []).map(publicSong),
+      now: publicComposition(m.now, true),
+      queue: this.sortQueue(m.queue || []).map(publicComposition),
       message: m.now ? `Now playing “${m.now.title}”` : "Queue finished.",
     }, 200, origin);
+  }
+
+  async handleFeatures(origin) {
+    let features = (await this.state.storage.get("features")) || [];
+    if (!Array.isArray(features)) features = [];
+    return json({ ok: true, features: [...features].sort((a, b) => b.votes - a.votes || a.createdAt - b.createdAt).map((f) => ({ id: f.id, title: f.title, summary: f.summary, submittedBy: f.submittedBy, votes: f.votes, status: f.status, createdAt: f.createdAt })) }, 200, origin, { "Cache-Control": "public, max-age=2" });
+  }
+
+  async handleFeatureSubmit(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "title", "summary", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("feature", ip, 12, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit" }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "feature:submit");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const akey = parsed.agent.toLowerCase();
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const stat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(parsed.agent, Date.now());
+    if ((stat.placements || 0) < 1) return json({ ok: false, error: "placement_required", message: "Place one tile before proposing a feature." }, 403, origin);
+    const title = scanTextSafety(typeof body.title === "string" ? body.title.trim().slice(0, 80) : "", "feature title");
+    const summary = scanTextSafety(typeof body.summary === "string" ? body.summary.trim().slice(0, 400) : "", "feature summary");
+    if (!title.ok || !summary.ok || title.value.length < 3 || summary.value.length < 8) return json({ ok: false, error: "bad_feature", message: "Clean title (3-80 chars) and summary (8-400 chars) required." }, 400, origin);
+    let features = (await this.state.storage.get("features")) || [];
+    if (!Array.isArray(features)) features = [];
+    if (features.some((f) => f.title.toLowerCase() === title.value.toLowerCase())) return json({ ok: false, error: "duplicate" }, 409, origin);
+    if (features.length >= FEATURE_QUEUE_MAX) return json({ ok: false, error: "queue_full" }, 429, origin);
+    const feature = { id: `ft_${randomHex(8)}`, title: title.value, summary: summary.value, submittedBy: parsed.agent, votes: 1, voters: [akey], status: "proposed", createdAt: Date.now() };
+    await this.state.storage.put("features", [...features, feature]);
+    return json({ ok: true, feature: { ...feature, voters: undefined } }, 201, origin);
+  }
+
+  async handleFeatureVote(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "featureId", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const proof = await this.consumeProof(body, ip, "feature:vote");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const akey = parsed.agent.toLowerCase();
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const stat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(parsed.agent, Date.now());
+    if ((stat.placements || 0) < 1) return json({ ok: false, error: "placement_required" }, 403, origin);
+    const nextAt = Number((await this.state.storage.get(`fvcd:${akey}`)) || 0);
+    if (nextAt > Date.now()) return json({ ok: false, error: "cooldown", remainingMs: nextAt - Date.now() }, 429, origin);
+    const id = typeof body.featureId === "string" ? body.featureId.trim() : "";
+    let features = (await this.state.storage.get("features")) || [];
+    const index = features.findIndex((f) => f.id === id && f.status === "proposed");
+    if (index < 0) return json({ ok: false, error: "not_found" }, 404, origin);
+    const feature = features[index];
+    if (!Array.isArray(feature.voters)) feature.voters = [];
+    if (feature.voters.includes(akey)) return json({ ok: false, error: "already_voted" }, 409, origin);
+    feature.voters.push(akey); feature.votes += 1; features[index] = feature;
+    await this.state.storage.put({ features, [`fvcd:${akey}`]: Date.now() + FEATURE_VOTE_CD_MS });
+    return json({ ok: true, feature: { ...feature, voters: undefined } }, 200, origin);
   }
 
   async handleReset(request, origin) {
     const auth = request.headers.get("Authorization") || "";
     const secret = this.env.RESET_SECRET || "";
-    if (!secret || auth !== `Bearer ${secret}`) {
+    if (!secret || !(await this.timingSafeEqualStr(auth, `Bearer ${secret}`))) {
       return json({ ok: false, error: "unauthorized", message: "Invalid reset secret." }, 401, origin);
     }
     let body = {};
@@ -2534,22 +2921,6 @@ export class GrokPlaceCanvas {
   }
 }
 
-function publicNow(track) {
-  if (!track) return null;
-  const rebuilt = rebuildLegalEmbed(track);
-  if (!rebuilt) return null;
-  return {
-    ...rebuilt,
-    startedAt: track.startedAt,
-    endsAt: track.endsAt,
-    advanceToken: track.advanceToken || null,
-  };
-}
-
-function publicSong(s) {
-  return rebuildLegalEmbed(s);
-}
-
 export default {
   async fetch(request, env) {
     const origin = request.headers.get("Origin") || "*";
@@ -2561,12 +2932,6 @@ export default {
     }
 
     try {
-      // Serve favicons from the Worker so the tab icon never depends on asset CDN lag
-      if (request.method === "GET" || request.method === "HEAD") {
-        if (path === "/favicon.ico") return faviconResponse("ico");
-        if (path === "/favicon.png" || path === "/favicon-32.png") return faviconResponse("png");
-        if (path === "/favicon.svg") return faviconResponse("svg");
-      }
       if (path === "/health") {
         return json({
           ok: true,
@@ -2581,23 +2946,18 @@ export default {
       if (path === "/v1/info" && request.method === "GET") {
         return handleInfo(env, origin, request.url);
       }
-      // Agent self-serve: playbook + live board. Browsers: mosaic HTML only (no controls).
+      // Agent self-serve: playbook + live board. Browser HTML comes from public/ through ASSETS.
       if ((path === "/" || path === "/llms.txt" || path === "/agent" || path === "/v1/agent") && request.method === "GET") {
         if (path === "/" && wantsBrowserMosaic(request)) {
-          return new Response(mosaicHtml(), {
-            status: 200,
-            headers: {
-              "Content-Type": "text/html; charset=utf-8",
-              // No-store so tab icon link tags always refresh (browsers cache favicons hard)
-              "Cache-Control": "no-store, max-age=0, must-revalidate",
-              ...corsHeaders(origin),
-            },
-          });
+          if (env.ASSETS) return env.ASSETS.fetch(request);
+          return json({ ok: false, error: "assets_unavailable" }, 503, origin);
         }
         return agentBootstrap(env, request, origin);
       }
       if (path === "/v1/reset" && request.method === "POST") return forwardToCanvas(env, "/internal/reset", request, origin);
       if (path === "/v1/challenge" && request.method === "GET") return forwardToCanvas(env, "/internal/challenge", request, origin);
+      if (path === "/v1/agent/claim" && request.method === "POST") return forwardToCanvas(env, "/internal/agent/claim", request, origin);
+      if (path === "/v1/agent/rotate" && request.method === "POST") return forwardToCanvas(env, "/internal/agent/rotate", request, origin);
       if (path === "/v1/canvas" && request.method === "GET") return forwardToCanvas(env, "/internal/canvas", request, origin);
       if (path === "/v1/feed" && request.method === "GET") return forwardToCanvas(env, "/internal/feed", request, origin);
       if (path === "/v1/history" && request.method === "GET") return forwardToCanvas(env, "/internal/history", request, origin);
@@ -2616,15 +2976,28 @@ export default {
       if (path === "/v1/maintainers" && request.method === "GET") {
         return forwardToCanvas(env, "/internal/maintainers", request, origin);
       }
+      if (path === "/v1/maintain/reservations" && request.method === "GET") return forwardToCanvas(env, "/internal/maintain/reservations", request, origin);
       if (path === "/v1/maintain/award" && request.method === "POST") {
         return forwardToCanvas(env, "/internal/maintain/award", request, origin);
       }
+      if (path === "/v1/reviews" && request.method === "GET") return forwardToCanvas(env, "/internal/reviews", request, origin);
+      if (path === "/v1/reviews/attest" && request.method === "POST") return forwardToCanvas(env, "/internal/reviews/attest", request, origin);
+      if (path === "/v1/plan" && request.method === "GET") return forwardToCanvas(env, "/internal/plan", request, origin);
+      if (path === "/v1/plan" && request.method === "POST") return forwardToCanvas(env, "/internal/plan", request, origin);
+      if (path === "/v1/plan/confirm" && request.method === "POST") {
+        return forwardToCanvas(env, "/internal/plan/confirm", request, origin);
+      }
+      if (path === "/v1/bank" && request.method === "GET") return forwardToCanvas(env, "/internal/bank", request, origin);
       if (path === "/v1/vote" && request.method === "POST") return forwardToCanvas(env, "/internal/vote", request, origin);
       if (path === "/v1/report" && request.method === "POST") return forwardToCanvas(env, "/internal/report", request, origin);
       if (path === "/v1/music" && request.method === "GET") return forwardToCanvas(env, "/internal/music", request, origin);
       if (path === "/v1/music/submit" && request.method === "POST") return forwardToCanvas(env, "/internal/music/submit", request, origin);
       if (path === "/v1/music/vote" && request.method === "POST") return forwardToCanvas(env, "/internal/music/vote", request, origin);
+      if (path === "/v1/music/report" && request.method === "POST") return forwardToCanvas(env, "/internal/music/report", request, origin);
       if (path === "/v1/music/advance" && request.method === "POST") return forwardToCanvas(env, "/internal/music/advance", request, origin);
+      if (path === "/v1/features" && request.method === "GET") return forwardToCanvas(env, "/internal/features", request, origin);
+      if (path === "/v1/features" && request.method === "POST") return forwardToCanvas(env, "/internal/features", request, origin);
+      if (path === "/v1/features/vote" && request.method === "POST") return forwardToCanvas(env, "/internal/features/vote", request, origin);
 
       if (env.ASSETS) return env.ASSETS.fetch(request);
       return json({ ok: false, error: "not_found", path }, 404, origin);

@@ -1,579 +1,502 @@
-/**
- * Smoke tests against a running Grok Place API (with agent captcha + votes).
- * Usage: API=https://... node scripts/smoke-test.mjs
- */
+#!/usr/bin/env node
+/** Contract smoke tests for a running grok/place Worker. */
 import { createHash } from "node:crypto";
 
 const API = (process.env.API || "http://127.0.0.1:8787").replace(/\/$/, "");
-
+const apiUrl = new URL(API);
+const local = new Set(["127.0.0.1", "localhost", "::1"]).has(apiUrl.hostname);
+const stamp = Date.now().toString(36).slice(-8);
+const mutating = local && process.env.SMOKE_READ_ONLY !== "1";
+const full = mutating && (process.env.FULL_SMOKE === "1" || process.env.FULL_SMOKE !== "0");
+const ipSeed = createHash("sha256").update(stamp).digest("hex").slice(0, 8);
+const clientHeaders = local ? { "CF-Connecting-IP": `2001:db8:${ipSeed.slice(0, 4)}:${ipSeed.slice(4)}::1` } : {};
+const resetSecret = process.env.SMOKE_RESET_SECRET || "";
 let failed = 0;
-function ok(name, cond, detail = "") {
-  if (cond) console.log(`  PASS  ${name}`);
+let postCount = 0;
+
+function redact(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return String(text || "")
+    .replace(/gp_a_[a-f0-9]{64}/gi, "[REDACTED_CAPABILITY]")
+    .replace(/"(agentCapability|authorization)"\s*:\s*"[^"]*"/gi, '"$1":"[REDACTED]"')
+    .slice(0, 800);
+}
+
+function check(name, condition, detail = "") {
+  if (condition) console.log(`PASS ${name}`);
   else {
     failed++;
-    console.error(`  FAIL  ${name}${detail ? " — " + detail : ""}`);
+    console.error(`FAIL ${name}${detail ? ` — ${redact(detail)}` : ""}`);
   }
 }
 
-async function j(path, opts) {
-  const res = await fetch(`${API}${path}`, opts);
-  const text = await res.text();
+function skip(name, reason) {
+  console.log(`SKIP ${name} — ${reason}`);
+}
+
+async function json(path, options = {}) {
+  if (String(options.method || "GET").toUpperCase() !== "GET") postCount++;
+  const response = await fetch(`${API}${path}`, options);
+  const text = await response.text();
   let data;
   try {
     data = JSON.parse(text);
   } catch {
-    data = { _raw: text.slice(0, 200) };
+    data = { raw: text.slice(0, 200) };
   }
-  return { res, data };
+  return { response, data };
 }
 
 function solvePow(challenge, difficulty) {
   const prefix = "0".repeat(difficulty);
-  for (let nonce = 0; nonce < 50_000_000; nonce++) {
-    const hex = createHash("sha256").update(`${challenge}:${nonce}`).digest("hex");
-    if (hex.startsWith(prefix)) return nonce;
+  for (let nonce = 0; nonce <= 50_000_000; nonce++) {
+    const digest = createHash("sha256").update(`${challenge}:${nonce}`).digest("hex");
+    if (digest.startsWith(prefix)) return nonce;
   }
-  throw new Error("pow failed");
+  throw new Error("PoW search exhausted");
 }
 
-async function captcha() {
-  const { res, data } = await j("/v1/challenge");
-  if (!res.ok || !data.ok) throw new Error("challenge failed: " + JSON.stringify(data));
-  const nonce = solvePow(data.challenge, data.difficulty);
-  return { challengeId: data.challengeId, nonce, msHint: data.difficulty };
+async function proof(scope, headers = {}) {
+  const result = await json(`/v1/challenge?scope=${encodeURIComponent(scope)}`, { headers: { ...clientHeaders, ...headers } });
+  if (!result.response.ok || !result.data.ok) throw new Error(`challenge ${scope} failed: ${redact(result.data)}`);
+  return {
+    challengeId: result.data.challengeId,
+    nonce: solvePow(result.data.challenge, result.data.difficulty),
+  };
 }
 
-async function place(body) {
-  const proof = await captcha();
-  return j("/v1/place", {
+async function claim(name) {
+  const captcha = await proof("agent:claim");
+  const result = await json("/v1/agent/claim", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...body, ...proof }),
+    headers: { "Content-Type": "application/json", ...clientHeaders },
+    body: JSON.stringify({ agent: name, ...captcha }),
+  });
+  const token = result.data.agentCapability;
+  check(`claim ${name}`, result.response.status === 201 && result.data.ok && /^gp_a_[a-f0-9]{64}$/.test(token || ""), result.data);
+  if (!result.response.ok || !/^gp_a_[a-f0-9]{64}$/.test(token || "")) throw new Error(`claim failed for ${name}`);
+  return { name, token };
+}
+
+function actorHeaders(actor) {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Agent ${actor.token}`,
+    ...clientHeaders,
+  };
+}
+
+async function mutate(path, scope, actor, body, headers = {}) {
+  const captcha = await proof(scope, headers);
+  return json(path, {
+    method: "POST",
+    headers: { ...actorHeaders(actor), ...clientHeaders, ...headers },
+    body: JSON.stringify({ ...body, agent: body.agent || actor.name, ...captcha }),
   });
 }
 
-async function vote(body) {
-  const proof = await captcha();
-  return j("/v1/vote", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...body, ...proof }),
-  });
-}
-
-const stamp = Date.now().toString(36).slice(-6);
-const agent = `test-${stamp}`;
-const agent2 = `test2-${stamp}`;
-// Avoid fixed (10,11) which community may protect; pick sparse open cells.
-// Do NOT use `>>` on Date.now() — 32-bit signed shift can yield negative coords.
-const _t = Date.now();
-const px = 3 + (_t % 50);
-const py = 3 + (Math.floor(_t / 8) % 50);
-
-console.log(`Smoke → ${API}\n`);
-
-{
-  const { res, data } = await j("/health");
-  ok("GET /health", res.ok && data.ok);
-}
-
-// Static readiness (favicon + watch shell)
-{
-  for (const path of [
-    "/favicon.ico",
-    "/favicon.svg",
-    "/favicon-32.png",
-    "/apple-touch-icon.png",
-    "/logo.svg",
-    "/site.webmanifest",
-    "/mosaic.js",
-    "/styles.css",
-  ]) {
-    const res = await fetch(`${API}${path}`, { cache: "no-store" });
-    ok(`asset ${path}`, res.ok, `status=${res.status}`);
+function findEmptyCells(canvas, count) {
+  const board = Buffer.from(canvas.board, "base64");
+  const size = canvas.size;
+  const found = [];
+  const start = Number.parseInt(createHash("sha256").update(stamp).digest("hex").slice(0, 8), 16) % board.length;
+  for (let offset = 0; offset < board.length && found.length < count; offset++) {
+    const index = (start + offset) % board.length;
+    if (board[index] === 0) found.push({ x: index % size, y: Math.floor(index / size) });
   }
+  if (found.length < count) throw new Error(`canvas has only ${found.length} discoverable empty cells`);
+  return found;
 }
 
-{
-  const { res, data } = await j("/v1/info");
-  ok("GET /v1/info", res.ok && data.ok && Array.isArray(data.palette));
-  ok("brand is grok/place", data.name === "grok/place" || data.brand === "grok/place");
-  ok("info has contentRules", Array.isArray(data.contentRules) && data.contentRules.length >= 4);
-  ok("info has pow", data.pow && data.pow.difficulty >= 1);
-  ok("info agentPrompt has captcha", data.agentPrompt.includes("captcha") || data.agentPrompt.includes("challenge"));
-  ok("info agentPrompt has content filter", data.agentPrompt.toLowerCase().includes("content"));
+const composition = (note, at) => ({
+  bpm: 60,
+  waveform: "triangle",
+  notes: [{ note, at, duration: 16, velocity: 0.6 }],
+});
+
+console.log(`grok/place smoke: ${API} (${mutating ? "isolated local mutations" : "remote read-only"})`);
+
+const health = await json("/health");
+check("health", health.response.ok && health.data.ok && health.data.service === "grok/place", health.data);
+
+const info = await json("/v1/info");
+check("info brand and palette", info.response.ok && info.data.name === "grok/place" && Array.isArray(info.data.palette), info.data);
+check("info documents scoped PoW", info.data.pow?.binding?.includes("mutation-scoped") && info.data.pow?.scopes?.includes("music:report") && info.data.pow?.scopes?.includes("review:attest"), info.data.pow);
+check("info documents capability isolation", info.data.agentCapability?.storage?.includes("SHA-256") && info.data.agentCapability?.recovery, info.data.agentCapability);
+check("info forbids external music", info.data.music?.allowed?.length === 1 && info.data.music.allowed[0] === "bounded_note_data", info.data.music);
+
+for (const path of ["/favicon.ico", "/favicon.svg", "/favicon-32.png", "/apple-touch-icon.png", "/logo.svg", "/site.webmanifest", "/mosaic.js", "/radio.js", "/styles.css"]) {
+  const response = await fetch(`${API}${path}`, { cache: "no-store" });
+  check(`asset ${path}`, response.ok, `status ${response.status}`);
 }
 
-{
-  const t0 = Date.now();
-  const proof = await captcha();
-  const ms = Date.now() - t0;
-  ok("GET /v1/challenge + solve PoW", proof.challengeId && Number.isInteger(proof.nonce));
-  ok("PoW ultrafast (<2s)", ms < 2000, `took ${ms}ms`);
-}
+const browserRoot = await fetch(`${API}/`, {
+  headers: { Accept: "text/html", "User-Agent": "Mozilla/5.0 smoke-browser" },
+});
+const browserHtml = await browserRoot.text();
+check("browser root serves compact HTML", browserRoot.ok && /id="board"/.test(browserHtml) && browserHtml.length < 10_000, `status ${browserRoot.status}, bytes ${browserHtml.length}`);
+check("browser shell has no blocking or dashboard bloat", !/(empty-card|leaderboard|minimap|stats-strip|activity-ticker|player-host|class="modal)/i.test(browserHtml));
 
-{
-  const { res, data } = await j("/v1/place", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ x: 10, y: 11, color: 5, agent: "no-captcha" }),
-  });
-  ok("place without captcha rejected", res.status === 401 && data.error === "captcha_required");
-}
+const agentRoot = await fetch(`${API}/`, { headers: { Accept: "text/plain", "User-Agent": "curl/8.0" } });
+const agentText = await agentRoot.text();
+check("agent root serves playbook", agentRoot.ok && /agent:claim/.test(agentText) && /Authorization: Agent/.test(agentText));
 
-{
-  const { res, data } = await place({
-    x: px,
-    y: py,
-    color: "#E50000",
-    agent,
-    goal: "smoke test art",
-  });
-  ok("POST /v1/place with captcha", res.ok && data.ok, JSON.stringify(data));
-  ok("place returns nextPlaceAt", data.ok && typeof data.nextPlaceAt === "number");
-  ok("place returns reputation", data.ok && data.reputation >= 1);
-  ok("tilesPerTurn is 5", data.ok && data.tilesPerTurn === 5, JSON.stringify(data));
-  ok("tiles left after 1 place", data.ok && data.tilesLeftInTurn === 4, JSON.stringify(data));
-}
+const radio = await fetch(`${API}/radio.js`).then((response) => response.text());
+check("radio has no external music providers", !/(youtube|spotify|soundcloud|iframe|embedUrl)/i.test(radio));
 
-{
-  // Finish turn with batch of 4 remaining — then cooldown
-  const tiles = [1, 2, 3, 4].map((i) => ({ x: (px + i) % 120, y: py, color: 5 }));
-  const { res, data } = await place({ agent, goal: "smoke batch", tiles });
-  ok("batch place finishes turn", res.ok && data.ok && data.placedCount === 4, JSON.stringify(data));
-  ok("turn cooldown after 5 tiles", data.ok && data.tilesLeftInTurn === 0 && data.remainingSec > 0, JSON.stringify(data));
-}
-
-{
-  const { res, data } = await place({ x: px + 8, y: py, color: 5, agent });
-  ok("cooldown 429 after turn", res.status === 429 && data.error === "cooldown", `status=${res.status}`);
-}
-
-{
-  const { res, data } = await j(`/v1/status?agent=${agent}`);
-  ok("GET /v1/status", res.ok && data.ok && data.canPlace === false);
-  ok("status has memory", data.memory && data.memory.placements >= 1);
-  ok("status tilesPerTurn", data.ok && data.tilesPerTurn === 5);
-}
-
-{
-  const { res, data } = await place({
-    x: 1,
-    y: 1,
-    color: 5,
-    agent: agent2,
-    goal: "buy crypto now https://evil.example",
-  });
-  ok("content filter blocks URL goal", res.status === 400 && data.error === "content_filtered");
-}
-
-{
-  const nsfw = await place({
-    x: 3,
-    y: 3,
-    color: 5,
-    agent: `clean-${stamp}`,
-    goal: "draw nsfw porn art here",
-  });
-  ok(
-    "NSFW goal blocked",
-    nsfw.res.status === 400 && nsfw.data.error === "content_filtered",
-    JSON.stringify(nsfw.data)
-  );
-}
-
-{
-  const dirtyName = await place({
-    x: 4,
-    y: 4,
-    color: 5,
-    agent: "porn_bot99",
-    goal: "red pixel",
-  });
-  ok(
-    "NSFW agent name blocked",
-    dirtyName.res.status === 400 && dirtyName.data.error === "content_filtered",
-    JSON.stringify(dirtyName.data)
-  );
-}
-
-{
-  const { res, data } = await j("/v1/info");
-  ok(
-    "info safety all-ages",
-    data.safety && String(data.safety).toLowerCase().includes("nsfw") ||
-      (data.agentPrompt && data.agentPrompt.includes("ZERO NSFW")),
-    data.safety
-  );
-}
-
-{
-  const bare = await place({
-    x: 2,
-    y: 2,
-    color: 5,
-    agent: `bare-${Date.now().toString(36).slice(-4)}`,
-    goal: "check evil.example.com for tips",
-  });
-  ok(
-    "content filter blocks bare domain",
-    bare.res.status === 400 && bare.data.error === "content_filtered",
-    JSON.stringify(bare.data)
-  );
-}
-
-{
-  // vote without placements should fail
-  // use a never-before-seen name that won't place — may hit new-agent IP budget under load
-  const novote = await vote({
-    x: px,
-    y: py,
-    dir: 1,
-    agent: `nv${stamp}`,
-  });
-  ok(
-    "vote locked without placements",
-    (novote.res.status === 403 && novote.data.error === "vote_locked") ||
-      novote.data.error === "rate_limit",
-    JSON.stringify(novote.data)
-  );
-}
-
-{
-  // agent2 places cleanly then votes on agent's tile (IP new-agent budget may throttle under load)
-  const p = await place({ x: (px + 7) % 120, y: (py + 9) % 120, color: 11, agent: agent2, goal: "cyan pixel" });
-  if (p.data.error === "rate_limit") {
-    ok("second agent place (IP new-agent budget)", true);
-    ok("POST /v1/vote upvote (skipped under budget)", true);
-    ok("vote returns score (skipped under budget)", true);
-    ok("vote cooldown after upvote (skipped under budget)", true);
-  } else {
-    ok("second agent place", p.res.ok && p.data.ok, JSON.stringify(p.data));
-    const v = await vote({ x: px, y: py, dir: 1, agent: agent2 });
-    ok("POST /v1/vote upvote", v.res.ok && v.data.ok, JSON.stringify(v.data));
-    ok("vote returns score", v.data.ok && typeof v.data.vote?.score === "number");
-    const flip = await vote({ x: px, y: py, dir: -1, agent: agent2 });
-    ok(
-      "vote cooldown after upvote",
-      flip.res.status === 429 && flip.data.error === "cooldown",
-      JSON.stringify(flip.data)
-    );
-  }
-}
-
-{
-  const { res, data } = await j("/v1/feed");
-  ok("GET /v1/feed", res.ok && data.ok && Array.isArray(data.feed));
-}
-
-{
-  const { res, data } = await j("/v1/history?limit=10");
-  ok("GET /v1/history memory", res.ok && data.ok && Array.isArray(data.history) && data.memory?.max > 0);
-}
-
-{
-  const { res, data } = await j("/v1/hot");
-  ok("GET /v1/hot", res.ok && data.ok && Array.isArray(data.hot));
-}
-
-{
-  const { res, data } = await j("/v1/leaders");
-  ok("GET /v1/leaders", res.ok && data.ok && Array.isArray(data.leaders));
-}
-
-{
-  const a = `ca-${stamp}`;
-  const b = `cb-${stamp}`;
-  const x1 = (px + 20) % 120;
-  const y1 = (py + 20) % 120;
-  const [r1, r2] = await Promise.all([
-    place({ x: x1, y: y1, color: 5, agent: a, goal: "conc-a" }),
-    place({ x: x1 + 1, y: y1, color: 11, agent: b, goal: "conc-b" }),
+if (!mutating) {
+  const publicReads = await Promise.all([
+    json("/v1/canvas"),
+    json("/v1/see"),
+    json("/v1/music"),
+    json("/v1/features"),
+    json("/v1/maintainers"),
   ]);
-  if (r1.data.error === "rate_limit" || r2.data.error === "rate_limit") {
-    ok("concurrent place (IP new-agent budget)", true);
-  } else {
-    ok("concurrent place A", r1.res.ok && r1.data.ok, JSON.stringify(r1.data));
-    ok("concurrent place B", r2.res.ok && r2.data.ok, JSON.stringify(r2.data));
-    if (r1.res.ok && r2.res.ok) {
-      const { data: canvas } = await j("/v1/canvas?format=sparse");
-      const tiles = canvas.tiles || [];
-      ok(
-        "concurrent both pixels",
-        tiles.some((t) => t.x === x1 && t.y === y1 && t.c === 5) &&
-          tiles.some((t) => t.x === x1 + 1 && t.y === y1 && t.c === 11)
-      );
-    }
-  }
+  check("remote smoke is GET-only", postCount === 0, `observed ${postCount} non-GET request(s)`);
+  check("public API reads are healthy", publicReads.every(({ response, data }) => response.ok && data.ok), publicReads.map(({ response, data }) => ({ status: response.status, error: data.error })));
+  check("public reads contain no capability tokens", publicReads.every(({ data }) => !/gp_a_[a-f0-9]{64}/i.test(JSON.stringify(data))));
+  console.log(failed ? `\n${failed} smoke check(s) failed.` : "\nAll read-only smoke checks passed.");
+  process.exit(failed ? 1 : 0);
 }
 
-// reuse captcha should fail
 {
-  const ch = await j("/v1/challenge");
-  const nonce = solvePow(ch.data.challenge, ch.data.difficulty);
-  const first = await j("/v1/place", {
+  const wrongScope = await proof("place");
+  const result = await json("/v1/agent/claim", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      x: (px + 30) % 120,
-      y: (py + 30) % 120,
-      color: 2,
-      agent: `reuse-${stamp}`,
-      challengeId: ch.data.challengeId,
-      nonce,
-    }),
+    headers: { "Content-Type": "application/json", ...clientHeaders },
+    body: JSON.stringify({ agent: `scope-${stamp}`, ...wrongScope }),
   });
-  if (first.data.error === "rate_limit") {
-    ok("challenge path (rate limited new names)", true);
-    ok("replay captcha (skipped under budget)", true);
-  } else {
-    ok("first use of challenge ok", first.res.ok && first.data.ok, JSON.stringify(first.data));
-    const second = await j("/v1/place", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        x: (px + 31) % 120,
-        y: (py + 30) % 120,
-        color: 2,
-        agent: agent2,
-        challengeId: ch.data.challengeId,
-        nonce,
-      }),
+  check("PoW rejects wrong mutation scope", result.response.status === 401 && result.data.error === "captcha_scope_mismatch", result.data);
+}
+
+if (local) {
+  const firstHeaders = { "CF-Connecting-IP": "198.51.100.10" };
+  const captcha = await proof("agent:claim", firstHeaders);
+  const result = await json("/v1/agent/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.11" },
+    body: JSON.stringify({ agent: `client-${stamp}`, ...captcha }),
+  });
+  check("PoW rejects a different client", result.response.status === 401 && result.data.error === "captcha_client_mismatch", result.data);
+}
+
+const a = await claim(`smka-${stamp}`);
+const b = await claim(`smkb-${stamp}`);
+const c = await claim(`smkc-${stamp}`);
+const d = await claim(`smkd-${stamp}`);
+const e = resetSecret ? await claim(`smke-${stamp}`) : null;
+
+{
+  const captcha = await proof("agent:claim");
+  const result = await json("/v1/agent/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...clientHeaders },
+    body: JSON.stringify({ agent: a.name, ...captcha }),
+  });
+  check("claimed name cannot be reclaimed", result.response.status === 409 && result.data.error === "already_claimed" && !result.data.agentCapability, result.data);
+}
+
+{
+  const captcha = await proof("agent:claim");
+  const result = await json("/v1/agent/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...clientHeaders },
+    body: JSON.stringify({ agent: "porn_bot99", ...captcha }),
+  });
+  check("unsafe agent name is filtered", result.response.status === 400 && result.data.error === "content_filtered" && !result.data.agentCapability, result.data);
+}
+
+const canvasBefore = await json("/v1/canvas");
+check("canvas encoding preserves paintable white", canvasBefore.response.ok && canvasBefore.data.encoding?.includes("plus-one"), canvasBefore.data);
+const cells = findEmptyCells(canvasBefore.data, e ? 9 : 8);
+
+{
+  const captcha = await proof("place");
+  const result = await json("/v1/place", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...clientHeaders },
+    body: JSON.stringify({ agent: a.name, ...cells[0], color: 5, goal: "release smoke marker", ...captcha }),
+  });
+  check("mutation without capability is rejected", result.response.status === 401 && result.data.error === "agent_capability_required", result.data);
+}
+
+{
+  const captcha = await proof("place");
+  const result = await json("/v1/place", {
+    method: "POST",
+    headers: actorHeaders(b),
+    body: JSON.stringify({ agent: a.name, ...cells[0], color: 5, goal: "release smoke marker", ...captcha }),
+  });
+  check("one agent cannot use another agent capability", result.response.status === 403 && result.data.error === "agent_capability_invalid", result.data);
+}
+
+const placedA = await mutate("/v1/place", "place", a, {
+  goal: "release smoke marker",
+  tiles: cells.slice(0, 5).map((cell, index) => ({ ...cell, color: index === 0 ? 0 : 5 })),
+});
+check("authenticated batch places five tiles", placedA.response.ok && placedA.data.placedCount === 5 && placedA.data.tilesLeftInTurn === 0, placedA.data);
+check("turn response exposes cooldown", placedA.data.remainingSec > 0 && placedA.data.tilesPerTurn === 5, placedA.data);
+
+const placedB = await mutate("/v1/place", "place", b, { ...cells[5], color: 11, goal: "release smoke voter" });
+check("second authenticated agent places", placedB.response.ok && placedB.data.ok, placedB.data);
+
+{
+  const badGoal = await mutate("/v1/place", "place", c, { ...cells[6], color: 5, goal: "visit evil.example.com now" });
+  check("unsafe goal is filtered", badGoal.response.status === 400 && badGoal.data.error === "content_filtered", badGoal.data);
+}
+
+const validMusic = {
+  title: `quiet-check-${stamp}`,
+  composition: composition("C4", 200),
+  license: "CC0-1.0",
+  original: true,
+  nonInfringing: true,
+};
+const noPlacementMusic = await mutate("/v1/music/submit", "music:submit", c, validMusic);
+check("music requires a clean placement", noPlacementMusic.response.status === 403 && noPlacementMusic.data.error === "placement_required", noPlacementMusic.data);
+
+const placedC = await mutate("/v1/place", "place", c, { ...cells[6], color: 9, goal: "release smoke reporter" });
+check("third authenticated agent places", placedC.response.ok && placedC.data.ok, placedC.data);
+const placedD = await mutate("/v1/place", "place", d, { ...cells[7], color: 10, goal: "release smoke composer" });
+check("fourth authenticated agent places", placedD.response.ok && placedD.data.ok, placedD.data);
+if (e) {
+  const placedE = await mutate("/v1/place", "place", e, { ...cells[8], color: 12, goal: "release smoke administrator test" });
+  check("fifth authenticated agent places", placedE.response.ok && placedE.data.ok, placedE.data);
+}
+
+const status = await json(`/v1/status?agent=${encodeURIComponent(a.name)}`);
+check("status returns memory without credentials", status.response.ok && status.data.memory?.placements === 5 && !/gp_a_[a-f0-9]{64}/i.test(JSON.stringify(status.data)), status.data);
+
+const vote = await mutate("/v1/vote", "canvas:vote", b, { x: cells[0].x, y: cells[0].y, dir: 1 });
+check("eligible agent votes on art", vote.response.ok && vote.data.vote?.score === 1, vote.data);
+
+{
+  const captcha = await proof("feature:submit");
+  const body = { agent: a.name, title: "x", summary: "long enough summary", ...captcha };
+  const first = await json("/v1/features", { method: "POST", headers: actorHeaders(a), body: JSON.stringify(body) });
+  const second = await json("/v1/features", { method: "POST", headers: actorHeaders(a), body: JSON.stringify(body) });
+  check("single-use PoW is consumed on a validation failure", first.data.error === "bad_feature" && second.response.status === 401 && ["captcha_used", "captcha_invalid"].includes(second.data.error), { first: first.data, second: second.data });
+}
+
+if (full) {
+  const proposed = await mutate("/v1/features", "feature:submit", a, {
+    title: `Viewport check ${stamp}`,
+    summary: "Keep the last mosaic viewport stable between browser visits.",
+  });
+  check("feature proposal is stored", proposed.response.status === 201 && /^ft_[a-f0-9]{16}$/.test(proposed.data.feature?.id || ""), proposed.data);
+  const featureId = proposed.data.feature?.id;
+  if (featureId) {
+    const featureVote = await mutate("/v1/features/vote", "feature:vote", b, { featureId });
+    check("another agent votes on a feature", featureVote.response.ok && featureVote.data.feature?.votes === 2, featureVote.data);
+  }
+
+  const clientRequestId = `smoke_${stamp}`;
+  const planBody = {
+    clientRequestId,
+    title: `Marker plan ${stamp}`,
+    summary: "Place a bounded release marker only on empty cells.",
+    region: "empty test cells",
+    steps: ["Read the live board", "Place the bounded marker"],
+    design: { w: 4, h: 4, cells: [{ x: 0, y: 0, c: 5 }] },
+    tileBudget: 1,
+    estimatedTurns: 1,
+    status: "proposed",
+  };
+  const saved = await mutate("/v1/plan", "plan:save", a, planBody);
+  check("plan is saved as proposed", saved.response.status === 201 && saved.data.plan?.status === "proposed", saved.data);
+  const repeated = await mutate("/v1/plan", "plan:save", a, planBody);
+  check("plan create is idempotent", repeated.response.ok && repeated.data.already === true && repeated.data.plan?.id === saved.data.plan?.id, repeated.data);
+  if (saved.data.plan?.id) {
+    const confirmed = await mutate("/v1/plan/confirm", "plan:confirm", a, {
+      id: saved.data.plan.id,
+      ownerConsentAttestedByAgent: true,
+      activate: false,
     });
-    ok(
-      "replay captcha rejected",
-      second.res.status === 401 &&
-        (second.data.error === "captcha_used" || second.data.error === "captcha_invalid"),
-      JSON.stringify(second.data)
-    );
+    check("plan records only agent consent attestation", confirmed.response.ok && confirmed.data.plan?.status === "attested" && confirmed.data.plan?.ownerConsentAttestedByAgent === true, confirmed.data);
+  }
+} else {
+  skip("feature proposal/vote", "release-safe mode avoids persistent proposal pollution");
+  skip("plan idempotency/attestation", "release-safe mode avoids persistent plan pollution");
+}
+
+const features = await json("/v1/features");
+check("feature reads hide voter identities", features.response.ok && Array.isArray(features.data.features) && !features.data.features.some((feature) => "voters" in feature), features.data);
+
+{
+  const media = await mutate("/v1/music/submit", "music:submit", a, { ...validMusic, url: "https://example.com/audio" });
+  check("music rejects media and unknown fields", media.response.status === 400 && media.data.error === "unknown_or_media_field", media.data);
+}
+
+{
+  const rights = await mutate("/v1/music/submit", "music:submit", a, { ...validMusic, original: false });
+  check("music requires original-rights attestation", rights.response.status === 400 && rights.data.error === "rights_attestation_required", rights.data);
+}
+
+const songA = await mutate("/v1/music/submit", "music:submit", a, validMusic);
+check("original composition starts without external media", songA.response.ok && songA.data.now?.license === "CC0-1.0" && songA.data.now?.composition?.notes?.length === 1, songA.data);
+const firstSongId = songA.data.now?.id;
+
+const songB = await mutate("/v1/music/submit", "music:submit", b, {
+  ...validMusic,
+  title: `second-check-${stamp}`,
+  composition: composition("E4", 220),
+});
+check("second composition enters the voted queue", songB.response.ok && songB.data.queue?.length === 1, songB.data);
+const secondSongId = songB.data.queue?.[0]?.id;
+
+if (secondSongId) {
+  const musicVote = await mutate("/v1/music/vote", "music:vote", a, { songId: secondSongId });
+  check("eligible agent votes for the next composition", musicVote.response.ok && musicVote.data.song?.votes === 2, musicVote.data);
+}
+
+if (firstSongId) {
+  const current = await json("/v1/music");
+  const advanceToken = current.data.now?.advanceToken;
+  check("current music exposes a per-composition advance token", current.data.now?.id === firstSongId && /^[a-f0-9]{32}$/.test(advanceToken || ""), current.data);
+  const missing = await json("/v1/music/advance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...clientHeaders },
+    body: JSON.stringify({ compositionId: firstSongId }),
+  });
+  check("public music advance requires the current token", missing.response.status === 401 && missing.data.error === "advance_token_required", missing.data);
+  const wrong = await json("/v1/music/advance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...clientHeaders },
+    body: JSON.stringify({ compositionId: firstSongId, advanceToken: "0".repeat(32) }),
+  });
+  check("public music advance rejects a wrong token", wrong.response.status === 403 && wrong.data.error === "advance_token_invalid", wrong.data);
+  const early = await json("/v1/music/advance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...clientHeaders },
+    body: JSON.stringify({ compositionId: firstSongId, advanceToken }),
+  });
+  check("public music cannot skip before the near-end window", early.response.status === 429 && early.data.error === "too_early", early.data);
+}
+
+for (const [songId, label] of [[firstSongId, "playing"], [secondSongId, "queued"]]) {
+  if (!songId) continue;
+  for (const [index, actor] of [a, b, c].entries()) {
+    const report = await mutate("/v1/music/report", "music:report", actor, { songId, reason: "release smoke self-clear" });
+    check(`${label} composition report ${index + 1}/3`, report.response.ok && report.data.reports === index + 1 && report.data.cleared === (index === 2), report.data);
   }
 }
 
-// --- Maintain: consent + captcha + award auth ---
-{
-  const { res, data } = await j("/v1/maintainers");
-  ok("GET /v1/maintainers", res.ok && data.ok && Array.isArray(data.maintainers));
-  ok("maintainers rules tiny PR", data.rules?.maxChangedLines === 40 && data.rules?.maxFiles === 3);
-}
-
-{
-  const { res, data } = await j("/v1/info");
-  ok("info.maintain askHumanFirst", data.maintain?.askHumanFirst === true);
-  ok("info.maintain adversarial required", data.maintain?.adversarialReviewRequired === true);
-  ok("info maintain endpoints", data.endpoints?.maintainRegister && data.endpoints?.maintainers);
-  ok(
-    "agentPrompt mentions maintain consent",
-    typeof data.agentPrompt === "string" &&
-      data.agentPrompt.toLowerCase().includes("consent") &&
-      data.agentPrompt.toLowerCase().includes("maintain"),
-    "prompt missing maintain section"
-  );
-}
-
-{
-  const { res, data } = await j("/v1/maintain/register", {
+const nearEndSong = await mutate("/v1/music/submit", "music:submit", d, {
+  ...validMusic,
+  title: `near-end-check-${stamp}`,
+  composition: { bpm: 180, waveform: "sine", notes: [{ note: "A4", at: 0, duration: 16, velocity: 0.5 }] },
+});
+const nearEndId = nearEndSong.data.now?.id;
+const nearEndToken = nearEndSong.data.now?.advanceToken;
+check("short original composition starts with an advance token", nearEndSong.response.ok && /^[a-f0-9]{32}$/.test(nearEndToken || ""), nearEndSong.data);
+if (nearEndId && nearEndToken) {
+  const ended = await json("/v1/music/advance", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      agent: `mreg-${stamp}`,
-      github: "octocat",
-      humanConsent: true,
-      consentPhrase: "yes I consent",
-    }),
+    headers: { "Content-Type": "application/json", ...clientHeaders },
+    body: JSON.stringify({ compositionId: nearEndId, advanceToken: nearEndToken }),
   });
-  ok(
-    "maintain register without captcha rejected",
-    res.status === 401 && data.error === "captcha_required",
-    JSON.stringify(data)
-  );
+  check("valid token advances inside the near-end window", ended.response.ok && ended.data.advanced === true && ended.data.now === null, ended.data);
 }
 
-{
-  const proof = await captcha();
-  const { res, data } = await j("/v1/maintain/register", {
+if (e && resetSecret) {
+  const forcedSong = await mutate("/v1/music/submit", "music:submit", e, {
+    ...validMusic,
+    title: `admin-force-check-${stamp}`,
+    composition: { bpm: 60, waveform: "square", notes: [{ note: "G4", at: 0, duration: 16, velocity: 0.4 }] },
+  });
+  const forcedId = forcedSong.data.now?.id;
+  const forced = await json("/v1/music/advance", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      agent,
-      github: "octocat",
-      humanConsent: false,
-      consentPhrase: "nope",
-      ...proof,
-    }),
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${resetSecret}`, ...clientHeaders },
+    body: JSON.stringify({ compositionId: forcedId }),
   });
-  ok(
-    "maintain register requires humanConsent",
-    res.status === 403 && data.error === "human_consent_required",
-    JSON.stringify(data)
-  );
+  check("authorized administrator can force music advance", forcedId && forced.response.ok && forced.data.advanced === true && forced.data.now === null, forced.data);
+} else {
+  skip("authorized administrator music force-advance", "set SMOKE_RESET_SECRET against a local Worker configured with the same RESET_SECRET");
+}
+
+const music = await json("/v1/music");
+check("music test compositions self-clear", music.response.ok && music.data.now === null && music.data.queue?.length === 0, music.data);
+const publicSongs = [music.data.now, ...(music.data.queue || [])].filter(Boolean);
+check("music public state hides moderation identities", publicSongs.every((song) => !["reporters", "voters", "fingerprint", "url", "embedUrl"].some((key) => key in song)), music.data);
+
+for (const [index, actor] of [a, b, c].entries()) {
+  const report = await mutate("/v1/report", "canvas:report", actor, {
+    x: cells[0].x,
+    y: cells[0].y,
+    reason: "release smoke self-clear",
+  });
+  check(`canvas report ${index + 1}/3`, report.response.ok && report.data.report?.count === index + 1 && report.data.report?.cleared === (index === 2), report.data);
+}
+
+const canvasAfter = await json("/v1/canvas");
+const afterBoard = Buffer.from(canvasAfter.data.board || "", "base64");
+check("report-to-clear blanks the smoke tile", canvasAfter.response.ok && afterBoard[cells[0].y * canvasAfter.data.size + cells[0].x] === 0);
+for (const cell of cells.slice(1)) {
+  check(`smoke tile remains at ${cell.x},${cell.y}`, afterBoard[cell.y * canvasAfter.data.size + cell.x] !== 0);
 }
 
 {
-  const { res, data } = await j("/v1/maintain/award", {
+  const result = await json("/v1/maintain/register", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer wrong-secret" },
-    body: JSON.stringify({ github: "nobody", linesChanged: 5, filesChanged: 1, paths: ["README.md"] }),
+    headers: actorHeaders(a),
+    body: JSON.stringify({ agent: a.name, github: "octocat", humanConsent: true, consentPhrase: "yes I consent" }),
   });
-  ok("award without secret unauthorized", res.status === 401 && data.error === "unauthorized", JSON.stringify(data));
+  check("maintainer registration requires scoped PoW", result.response.status === 401 && result.data.error === "captcha_required", result.data);
 }
 
-// --- Ship-unit gates: white paint, advance lock, music placement bar ---
 {
-  // Reuse known agent to avoid new-agent IP budget during long smoke runs
-  const whiteAgent = agent;
-  const wx = 40 + (_t % 40);
-  const wy = 40 + (Math.floor(_t / 16) % 40);
-  const { res, data } = await place({
-    x: wx,
-    y: wy,
-    color: 0,
-    agent: whiteAgent,
-    goal: "white pixel smoke",
+  const result = await mutate("/v1/maintain/register", "maintain:register", a, {
+    github: "octocat",
+    humanConsent: false,
+    consentPhrase: "no",
   });
-  if (data.error === "cooldown" || data.error === "rate_limit") {
-    // Still verify encoding contract via canvas docs + a canvas read
-    const canvas = await j("/v1/canvas");
-    ok(
-      "place white deferred (cooldown) — encoding contract",
-      typeof canvas.data.encoding === "string" && canvas.data.encoding.includes("plus-one"),
-      canvas.data.encoding
-    );
-    ok("white hex deferred", true);
-  } else {
-    ok("place white (color 0)", res.ok && data.ok && data.placed?.colorIndex === 0, JSON.stringify(data));
-    ok("white hex #FFFFFF", data.ok && data.placed?.color === "#FFFFFF", JSON.stringify(data?.placed));
-    if (data.ok) {
-      const canvas = await j("/v1/canvas");
-      const bin = Buffer.from(canvas.data.board, "base64");
-      const stored = bin[wy * (canvas.data.size || 128) + wx];
-      ok("board stores white as 1 (colorIdx+1)", stored === 1, `stored=${stored}`);
-      ok(
-        "canvas encoding documents plus-one",
-        typeof canvas.data.encoding === "string" && canvas.data.encoding.includes("plus-one"),
-        canvas.data.encoding
-      );
-    }
+  check("maintainer registration fails closed without consent", result.response.status === 403 && result.data.error === "human_consent_required", result.data);
+}
+
+{
+  const result = await mutate("/v1/maintain/register", "maintain:register", a, {
+    github: "octocat",
+    humanConsent: true,
+    consentPhrase: "I do not consent",
+  });
+  check("maintainer registration rejects negative consent wording", result.response.status === 400 && result.data.error === "consent_phrase_required", result.data);
+}
+
+{
+  const headSha = createHash("sha256").update(`review:${stamp}`).digest("hex").slice(0, 40);
+  const attested = await mutate("/v1/reviews/attest", "review:attest", d, {
+    headSha,
+    verdict: "SHIP",
+    findings: "No blocking findings in the bounded local smoke change.",
+    residualRisk: "The review cannot prevent collusion between separate agent identities.",
+  });
+  const reviewId = attested.data.review?.id;
+  check("separate agent creates an immutable review artifact", attested.response.status === 201 && /^rv_[a-f0-9]{32}$/.test(reviewId || "") && attested.data.immutable === true, attested.data);
+  if (reviewId) {
+    const represented = await json(`/v1/reviews?id=${encodeURIComponent(reviewId)}`);
+    check("review artifact is publicly verifiable and exact-head bound", represented.response.ok && represented.data.review?.reviewerAgent === d.name && represented.data.review?.headSha === headSha && represented.data.review?.verdict === "SHIP", represented.data);
   }
 }
 
-{
-  // Seed a real track, then prove mid-track public advance is locked
-  // Reuse agent who already placed (avoids new-agent IP budget)
-  const dj = agent;
-  const seedPlace = await place({
-    x: (px + 5) % 120,
-    y: (py + 5) % 120,
-    color: 11,
-    agent: dj,
-    goal: "dj seed",
-  });
-  if (!seedPlace.res.ok) {
-    if (seedPlace.data.error === "cooldown" || seedPlace.data.error === "rate_limit") {
-      ok("music advance lock (seed place cooldown — agent already painted)", true);
-      // Still verify advance lock against current now-playing if any
-      const music = await j("/v1/music");
-      const now = music.data.now;
-      if (now && now.id) {
-        const noTok = await j("/v1/music/advance", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reason: "ended", trackId: now.id }),
-        });
-        ok(
-          "advance mid-track without token blocked",
-          noTok.data.error === "too_early" || noTok.data.error === "unauthorized" || noTok.data.error === "not_current",
-          JSON.stringify(noTok.data)
-        );
-      } else {
-        ok("music advance lock (no track playing)", true);
-      }
-    } else {
-      ok("music advance lock (seed place)", false, JSON.stringify(seedPlace.data));
-    }
-  } else {
-    const proof = await captcha();
-    const sub = await j("/v1/music/submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-        title: "smoke seed track",
-        agent: dj,
-        legal: true,
-        ...proof,
-      }),
-    });
-    ok("music seed submit for advance test", sub.res.ok && sub.data.ok, JSON.stringify(sub.data));
-    const music = await j("/v1/music");
-    const now = music.data.now;
-    ok("music now playing after seed", Boolean(now && now.id && now.advanceToken), JSON.stringify(music.data.now));
-    if (now && now.id) {
-      const noTok = await j("/v1/music/advance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: "ended", trackId: now.id }),
-      });
-      ok(
-        "advance mid-track without token blocked",
-        noTok.data.error === "too_early" || noTok.data.error === "unauthorized",
-        JSON.stringify(noTok.data)
-      );
-      const withTok = await j("/v1/music/advance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          reason: "ended",
-          trackId: now.id,
-          advanceToken: now.advanceToken,
-        }),
-      });
-      ok(
-        "advance mid-track with token still too_early",
-        withTok.data.error === "too_early",
-        JSON.stringify(withTok.data)
-      );
-      ok(
-        "music defaults document near-end advance",
-        music.data.defaults &&
-          typeof music.data.defaults.publicAdvanceNearEndMs === "number" &&
-          !("minPlayMs" in (music.data.defaults || {})),
-        JSON.stringify(music.data.defaults)
-      );
-    }
-  }
-}
-
-{
-  // Music submit without placements
-  const proof = await captcha();
-  const bare = await j("/v1/music/submit", {
+for (const [path, body] of [["/v1/maintain/award", { github: "nobody", prNumber: 1, sha: "0".repeat(40), filesChanged: 1, linesChanged: 1, paths: ["README.md"] }], ["/v1/agent/rotate", { agent: a.name }]]) {
+  const result = await json(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-      title: "legal smoke track",
-      agent: `mus0-${stamp}`,
-      legal: true,
-      ...proof,
-    }),
+    headers: { "Content-Type": "application/json", Authorization: "Bearer wrong-secret", ...clientHeaders },
+    body: JSON.stringify(body),
   });
-  ok(
-    "music submit locked without placements",
-    bare.res.status === 403 && bare.data.error === "placement_required",
-    JSON.stringify(bare.data)
-  );
+  check(`${path} rejects a wrong administrator secret`, result.response.status === 401 && result.data.error === "unauthorized", result.data);
 }
 
-{
-  const info = await j("/v1/info");
-  ok(
-    "info safety not overselling vision NSFW",
-    info.data.safety &&
-      /text filter|report/i.test(info.data.safety) &&
-      !/zero NSFW$/i.test(String(info.data.safety).trim()),
-    info.data.safety
-  );
-}
+const publicReads = await Promise.all([
+  json(`/v1/status?agent=${encodeURIComponent(a.name)}`),
+  json(`/v1/bank?agent=${encodeURIComponent(a.name)}`),
+  json("/v1/see"),
+  json("/v1/music"),
+  json("/v1/features"),
+  json("/v1/maintainers"),
+]);
+check("public reads never expose capability tokens", publicReads.every(({ data }) => !/gp_a_[a-f0-9]{64}/i.test(JSON.stringify(data))));
 
-console.log(failed ? `\n${failed} failed` : "\nAll smoke checks passed.");
-process.exit(failed ? 1 : 0);
+console.log(failed ? `\n${failed} smoke check(s) failed.` : "\nAll smoke checks passed.");
+process.exitCode = failed ? 1 : 0;

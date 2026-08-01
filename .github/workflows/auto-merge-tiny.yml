@@ -1,107 +1,212 @@
-# Auto-merge ONLY tiny PRs from verified maintainers on allowlisted paths.
-# Never auto-merges worker/, wrangler.toml, or secrets.
-name: Auto-merge tiny maintainer PRs
+# Trusted default-branch gate. It never checks out pull-request code.
+name: Auto-merge and award tiny maintainer PRs
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  check_suite:
+  workflow_run:
+    workflows: [PR quality, Maintain approval signal]
     types: [completed]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Trusted operation"
+        required: true
+        default: reconcile
+        type: choice
+        options: [merge, reconcile]
+      pr:
+        description: "Exact PR number, or all for reconciliation"
+        required: true
+        default: all
+        type: string
 
-permissions:
-  contents: write
-  pull-requests: write
-  checks: read
+permissions: {}
+
+concurrency:
+  group: maintain-awards-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
-  maybe-merge:
-    if: github.event.pull_request && github.event.pull_request.draft == false
+  merge-and-award:
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_review')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'merge')
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: read
+      contents: write
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out trusted gate code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
-      - name: Check author is verified maintainer
-        id: maint
-        env:
-          API: https://grokplace.barnlabs.net
-          AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: |
-          set -euo pipefail
-          curl -sS "$API/v1/maintainers" -o /tmp/m.json
-          jq -e --arg u "$AUTHOR" '.ok and (.maintainers|map(.github|ascii_downcase)|index($u|ascii_downcase)) != null' /tmp/m.json
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-
-      - name: Path allowlist + size
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          git fetch origin "$BASE" --depth=1 || true
-          mapfile -t FILES < <(git diff --name-only "$BASE"..."$HEAD")
-          STAT=$(git diff --numstat "$BASE"..."$HEAD" | awk '{a+=$1;d+=$2} END {print (a+0)+(d+0)}')
-          echo "files=${#FILES[@]} lines=$STAT"
-          if [ "${#FILES[@]}" -gt 3 ] || [ "$STAT" -gt 40 ]; then
-            echo "Too large for auto-merge"
-            exit 1
-          fi
-          # Docs + safe static only. Never auto-merge workflows, worker, or executable JS/HTML.
-          # Full-path allowlist (end-anchored). No JS/HTML/workflows.
-          ALLOW='^(docs/.*|README\.md|AGENTS\.md|CONTRIBUTING\.md|MAINTAIN\.md|ADVERSARIAL\.md|public/styles\.css|public/logo\.svg|public/robots\.txt)$'
-          for f in "${FILES[@]}"; do
-            if ! echo "$f" | grep -Eq "$ALLOW"; then
-              echo "Not allowlisted for auto-merge: $f"
-              exit 1
-            fi
-            if echo "$f" | grep -Eqi 'worker/|wrangler\.toml|\.github/|secret|\.env|favicon-embed|\.(js|mjs|cjs|html|htm)$'; then
-              echo "Sensitive / executable: $f"
-              exit 1
-            fi
-            # docs/** still may not include executable extensions
-            if echo "$f" | grep -Eqi '^docs/.*\.(js|mjs|cjs|html|htm)$'; then
-              echo "Executable under docs/ not auto-mergeable: $f"
-              exit 1
-            fi
-          done
-
-      - name: Adversarial SHIP must be in PR body (bound to head)
-        env:
-          BODY: ${{ github.event.pull_request.body }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          printf '%s' "$BODY" > /tmp/pr-body.md
-          if [ ! -f scripts/adversarial-review-check.mjs ]; then
-            echo "::error::adversarial-review-check.mjs missing — rebase onto main."
-            exit 1
-          fi
-          HEAD_SHA="$HEAD" node scripts/adversarial-review-check.mjs --body-file /tmp/pr-body.md --head-sha "$HEAD"
-
-      - name: Wait for PR quality checks then enable auto-merge
+      - name: Revalidate exact head, maintainer, paths, review artifact, approval, and checks
+        id: candidate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          API: https://grokplace.barnlabs.net
         run: |
           set -euo pipefail
-          # Poll required check "Tiny perfect PR" up to ~8 minutes
-          for i in $(seq 1 48); do
-            STATE=$(gh pr checks "$PR" --repo "$REPO" 2>/dev/null | awk '/Tiny perfect PR|PR quality/ {print $2; exit}' || true)
-            echo "attempt $i checks: $(gh pr checks "$PR" --repo "$REPO" 2>/dev/null || true)"
-            if gh pr checks "$PR" --repo "$REPO" 2>/dev/null | grep -E 'Tiny perfect PR|Secret scan' | grep -qi fail; then
-              echo "Quality check failed — no auto-merge."
-              exit 0
+          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ]; then
+            PR=$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
+            RUN_HEAD=$(jq -r '.workflow_run.pull_requests[0].head.sha // .workflow_run.head_sha // empty' "$GITHUB_EVENT_PATH")
+            if [ -z "$PR" ]; then
+              RUN_ID=$(jq -r '.workflow_run.id' "$GITHUB_EVENT_PATH")
+              gh api "repos/$REPO/actions/runs/$RUN_ID/pull_requests" > /tmp/run-pulls.json
+              PR=$(jq -r '.[0].number // empty' /tmp/run-pulls.json)
+              RUN_HEAD=$(jq -r '.[0].head.sha // empty' /tmp/run-pulls.json)
             fi
-            if gh pr checks "$PR" --repo "$REPO" 2>/dev/null | grep -E 'Tiny perfect PR' | grep -qi pass; then
-              break
-            fi
-            sleep 10
-          done
-          # Prefer GitHub auto-merge (respects branch protection). No force-merge fallback —
-          # required checks (Tiny perfect PR + Secret scan) must pass via protection rules.
-          gh pr merge "$PR" --repo "$REPO" --squash --auto --delete-branch || {
-            echo "Could not enable auto-merge (needs green checks + maintainer allowlist). Manual owner merge still possible; awards only for allowlisted paths."
-            exit 0
+          else
+            PR=$(jq -r '.inputs.pr // empty' "$GITHUB_EVENT_PATH")
+            RUN_HEAD=""
+          fi
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo "No exact PR bound to this event."; exit 1; }
+
+          gh api "repos/$REPO/pulls/$PR" > /tmp/pr.json
+          HEAD=$(jq -r '.head.sha' /tmp/pr.json)
+          AUTHOR=$(jq -r '.user.login' /tmp/pr.json)
+          ASSOCIATION=$(jq -r '.author_association' /tmp/pr.json)
+          [ -n "$RUN_HEAD" ] || RUN_HEAD="$HEAD"
+          [ "$HEAD" = "$RUN_HEAD" ] || { echo "PR head differs from the triggering review/check run."; exit 1; }
+          jq -e '.draft == false and .state == "open" and .base.ref == "main"' /tmp/pr.json >/dev/null
+          case "$ASSOCIATION" in OWNER|MEMBER|COLLABORATOR) ;; *) echo "Author is not repository-authorized."; exit 1 ;; esac
+
+          curl -fsS "$API/v1/maintainers" -o /tmp/maintainers.json
+          AGENT=$(jq -r --arg user "$AUTHOR" '.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active") | .agent' /tmp/maintainers.json | head -n 1)
+          [ -n "$AGENT" ] || { echo "Author is not an active grok/place maintainer."; exit 1; }
+          curl -fsS --get --data-urlencode "agent=$AGENT" "$API/v1/bank" -o /tmp/bank.json
+          jq -e '.ok == true and .bank.bankCap == 200 and .bank.bonusTiles >= 0 and .bank.bonusTiles <= 190' /tmp/bank.json >/dev/null || {
+            echo "Maintainer bank cannot accept the fixed 10-tile award."
+            exit 1
           }
+
+          gh api "repos/$REPO/pulls/$PR/files?per_page=100" > /tmp/files.json
+          jq -e 'length >= 1 and length <= 3 and ((map(.changes) | add) >= 1 and (map(.changes) | add) <= 40)' /tmp/files.json >/dev/null
+          jq -r '.[].filename' /tmp/files.json | node scripts/maintain-path-check.mjs
+
+          jq -r '.body // ""' /tmp/pr.json > /tmp/pr-body.md
+          HEAD_SHA="$HEAD" node scripts/adversarial-review-check.mjs --body-file /tmp/pr-body.md --head-sha "$HEAD"
+          ARTIFACT=$(sed -nE 's/^[[:space:]]*-?[[:space:]]*review_artifact_id[[:space:]]*:[[:space:]]*(rv_[a-f0-9]{32})[[:space:]]*$/\1/p' /tmp/pr-body.md | head -n 1)
+          curl -fsS --get --data-urlencode "id=$ARTIFACT" "$API/v1/reviews" -o /tmp/review.json
+          node scripts/review-artifact-check.mjs --file /tmp/review.json --artifact "$ARTIFACT" --head "$HEAD" --author-agent "$AGENT"
+
+          gh api --paginate --slurp "repos/$REPO/pulls/$PR/reviews?per_page=100" | jq 'add' > /tmp/reviews.json
+          jq -e --arg head "$HEAD" '[.[] | select(.user.login == "baney75" and .commit_id == $head)] | sort_by(.id) | last | .state == "APPROVED"' /tmp/reviews.json >/dev/null
+          gh api "repos/$REPO/commits/$HEAD/check-runs?per_page=100" > /tmp/checks.json
+          jq -e '[.check_runs[] | select((.name == "Tiny perfect PR" or .name == "Secret scan") and .status == "completed" and .conclusion == "success") | .name] | unique | sort == ["Secret scan", "Tiny perfect PR"]' /tmp/checks.json >/dev/null
+
+          FILES=$(jq 'length' /tmp/files.json)
+          TOTAL=$(jq '[.[].changes] | add' /tmp/files.json)
+          PATHS=$(jq -c '[.[].filename]' /tmp/files.json)
+          {
+            echo "pr=$PR"
+            echo "head=$HEAD"
+            echo "author=$AUTHOR"
+            echo "files=$FILES"
+            echo "total=$TOTAL"
+            echo "paths=$PATHS"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Reserve the exact award before merge
+        env:
+          AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
+          API: https://grokplace.barnlabs.net
+          PR: ${{ steps.candidate.outputs.pr }}
+          HEAD: ${{ steps.candidate.outputs.head }}
+          AUTHOR: ${{ steps.candidate.outputs.author }}
+          FILES: ${{ steps.candidate.outputs.files }}
+          TOTAL: ${{ steps.candidate.outputs.total }}
+          PATHS: ${{ steps.candidate.outputs.paths }}
+        run: |
+          set -euo pipefail
+          [ -n "${AWARD_SECRET:-}" ] || { echo "AWARD_SECRET is not configured."; exit 1; }
+          BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --argjson files "$FILES" --argjson lines "$TOTAL" --argjson paths "$PATHS" '{phase:"reserve",github:$github,prNumber:$pr,headSha:$head,filesChanged:$files,linesChanged:$lines,paths:$paths}')
+          curl --retry 5 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/reserve.json
+          jq -e '.ok == true and (.reserved == true or .already == true)' /tmp/reserve.json >/dev/null
+
+      - name: Merge the exact reserved head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.candidate.outputs.pr }}
+          HEAD: ${{ steps.candidate.outputs.head }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
+          [ "$CURRENT" = "$HEAD" ] || { echo "PR head changed after reservation."; exit 1; }
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch
+          gh api "repos/$REPO/pulls/$PR" > /tmp/merged.json
+          jq -e --arg head "$HEAD" '.merged == true and .head.sha == $head and (.merge_commit_sha | test("^[a-f0-9]{40}$"))' /tmp/merged.json >/dev/null
+
+      - name: Finalize the reserved award
+        env:
+          AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
+          API: https://grokplace.barnlabs.net
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.candidate.outputs.pr }}
+          HEAD: ${{ steps.candidate.outputs.head }}
+          AUTHOR: ${{ steps.candidate.outputs.author }}
+        run: |
+          set -euo pipefail
+          MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha')
+          BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --arg merge "$MERGE_SHA" '{phase:"finalize",github:$github,prNumber:$pr,headSha:$head,mergeSha:$merge}')
+          curl --retry 10 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/award.json
+          jq -e '.ok == true and (.awarded == 10 or .already == true)' /tmp/award.json >/dev/null
+
+  reconcile-reservations:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'reconcile')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Reconcile durable reservations
+        env:
+          AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
+          API: https://grokplace.barnlabs.net
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ONLY_PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          [ -n "${AWARD_SECRET:-}" ] || { echo "AWARD_SECRET is not configured."; exit 1; }
+          [ "${ONLY_PR:-}" != "all" ] || ONLY_PR=""
+          CURSOR=""
+          while :; do
+            if [ -n "$CURSOR" ]; then
+              curl --retry 5 --retry-all-errors --fail-with-body -sS --get "$API/v1/maintain/reservations" --data-urlencode "cursor=$CURSOR" -H "Authorization: Bearer $AWARD_SECRET" -o /tmp/reservations.json
+            else
+              curl --retry 5 --retry-all-errors --fail-with-body -sS "$API/v1/maintain/reservations" -H "Authorization: Bearer $AWARD_SECRET" -o /tmp/reservations.json
+            fi
+            jq -c '.reservations[]' /tmp/reservations.json | while read -r RESERVATION; do
+              PR=$(jq -r '.prNumber' <<<"$RESERVATION")
+              [ -z "${ONLY_PR:-}" ] || [ "$PR" = "$ONLY_PR" ] || continue
+              HEAD=$(jq -r '.headSha' <<<"$RESERVATION")
+              AUTHOR=$(jq -r '.github' <<<"$RESERVATION")
+              gh api "repos/$REPO/pulls/$PR" > /tmp/reconcile-pr.json
+              CURRENT=$(jq -r '.head.sha' /tmp/reconcile-pr.json)
+              STATE=$(jq -r '.state' /tmp/reconcile-pr.json)
+              MERGED=$(jq -r '.merged' /tmp/reconcile-pr.json)
+              if [ "$MERGED" = "true" ] && [ "$CURRENT" = "$HEAD" ]; then
+                MERGE_SHA=$(jq -r '.merge_commit_sha' /tmp/reconcile-pr.json)
+                BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --arg merge "$MERGE_SHA" '{phase:"finalize",github:$github,prNumber:$pr,headSha:$head,mergeSha:$merge}')
+                curl --retry 10 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY"
+              elif [ "$STATE" = "closed" ] || [ "$CURRENT" != "$HEAD" ]; then
+                BODY=$(jq -n --argjson pr "$PR" --arg head "$HEAD" '{phase:"cancel",prNumber:$pr,headSha:$head,reason:"closed unmerged or head changed"}')
+                curl --retry 5 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY"
+              fi
+            done
+            NEXT=$(jq -r '.nextCursor // empty' /tmp/reservations.json)
+            [ -n "$NEXT" ] || break
+            [ "$NEXT" != "$CURSOR" ] || { echo "Reservation cursor did not advance."; exit 1; }
+            CURSOR="$NEXT"
+          done

@@ -17,13 +17,14 @@
 ## Adversarial review
 <!-- MAINTAIN PRs: CI FAILS until you paste a REAL separate-agent review.
      Do NOT leave VERDICT: SHIP until a separate agent produced it.
-     Include the PR head SHA (first 7+ chars) so the SHIP cannot be reused after new pushes. -->
+     The reviewer must attest through /v1/reviews/attest.
+     Include its immutable artifact ID and the full 40-character PR head SHA. -->
 
 ```
 ## Adversarial review
 - Reviewer: separate adversarial agent (not the implementer)
-- subagent_id: PASTE_REAL_ID_HERE
-- head_sha: PASTE_HEAD_SHA_HERE
+- review_artifact_id: PASTE_REVIEW_ARTIFACT_ID_HERE
+- head_sha: PASTE_FULL_40_CHARACTER_HEAD_SHA_HERE
 - Preflight: maintain-preflight → PASS
 - Size: ≤3 files, ≤40 lines, allowlist checked
 - Findings: none found | or list MINOR/NIT/…

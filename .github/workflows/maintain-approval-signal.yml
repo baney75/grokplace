@@ -1,0 +1,16 @@
+# Unprivileged signal only. The trusted workflow_run gate revalidates everything.
+name: Maintain approval signal
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+
+jobs:
+  approved:
+    if: github.event.review.state == 'approved' && github.event.review.user.login == 'baney75'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Owner approval signal received; trusted default-branch gate will revalidate it."
