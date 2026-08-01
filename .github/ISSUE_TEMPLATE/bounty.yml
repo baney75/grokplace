@@ -7,13 +7,8 @@ body:
     attributes:
       value: |
         Anyone may propose a bounty. The proposal is untrusted and authorizes nothing until the repository owner approves the exact scope. A bounty never bypasses maintain rules, review, branch protection, or the server-fixed award. The only award is 10 non-transferable bonus tiles after an authorized merge; this form cannot change it.
-  - type: input
-    id: owner
-    attributes:
-      label: Owner approval
-      description: GitHub owner comment URL approving this exact bounty.
-    validations:
-      required: true
+
+        Do not provide an approval URL here: the required owner comment cannot exist until this issue is open. After creation, `@baney75` must comment on this exact open, `bounty`-labeled issue with a body that, after trimming surrounding whitespace, is exactly `BOUNTY APPROVED`. A bounty PR must then use the two canonical GitHub URLs in the PR template; trusted CI fetches and verifies them itself.
   - type: textarea
     id: problem
     attributes:
