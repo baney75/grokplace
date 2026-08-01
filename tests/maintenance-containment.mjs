@@ -61,6 +61,12 @@ function testEnv({ limiterError = false } = {}) {
 
 {
   const { env, calls } = testEnv();
+  const response = await maintenanceWorker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev./v1/canvas"), env);
+  check("a trailing-dot workers.dev host is noncanonical and returns 404 without a binding call", response.status === 404 && calls.length === 0);
+}
+
+{
+  const { env, calls } = testEnv();
   const response = await maintenanceWorker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/challenge?scope=place"), env);
   check("maintenance challenge rejects non-review scopes before rate limit or DO", response.status === 400 && calls.length === 0);
 }

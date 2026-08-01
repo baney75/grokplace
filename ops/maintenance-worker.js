@@ -37,6 +37,12 @@ function notFoundResponse() {
   return new Response("Not found\n", { status: 404, headers: headers({ "content-type": "text/plain; charset=utf-8" }) });
 }
 
+/** @param {string} hostname */
+function isWorkersDevHost(hostname) {
+  // URL preserves a terminal DNS root label, so normalize it before the suffix check.
+  return hostname.toLowerCase().replace(/\.$/, "").endsWith(".workers.dev");
+}
+
 /** @param {Request} request */
 function clientIp(request) {
   return request.headers.get("CF-Connecting-IP") || "unknown";
@@ -125,7 +131,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.hostname !== REVIEW_HOST) {
-      return url.hostname.endsWith(".workers.dev") ? notFoundResponse() : maintenanceResponse();
+      return isWorkersDevHost(url.hostname) ? notFoundResponse() : maintenanceResponse();
     }
 
     const method = request.method.toUpperCase();
