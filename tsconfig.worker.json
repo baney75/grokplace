@@ -12,7 +12,7 @@
   },
   "include": [
     "worker-configuration.d.ts",
-    "worker/env-secrets.d.ts",
+    "worker/env-bindings.d.ts",
     "worker/index.js",
     "ops/maintenance-worker.js",
     "shared/maintain-policy.js",
