@@ -1,7 +1,7 @@
 :root {
-  --bg: #0b0d12;
-  --panel: #12151c;
-  --panel2: #181c26;
+  --bg: #07090e;
+  --panel: #0f131a;
+  --panel2: #151a24;
   --border: #2a3140;
   --text: #eef2f8;
   --muted: #8b97a8;
@@ -13,7 +13,7 @@
   --radius: 14px;
   --font: "Segoe UI", system-ui, -apple-system, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
 }
 
 * { box-sizing: border-box; }
@@ -23,8 +23,9 @@ body {
   font-family: var(--font);
   color: var(--text);
   background:
-    radial-gradient(900px 500px at 10% -10%, #1a2a3a 0%, transparent 55%),
-    radial-gradient(700px 400px at 100% 0%, #2a1530 0%, transparent 50%),
+    radial-gradient(1000px 520px at 8% -12%, rgba(0, 211, 221, 0.12) 0%, transparent 55%),
+    radial-gradient(800px 420px at 100% 0%, rgba(207, 110, 228, 0.1) 0%, transparent 50%),
+    radial-gradient(600px 300px at 50% 100%, rgba(148, 224, 68, 0.05) 0%, transparent 45%),
     var(--bg);
   min-height: 100vh;
   min-height: 100dvh;
@@ -71,16 +72,50 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .brand { display: flex; gap: 0.85rem; align-items: center; }
 .logo {
-  width: 44px; height: 44px; border-radius: 12px;
+  width: 46px; height: 46px; border-radius: 12px;
   background:
-    linear-gradient(135deg, #e50000 0 50%, #00d3dd 50% 100%),
-    linear-gradient(45deg, #94e044 0 50%, #cf6ee4 50% 100%);
-  background-size: 50% 50%;
-  background-position: 0 0, 100% 0, 0 100%, 100% 100%;
-  box-shadow: 0 0 0 1px #2a3140, var(--shadow);
+    conic-gradient(from 210deg, #e50000, #e59500, #94e044, #00d3dd, #0000ea, #cf6ee4, #e50000);
+  box-shadow: 0 0 0 1px #2a3140, 0 0 28px rgba(0, 211, 221, 0.18), var(--shadow);
+  position: relative;
 }
-h1 { margin: 0; font-size: 1.35rem; letter-spacing: -0.02em; }
-.tag { margin: 0.15rem 0 0; color: var(--muted); font-size: 0.92rem; }
+.logo::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 9px;
+  background: #07090e;
+  background-image:
+    linear-gradient(135deg, #e50000 0 50%, transparent 50%),
+    linear-gradient(45deg, transparent 50%, #00d3dd 50%);
+  background-size: 50% 50%;
+  background-position: 0 0, 100% 100%;
+  background-repeat: no-repeat;
+}
+h1, .wordmark { margin: 0; font-size: 1.45rem; letter-spacing: -0.03em; font-weight: 700; }
+.wordmark, .wordmark-sm { font-family: var(--mono); }
+.wm-grok { color: var(--accent); }
+.wm-slash { color: var(--muted); font-weight: 500; }
+.wm-place { color: var(--text); }
+.wordmark-sm { font-size: 0.9rem; font-weight: 600; }
+.tag { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.9rem; }
+.standard {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid rgba(0, 211, 221, 0.22);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, rgba(0, 211, 221, 0.06), rgba(207, 110, 228, 0.05));
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.standard strong { color: var(--text); }
+.why-list {
+  margin: 0.55rem 0 0.75rem;
+  padding-left: 1.15rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+.why-list li { margin: 0.35rem 0; }
+.why-list strong { color: var(--text); }
 .stats {
   display: flex; flex-wrap: wrap; gap: 0.85rem 1.1rem;
   color: var(--muted); font-size: 0.92rem;

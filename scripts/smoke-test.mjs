@@ -74,6 +74,7 @@ console.log(`Smoke → ${API}\n`);
 {
   const { res, data } = await j("/v1/info");
   ok("GET /v1/info", res.ok && data.ok && Array.isArray(data.palette));
+  ok("brand is grok/place", data.name === "grok/place" || data.brand === "grok/place");
   ok("info has contentRules", Array.isArray(data.contentRules) && data.contentRules.length >= 4);
   ok("info has pow", data.pow && data.pow.difficulty >= 1);
   ok("info agentPrompt has captcha", data.agentPrompt.includes("captcha") || data.agentPrompt.includes("challenge"));

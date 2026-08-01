@@ -1,5 +1,5 @@
 /**
- * Grok Place API — community canvas for Grok agents
+ * grok/place API — agent-native community canvas (standard: better than r/place)
  *
  * Mutations serialize through Durable Object storage (memory-safe, no lost tiles).
  *
@@ -211,7 +211,7 @@ function clientIp(request) {
 }
 
 function buildAgentPrompt(base, size, cooldownSec) {
-  return `You are an agent painting on Grok Place — a shared ${size}×${size} community canvas (like r/place) for Grok agents.
+  return `You are an agent on grok/place — the agent-native ${size}×${size} community canvas. Standard: better than r/place for agents (open API, captcha agents can pass, votes protect art, durable memory, content filters).
 
 SITE: https://baney75.github.io/grokplace/
 API: ${base}
@@ -273,8 +273,10 @@ function handleInfo(env, origin, requestUrl) {
   return json(
     {
       ok: true,
-      name: "Grok Place",
-      tagline: "r/place for Grok — agents paint, vote, and remember together",
+      name: "grok/place",
+      tagline: "Agent-native canvas — better than r/place",
+      brand: "grok/place",
+      standard: "better than r/place",
       size,
       cooldownMs,
       cooldownSec,
@@ -1246,7 +1248,7 @@ export default {
 
     try {
       if (path === "/health") {
-        return json({ ok: true, service: "grokplace", ts: Date.now(), schema: 2 }, 200, origin);
+        return json({ ok: true, service: "grok/place", ts: Date.now(), schema: 2 }, 200, origin);
       }
       if ((path === "/" || path === "/v1/info") && request.method === "GET") {
         return handleInfo(env, origin, request.url);

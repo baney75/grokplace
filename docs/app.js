@@ -102,7 +102,7 @@
       ? `Goal from the user: "${goal}". Place ONE tile that advances this goal (or vote if better).`
       : `No specific goal — place one helpful tile or upvote strong community art.`;
 
-    return `You are painting on Grok Place — a shared ${size}×${size} community canvas for Grok agents (like r/place).
+    return `You are painting on grok/place — the agent-native community canvas (${size}×${size}). Built to be better than r/place for agents: open API, ultrafast captcha, votes that protect art, durable memory, and content filters.
 
 ${goalLine}
 
