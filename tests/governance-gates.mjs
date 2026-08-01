@@ -55,6 +55,9 @@ const adversarialGuide = readFileSync(join(root, "ADVERSARIAL.md"), "utf8");
 const runbook = readFileSync(join(root, "RUNBOOK.md"), "utf8");
 const reviewArtifactCheck = readFileSync(join(root, "scripts/review-artifact-check.mjs"), "utf8");
 const workerSource = readFileSync(join(root, "worker/index.js"), "utf8");
+const wranglerConfig = readFileSync(join(root, "wrangler.toml"), "utf8");
+check("Worker caching stays enabled behind explicit response policies", /\[cache\]\s+enabled\s*=\s*true/.test(wranglerConfig));
+check("Worker execution has bounded CPU and subrequests", /\[limits\]\s+cpu_ms\s*=\s*100\s+subrequests\s*=\s*3/.test(wranglerConfig));
 check("privileged workflow uses workflow_run", /workflow_run:/.test(mergeWorkflow) && !/pull_request_target:/.test(mergeWorkflow));
 check("trusted merge is triggered only by successful PR quality", /workflows:\s*\[PR quality\]/.test(mergeWorkflow) && /workflow_run\.conclusion == 'success'/.test(mergeWorkflow) && /workflow_run\.event == 'pull_request'/.test(mergeWorkflow));
 check("obsolete human approval signal is removed", !existsSync(join(root, ".github/workflows/maintain-approval-signal.yml")) && !/Maintain approval signal|pull_request_review/.test(mergeWorkflow));
@@ -68,6 +71,15 @@ check("trusted PR workflow runs the path-aware secret diff scanner", /git diff[^
 check("trusted merge workflow coalesces stale runs per PR", /group:\s*trusted-pr-merge-/.test(mergeWorkflow) && /github\.event_name == 'workflow_run'/.test(mergeWorkflow) && /format\('run-\{0\}', github\.run_id\)/.test(mergeWorkflow) && /cancel-in-progress:\s*true/.test(mergeWorkflow));
 check("merge refuses a bank that cannot accept the full award", /\.bank\.bonusTiles >= 0 and \.bank\.bonusTiles <= 190/.test(mergeWorkflow));
 check("trusted workflow resolves the immutable review artifact", /review-artifact/.test(mergeWorkflow) && /review-artifact-check\.mjs/.test(mergeWorkflow));
+check(
+  "trusted workflow separates the read-only review mirror from live maintainer state",
+  /REVIEW_API:\s*https:\/\/grokplace\.projectbarnlab\.workers\.dev/.test(mergeWorkflow) &&
+    /APP_API:\s*https:\/\/grokplace\.barnlabs\.net/.test(mergeWorkflow) &&
+    /"\$REVIEW_API\/v1\/reviews"/.test(mergeWorkflow) &&
+    /"\$APP_API\/v1\/maintainers"/.test(mergeWorkflow) &&
+    /"\$APP_API\/v1\/bank"/.test(mergeWorkflow) &&
+    !/"\$REVIEW_API\/v1\/(?:maintainers|bank)"/.test(mergeWorkflow)
+);
 check("owner-authored PRs always enter product lane before path classification", /if \[ "\$AUTHOR" = "baney75" \]; then\s+LANE=product\s+elif jq -r '\.\[\]\.filename' \/tmp\/files\.json \| node scripts\/maintain-path-check\.mjs[\s\S]*then\s+LANE=maintain/.test(mergeWorkflow));
 check("non-owner PRs fail closed outside the maintain allowlist", /Non-owner PRs are eligible only for the allowlisted maintenance lane\."\s+exit 1/.test(mergeWorkflow) && /jq -r '\.\[\]\.filename' \/tmp\/files\.json \| node scripts\/maintain-path-check\.mjs/.test(mergeWorkflow));
 check("product lane is owner-authored and names one real implementer agent", /\[ "\$AUTHOR" = "baney75" \]/.test(mergeWorkflow) && /exactly one implementer_agent field/.test(mergeWorkflow) && /PASTE_IMPLEMENTER_AGENT_HERE/.test(mergeWorkflow) && /--mode product-owner[\s\S]*--implementer-agent "\$IMPLEMENTER_AGENT"/.test(mergeWorkflow));

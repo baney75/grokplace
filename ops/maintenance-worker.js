@@ -13,4 +13,5 @@ export default {
 };
 
 // Cloudflare requires the existing class export in every version that shares its DO namespace.
-export class GrokPlaceCanvas {}
+// Keep the real class so scheduled music alarms remain safe while HTTP is offline.
+export { GrokPlaceCanvas } from "../worker/index.js";

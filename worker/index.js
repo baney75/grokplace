@@ -602,7 +602,7 @@ function plainText(body, origin, status = 200, extraHeaders = {}) {
     status,
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
-      "Cache-Control": "public, max-age=2",
+      "Cache-Control": "no-store",
       ...securityHeaders(),
       ...corsHeaders(origin),
       ...extraHeaders,
@@ -3490,8 +3490,8 @@ export default {
       return plainText("Not found", origin, 404);
     }
     if (method === "OPTIONS") {
-      const limited = await edgeRateLimit(env, "EDGE_READ_LIMITER", request, `OPTIONS:${path}`);
-      if (!limited.ok) return edgeRateLimitResponse(origin, "30/60s per client/route", limited.unavailable);
+      const limited = await edgeRateLimit(env, "EDGE_READ_LIMITER", request, "read");
+      if (!limited.ok) return edgeRateLimitResponse(origin, "30/60s per client", limited.unavailable);
       return new Response(null, {
         status: 204,
         headers: {
@@ -3512,14 +3512,14 @@ export default {
           : method === "GET"
             ? "EDGE_READ_LIMITER"
             : "EDGE_WRITE_LIMITER";
-      const policy = live ? "6/60s per client" : challenge ? "90/60s per client/scope" : method === "GET" ? "30/60s per client/route" : "20/60s per client/route";
-      const requestedScope = url.searchParams.get("scope") || "missing";
-      const challengeBucketScope = challenge && POW_SCOPES.includes(requestedScope) ? requestedScope : challenge ? "invalid" : "";
+      const policy = live ? "6/60s per client" : challenge ? "90/60s per client" : method === "GET" ? "30/60s per client" : "20/60s per client";
       const bucket = live
         ? "live"
         : challenge
-          ? `${method}:${path}:${challengeBucketScope}`
-          : `${method}:${path}`;
+          ? "challenge"
+          : method === "GET"
+            ? "read"
+            : "write";
       const limited = await edgeRateLimit(env, bindingName, request, bucket);
       if (!limited.ok) return edgeRateLimitResponse(origin, policy, limited.unavailable);
     }

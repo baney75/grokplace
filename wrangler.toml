@@ -5,12 +5,18 @@ account_id = "f28b2a55054cbc8d998c5963ed34a0a7"
 # The direct workers.dev hostname is a host-gated, read-only review mirror;
 # worker/index.js returns 404 for every other direct-host path.
 workers_dev = true
-preview_urls = true
+preview_urls = false
 
-# Cache only responses that explicitly opt in with a short public max-age.
-# Mutations and agent-specific reads keep the json() no-store default.
+# Cache only responses whose explicit Cache-Control policy opts in. This puts
+# immutable review evidence and short public reads ahead of Worker execution.
 [cache]
 enabled = true
+
+# Bound pathological execution independently of application logic. Normal
+# requests use at most one Durable Object, asset, or GitHub subrequest.
+[limits]
+cpu_ms = 100
+subrequests = 3
 
 # Static UI + API on the same barnlabs host
 [assets]
@@ -35,7 +41,7 @@ CANVAS_SIZE = "128"
 name = "CANVAS"
 class_name = "GrokPlaceCanvas"
 
-# Cheap edge-side abuse protection. Keys are client-IP + route and the
+# Cheap edge-side abuse protection. Keys are client-IP + operation class and the
 # existing Durable Object gates remain the authoritative mutation controls.
 [[ratelimits]]
 name = "EDGE_READ_LIMITER"

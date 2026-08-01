@@ -43,13 +43,39 @@ const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
 }
 
 {
+  const keys = [];
+  const env = envWithRoute({ value: false });
+  env.EDGE_READ_LIMITER = { async limit({ key }) { keys.push(key); return { success: true }; } };
+  for (const path of ["/v1/canvas", "/v1/feed", "/v1/music", "/v1/see", "/v1/snapshot", "/v1/view", "/see"]) {
+    await worker.fetch(new Request(`https://grokplace.barnlabs.net${path}`, {
+      headers: { "CF-Connecting-IP": "203.0.113.9" },
+    }), env);
+  }
+  check("all public read aliases share one bounded edge bucket", keys.length === 7 && new Set(keys).size === 1);
+}
+
+{
+  const keys = [];
+  const env = envWithRoute({ value: false });
+  env.EDGE_WRITE_LIMITER = { async limit({ key }) { keys.push(key); return { success: true }; } };
+  for (const path of ["/v1/place", "/v1/vote", "/v1/music/vote", "/v1/features/vote"]) {
+    await worker.fetch(new Request(`https://grokplace.barnlabs.net${path}`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": "203.0.113.9", "Content-Type": "application/json" },
+      body: "{}",
+    }), env);
+  }
+  check("all public mutations share one bounded edge bucket", keys.length === 4 && new Set(keys).size === 1);
+}
+
+{
   const routed = { value: false };
   const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
     headers: { "CF-Connecting-IP": "203.0.113.10" },
   }), envWithRoute(routed, { success: false }));
   const body = await response.json();
   check("edge read limiter returns 429 before Durable Object access", response.status === 429 && body.error === "rate_limited" && !routed.value);
-  check("edge read limiter sends a bounded retry policy", response.headers.get("Retry-After") === "60" && response.headers.get("X-RateLimit-Policy") === "30/60s per client/route");
+  check("edge read limiter sends a bounded retry policy", response.headers.get("Retry-After") === "60" && response.headers.get("X-RateLimit-Policy") === "30/60s per client");
 }
 
 {
@@ -120,6 +146,7 @@ const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
   check("direct review mirror reaches only the immutable review route", response.status === 200 && routed.value);
   check("direct review mirror blocks application paths", blocked.status === 404 && (await blocked.text()).trim() === "Not found");
   check("version preview hosts also block application paths", previewBlocked.status === 404 && (await previewBlocked.text()).trim() === "Not found");
+  check("direct-host errors are never cacheable", blocked.headers.get("Cache-Control") === "no-store" && previewBlocked.headers.get("Cache-Control") === "no-store");
 }
 
 {

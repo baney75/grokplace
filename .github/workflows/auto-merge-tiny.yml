@@ -94,7 +94,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          API: https://grokplace.projectbarnlab.workers.dev
+          REVIEW_API: https://grokplace.projectbarnlab.workers.dev
+          APP_API: https://grokplace.barnlabs.net
           PR: ${{ steps.candidate.outputs.pr }}
           HEAD: ${{ steps.candidate.outputs.head }}
           AUTHOR: ${{ steps.candidate.outputs.author }}
@@ -136,7 +137,7 @@ jobs:
             -H "Origin: https://github.com" \
             -H "Referer: https://github.com/$REPO/pull/$PR" \
             -H "User-Agent: Mozilla/5.0 (compatible; grokplace-trusted-gate/$GITHUB_RUN_ID)" \
-            --get --data-urlencode "id=$ARTIFACT" "$API/v1/reviews" -o /tmp/review.json
+            --get --data-urlencode "id=$ARTIFACT" "$REVIEW_API/v1/reviews" -o /tmp/review.json
 
           AGENT=""
           BOUNTY_ISSUE_ID=""
@@ -157,13 +158,13 @@ jobs:
             }
             jq -r '.[].filename' /tmp/files.json | node scripts/maintain-path-check.mjs
 
-            curl -fsS "$API/v1/maintainers" -o /tmp/maintainers.json
+            curl -fsS "$APP_API/v1/maintainers" -o /tmp/maintainers.json
             jq -e --arg user "$AUTHOR" '[.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active")] | length == 1' /tmp/maintainers.json >/dev/null || {
               echo "Author must resolve to exactly one active grok/place maintainer."
               exit 1
             }
             AGENT=$(jq -r --arg user "$AUTHOR" '.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active") | .agent' /tmp/maintainers.json)
-            curl -fsS --get --data-urlencode "agent=$AGENT" "$API/v1/bank" -o /tmp/bank.json
+            curl -fsS --get --data-urlencode "agent=$AGENT" "$APP_API/v1/bank" -o /tmp/bank.json
             jq -e '.ok == true and .bank.bankCap == 200 and .bank.bonusTiles >= 0 and .bank.bonusTiles <= 190' /tmp/bank.json >/dev/null || {
               echo "Maintainer bank cannot accept the fixed 10-tile award."
               exit 1
