@@ -264,7 +264,7 @@ jobs:
           gh api "repos/$REPO/check-runs/$CHECK_ID" > /tmp/trusted-check.json
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368' /tmp/trusted-check.json >/dev/null
           COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="failure" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted agent review failed' -f 'output[summary]=Validation or durable maintenance reservation failed; merge remains blocked.' > /tmp/trusted-failure.json
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="failure" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted agent review failed' -f 'output[summary]=The exact-head separate-agent artifact or lane validation failed; merge remains blocked. See the job log for the rejected gate.' > /tmp/trusted-failure.json
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "Trusted agent review" and .app.id == 15368 and .status == "completed" and .conclusion == "failure"' /tmp/trusted-failure.json >/dev/null
 
       - name: Merge the exact eligible head

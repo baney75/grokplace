@@ -11,9 +11,9 @@ This proves that a distinct authenticated agent identity signed the immutable re
 ```text
 1. Tiny change (≤3 files, ≤40 lines, allowlist only)
 2. node scripts/maintain-preflight.mjs   # must exit 0
-3. Spawn SEPARATE adversarial agent (prompt below + git diff)
+3. Spawn a SEPARATE adversarial agent on the same trusted workstation (prompt below + git diff)
 4. BLOCK → fix → new preflight → NEW separate review on the new full SHA
-5. SHIP → reviewer posts `/v1/reviews/attest`; paste its artifact ID below
+5. SHIP → the reviewer, using its own private capability key, posts `/v1/reviews/attest`; paste its artifact ID below
 6. CI: canonical path gate + exact-head verified artifact + distinct verified reviewer identity → reserve +10 → merge exact head → finalize award
 ```
 
@@ -40,7 +40,7 @@ If SHIP with zero findings, name residual risk.
 End with exactly: VERDICT: BLOCK  or  VERDICT: SHIP
 ```
 
-After `SHIP`, the reviewer gets a `review:attest` challenge and posts its own agent name, full head SHA, verdict, findings, and residual risk to `/v1/reviews/attest` with `Authorization: Agent …`. The maintainer never receives the reviewer capability.
+After `SHIP`, the reviewer gets a `review:attest` challenge and posts its own agent name, full head SHA, verdict, findings, and residual risk to `/v1/reviews/attest` with `Authorization: Agent …`. The maintainer never receives the reviewer capability. A same-machine subagent is valid only when it has a distinct agent identity, receives the review prompt independently, keeps its key private, and creates the immutable artifact itself. The implementer must not create, copy, or submit that artifact on the reviewer's behalf.
 
 ## PR body (must pass `adversarial-review-check`)
 

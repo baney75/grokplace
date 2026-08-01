@@ -184,6 +184,7 @@ function corsHeaders(origin) {
     "Access-Control-Allow-Headers": "Content-Type, X-Agent-Name, Authorization",
     "Access-Control-Max-Age": "86400",
     "Access-Control-Expose-Headers": "X-Cooldown-Remaining, X-Next-Place-At",
+    "Vary": "Origin",
   };
 }
 
@@ -814,8 +815,6 @@ function stubId(env) {
 }
 
 async function forwardToCanvas(env, path, request, origin) {
-  const id = stubId(env);
-  const stub = env.CANVAS.get(id);
   const url = new URL(request.url);
   url.pathname = path;
   const headers = new Headers(request.headers);
@@ -825,14 +824,49 @@ async function forwardToCanvas(env, path, request, origin) {
   headers.set("X-Client-IP", clientIp(request));
   const init = { method: request.method, headers };
   if (request.method !== "GET" && request.method !== "HEAD") {
-    init.body = await request.arrayBuffer();
+    const body = await readBodyLimited(request, EDGE_REQUEST_BODY_MAX_BYTES);
+    if (body === null) {
+      return json({ ok: false, error: "request_too_large", message: "Request body exceeds the 64 KiB API limit." }, 413, origin, { "Retry-After": "60" });
+    }
+    init.body = body;
   }
+  const id = stubId(env);
+  const stub = env.CANVAS.get(id);
   const res = await stub.fetch(url.toString(), init);
   const body = await res.arrayBuffer();
   const outHeaders = new Headers(res.headers);
   for (const [k, v] of Object.entries(corsHeaders(origin))) outHeaders.set(k, v);
   outHeaders.set("Cache-Control", "no-store");
   return new Response(body, { status: res.status, headers: outHeaders });
+}
+
+async function readBodyLimited(request, maxBytes) {
+  if (!request.body) return new ArrayBuffer(0);
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("request body too large");
+        return null;
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
 }
 
 /**
@@ -3441,15 +3475,24 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders(origin) });
+    const isApiSurface = path.startsWith("/v1/") || EDGE_READ_PATHS.has(path) || path === "/place" || path === "/webhook";
+    const method = request.method.toUpperCase();
+    if (method === "OPTIONS") {
+      const limited = await edgeRateLimit(env, "EDGE_READ_LIMITER", request, `OPTIONS:${path}`);
+      if (!limited.ok) return edgeRateLimitResponse(origin, "30/60s per client/route", limited.unavailable);
+      return new Response(null, {
+        status: 204,
+        headers: {
+          ...corsHeaders(origin),
+          ...securityHeaders(),
+          "Cache-Control": "no-store",
+        },
+      });
     }
 
-    const isApiSurface = path.startsWith("/v1/") || EDGE_READ_PATHS.has(path) || path === "/place" || path === "/webhook";
     if (isApiSurface) {
       const live = path === "/v1/live";
       const challenge = path === "/v1/challenge";
-      const method = request.method.toUpperCase();
       const bindingName = live
         ? "EDGE_LIVE_LIMITER"
         : challenge
@@ -3467,7 +3510,7 @@ export default {
       if (!limited.ok) return edgeRateLimitResponse(origin, policy, limited.unavailable);
     }
 
-    if (request.method === "POST") {
+    if (method !== "GET" && method !== "HEAD") {
       const length = Number(request.headers.get("Content-Length"));
       if (Number.isFinite(length) && length > EDGE_REQUEST_BODY_MAX_BYTES) {
         return json({ ok: false, error: "request_too_large", message: "Request body exceeds the 64 KiB API limit." }, 413, origin, { "Retry-After": "60" });

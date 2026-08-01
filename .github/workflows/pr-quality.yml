@@ -36,6 +36,11 @@ jobs:
       - name: Dependency audit
         run: npm audit --audit-level=high
 
+      - name: Validate production and containment bundles
+        run: |
+          npx wrangler deploy --dry-run --outdir /tmp/grokplace-production-bundle
+          npx wrangler deploy --config ops/wrangler.maintenance.toml --dry-run --outdir /tmp/grokplace-maintenance-bundle
+
       - name: Classify paths + secret scan
         id: cls
         env:

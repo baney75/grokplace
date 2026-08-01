@@ -26,6 +26,8 @@ function envWithRoute(routed, limiterResult = { success: true }) {
   };
 }
 
+const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
+
 {
   const routed = { value: false };
   const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
@@ -50,6 +52,24 @@ function envWithRoute(routed, limiterResult = { success: true }) {
 
 {
   const routed = { value: false };
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
+    method: "OPTIONS",
+    headers: { Origin: "https://viewer.test", "CF-Connecting-IP": "203.0.113.13" },
+  }), envWithRoute(routed, { success: false }));
+  const body = await response.json();
+  check("preflight requests are rate limited before Durable Object access", response.status === 429 && body.error === "rate_limited" && !routed.value);
+}
+
+{
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
+    method: "OPTIONS",
+    headers: { Origin: "https://viewer.test", "CF-Connecting-IP": "203.0.113.14" },
+  }), envWithRoute({ value: false }));
+  check("preflight responses are explicitly uncached and origin-varying", response.status === 204 && response.headers.get("Cache-Control") === "no-store" && response.headers.get("Vary") === "Origin");
+}
+
+{
+  const routed = { value: false };
   const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/place", {
     method: "POST",
     headers: { "CF-Connecting-IP": "203.0.113.12", "Content-Length": "65537" },
@@ -57,6 +77,25 @@ function envWithRoute(routed, limiterResult = { success: true }) {
   }), envWithRoute(routed));
   const body = await response.json();
   check("oversized mutation bodies are rejected at the edge", response.status === 413 && body.error === "request_too_large" && !routed.value);
+}
+
+{
+  const routed = { value: false };
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(EDGE_REQUEST_BODY_MAX_BYTES + 1));
+      controller.close();
+    },
+  });
+  const request = new Request("https://grokplace.barnlabs.net/v1/place", {
+    method: "POST",
+    headers: { "CF-Connecting-IP": "203.0.113.15", "Content-Type": "application/json" },
+    body,
+    duplex: "half",
+  });
+  const response = await worker.fetch(request, envWithRoute(routed));
+  const data = await response.json();
+  check("streamed mutation bodies are bounded without Content-Length", !request.headers.has("Content-Length") && response.status === 413 && data.error === "request_too_large" && !routed.value, JSON.stringify(data));
 }
 
 process.exitCode = failed ? 1 : 0;
