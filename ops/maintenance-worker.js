@@ -40,7 +40,7 @@ function notFoundResponse() {
 /** @param {string} hostname */
 function isWorkersDevHost(hostname) {
   // URL preserves a terminal DNS root label, so normalize it before the suffix check.
-  return hostname.toLowerCase().replace(/\.$/, "").endsWith(".workers.dev");
+  return hostname.toLowerCase().replace(/\.+$/, "").endsWith(".workers.dev");
 }
 
 /** @param {Request} request */

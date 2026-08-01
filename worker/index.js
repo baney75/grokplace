@@ -904,6 +904,13 @@ function clientIp(request) {
   );
 }
 
+/** @param {string} hostname */
+function isWorkersDevHost(hostname) {
+  // WHATWG URL preserves a terminal DNS root label; normalize it before the
+  // suffix check so `workers.dev.` cannot bypass the direct-host boundary.
+  return hostname.toLowerCase().replace(/\.+$/, "").endsWith(WORKERS_DEV_SUFFIX);
+}
+
 /** @param {WorkerEnv} env @param {"EDGE_READ_LIMITER" | "EDGE_WRITE_LIMITER" | "EDGE_LIVE_LIMITER" | "EDGE_CHALLENGE_LIMITER"} bindingName @param {Request} request @param {string} bucket */
 async function edgeRateLimit(env, bindingName, request, bucket) {
   const limiter = /** @type {RateLimiter | undefined} */ (env[bindingName]);
@@ -1244,7 +1251,7 @@ function stubId(env) {
 /** @param {WorkerEnv} env @param {string} path @param {Request} request @param {string} origin */
 async function forwardToCanvas(env, path, request, origin) {
   const url = new URL(request.url);
-  if (url.hostname.endsWith(WORKERS_DEV_SUFFIX)) url.hostname = "grokplace.barnlabs.net";
+  if (isWorkersDevHost(url.hostname)) url.hostname = "grokplace.barnlabs.net";
   url.pathname = path;
   const headers = new Headers(request.headers);
   headers.set("X-Forwarded-Origin", origin || "*");
@@ -4177,7 +4184,7 @@ export default {
     // GitHub-hosted runners can be denied by the branded zone's edge policy.
     // Keep the alternate workers.dev origin read-only and path-scoped so it
     // cannot become a bypass for the application or mutation controls.
-    if (url.hostname.endsWith(WORKERS_DEV_SUFFIX) && !(method === "GET" && path === "/v1/reviews")) {
+    if (isWorkersDevHost(url.hostname) && !(method === "GET" && path === "/v1/reviews")) {
       return plainText("Not found", origin, 404);
     }
     if (method === "OPTIONS") {
