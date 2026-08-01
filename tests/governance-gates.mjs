@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { isMaintainAwardPath } from "../shared/maintain-policy.js";
-import { publicMaintainer } from "../worker/index.js";
+import { publicMaintainer } from "../shared/maintainer.js";
 
 const root = new URL("..", import.meta.url).pathname;
 const temp = mkdtempSync(join(tmpdir(), "grokplace-governance-"));
@@ -53,10 +53,13 @@ const prTemplate = readFileSync(join(root, ".github/pull_request_template.md"), 
 const maintainGuide = readFileSync(join(root, "MAINTAIN.md"), "utf8");
 const adversarialGuide = readFileSync(join(root, "ADVERSARIAL.md"), "utf8");
 const runbook = readFileSync(join(root, "RUNBOOK.md"), "utf8");
+const packageJson = readFileSync(join(root, "package.json"), "utf8");
 const reviewArtifactCheck = readFileSync(join(root, "scripts/review-artifact-check.mjs"), "utf8");
 const workerSource = readFileSync(join(root, "worker/index.js"), "utf8");
 const wranglerConfig = readFileSync(join(root, "wrangler.toml"), "utf8");
-check("Worker caching stays enabled behind explicit response policies", /\[cache\]\s+enabled\s*=\s*true/.test(wranglerConfig));
+const browserTypeConfig = readFileSync(join(root, "tsconfig.browser.json"), "utf8");
+const docsTypeConfig = readFileSync(join(root, "tsconfig.docs.json"), "utf8");
+check("default Worker cache is disabled so API requests reach abuse controls", !/\[cache\]\s+enabled\s*=\s*true/.test(wranglerConfig));
 check("Worker execution has bounded CPU and subrequests", /\[limits\]\s+cpu_ms\s*=\s*100\s+subrequests\s*=\s*3/.test(wranglerConfig));
 check("privileged workflow uses workflow_run", /workflow_run:/.test(mergeWorkflow) && !/pull_request_target:/.test(mergeWorkflow));
 check("trusted merge is triggered only by successful PR quality", /workflows:\s*\[PR quality\]/.test(mergeWorkflow) && /workflow_run\.conclusion == 'success'/.test(mergeWorkflow) && /workflow_run\.event == 'pull_request'/.test(mergeWorkflow));
@@ -65,6 +68,9 @@ check("durable reservations have scheduled and manual reconciliation", /schedule
 check("privileged workflow checks out the default branch", /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/.test(mergeWorkflow));
 check("untrusted PR workflow receives no award secret", !/secrets\.AWARD_SECRET/.test(qualityWorkflow));
 check("PR quality runs reviewer-identity regressions", /npm run test:review-identity/.test(qualityWorkflow));
+check("PR quality fails closed on generated bindings and Worker/browser type checks", /npm run types:check/.test(qualityWorkflow));
+check("browser type checks cover both shipped viewer bundles", /tsconfig\.docs\.json/.test(packageJson) && /public\/config\.js/.test(browserTypeConfig) && /public\/mosaic\.js/.test(browserTypeConfig) && /public\/radio\.js/.test(browserTypeConfig) && /docs\/config\.js/.test(docsTypeConfig) && /docs\/mosaic\.js/.test(docsTypeConfig) && /docs\/radio\.js/.test(docsTypeConfig));
+check("PR quality preserves sparse Worker state and validates external profile DTOs", /npm run test:worker-compatibility/.test(qualityWorkflow));
 check("PR quality runs realtime regressions after reviewer identity", qualityWorkflow.indexOf("npm run test:review-identity") < qualityWorkflow.indexOf("npm run test:realtime"));
 check("secret-path guard permits deletion of a forbidden legacy file", /git diff --name-status/.test(qualityWorkflow) && /\$1 !~ \/\^D\//.test(qualityWorkflow) && /files-present-after-pr\.txt/.test(qualityWorkflow));
 check("trusted PR workflow runs the path-aware secret diff scanner", /git diff[^\n]+\| node scripts\/credential-diff-scan\.mjs/.test(qualityWorkflow));
@@ -131,10 +137,10 @@ check(
 check("verified bounty identifiers, not PR text, enter the reservation", /bountyIssue: \(\$bountyIssue \| tonumber\)/.test(mergeWorkflow) && /bountyApprovalCommentId: \(\$bountyApprovalCommentId \| tonumber\)/.test(mergeWorkflow));
 check("external active maintainers are eligible without GitHub association", !/author_association/.test(mergeWorkflow) && /\.maintainers\[\][\s\S]*\.status == "active"/.test(mergeWorkflow) && /Any \*\*active server-verified maintainer\*\*/.test(maintainGuide));
 check("issue-form label prerequisites are exact and documented", /labels:\s*\[bounty\]/.test(bountyForm) && /labels:\s*\[feature\]/.test(featureForm) && /gh label list --repo baney75\/grokplace/.test(runbook) && /required_label in bounty feature/.test(runbook));
-check("branch rule requires zero human approvals and three strict non-destructive checks", /zero human approving reviews/.test(runbook) && /strict, current `Tiny perfect PR`, `Secret scan`, and `Trusted agent review`/.test(runbook) && /each bound to GitHub Actions app ID `15368`/.test(runbook) && /enforce the rule for administrators/.test(runbook) && /require conversations to be resolved/.test(runbook) && /disable force pushes and main-branch deletion/.test(runbook));
+check("branch rule requires zero human approvals and three strict non-destructive checks", /zero human approving reviews/.test(runbook) && /strict, current `Tiny perfect PR`, `Secret scan`, and `merge-and-award`/.test(runbook) && /each bound to GitHub Actions app ID `15368`/.test(runbook) && /enforce the rule for administrators/.test(runbook) && /require conversations to be resolved/.test(runbook) && /disable force pushes and main-branch deletion/.test(runbook));
 check("bootstrap keeps one review until trusted workflow reaches main", /do \*\*not\*\* set approvals to zero before the new trusted workflow is on `main`/.test(runbook) && /required approving reviews `1`/.test(runbook));
 check("bootstrap permits only a verified sole-owner admin bypass", /verify that `baney75` is the sole admin\/owner/.test(runbook) && /change \*\*only\*\* `enforce_admins` to `false`/.test(runbook) && /restore `enforce_admins: true` and stop/.test(runbook));
-check("bootstrap merge is exact-head and final protection names three app-bound checks", /--admin --match-head-commit "\$transition_head"/.test(runbook) && /required approving reviews `0`/.test(runbook) && /require_code_owner_reviews: false/.test(runbook) && /require_last_push_approval: false/.test(runbook) && /strict required checks `Tiny perfect PR`, `Secret scan`, and `Trusted agent review`, each bound to GitHub Actions app ID `15368`/.test(runbook));
+check("bootstrap merge is exact-head and final protection names three app-bound checks", /--admin --match-head-commit "\$transition_head"/.test(runbook) && /required approving reviews `0`/.test(runbook) && /require_code_owner_reviews: false/.test(runbook) && /require_last_push_approval: false/.test(runbook) && /strict required checks `Tiny perfect PR`, `Secret scan`, and `merge-and-award`, each bound to GitHub Actions app ID `15368`/.test(runbook));
 check("runbook documents the bounded same-app spoof residual", /app ID `15368` is shared by owner-authored workflows[\s\S]*fork PR tokens are read-only[\s\S]*external non-allowlisted changes fail closed/.test(runbook));
 check("live verification proves final transition settings remain unchanged", /After the merged release is live and verified[\s\S]*settings are unchanged/.test(runbook));
 check("adversarial guide uses machine-gated distinct identity without owner review", !/current (GitHub )?owner approval/i.test(adversarialGuide) && /No GitHub approval review is required/.test(adversarialGuide) && /distinct verified reviewer identity/.test(adversarialGuide));

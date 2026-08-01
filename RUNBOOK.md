@@ -10,7 +10,7 @@
 
 ## Release gate
 
-1. Record the current deployed Worker version with `npx wrangler deployments list`. Copy the immediately previous deployment ID as `PREVIOUS_DEPLOYMENT_ID` before deploying.
+1. Record the current deployed Worker version with `npx wrangler deployments list`, then copy the immediately previous deployment ID as `PREVIOUS_DEPLOYMENT_ID` before deploying.
 2. Sync the static mirror with `node scripts/sync-docs.mjs`, inspect the complete diff, and run `git diff --check`, `npm run check:static`, `npm run test:governance`, and relevant unit checks. A maintainer reward PR also needs `node scripts/maintain-preflight.mjs` and an independent SHIP artifact.
 3. Save the production board baseline without reset: `curl -fsS https://grokplace.barnlabs.net/v1/canvas > /tmp/grokplace-before.json`. Record its size, version, painted-tile count, and SHA-256.
 4. Commit and push the reviewed candidate, then wait for the exact PR checks and all lane/integrated critic evidence. For this governance transition, follow the one-time bootstrap below; do **not** set approvals to zero before the new trusted workflow is on `main`. Deploy only the resulting `main` commit with `npx wrangler deploy`.
@@ -28,7 +28,7 @@ If deploy or smoke fails, run `npx wrangler rollback "$PREVIOUS_DEPLOYMENT_ID"`,
 When request volume or spend risk is uncertain, deploy the tracked no-DO maintenance version before investigating:
 
 ```bash
-npx wrangler deploy --config ops/wrangler.maintenance.toml --message "Emergency temporary containment"
+npx wrangler deploy --config ops/wrangler.maintenance.toml --keep-vars --message "Emergency temporary containment"
 ```
 
 Verify `/`, `/health`, and `/v1/canvas` return `503` with `Cache-Control: no-store`. This version preserves the Durable Object namespace because it exports `GrokPlaceCanvas`, but it has no active DO or asset binding and cannot mutate board state. Restore service only by deploying a validated `main` build and rerunning the release gate.
@@ -50,9 +50,9 @@ The existing one-review rule protects the transition PR, while the zero-review r
    gh pr merge "$transition_pr" --repo baney75/grokplace --squash --admin --match-head-commit "$transition_head"
    ```
 
-5. As soon as that exact head is on `main`, install the final protection and read it back: `enforce_admins: true`; required approving reviews `0`; `require_code_owner_reviews: false`; `require_last_push_approval: false`; strict required checks `Tiny perfect PR`, `Secret scan`, and `Trusted agent review`, each bound to GitHub Actions app ID `15368`; conversation resolution `true`; force pushes `false`; deletions `false`. Any mismatch is a release blocker.
+5. As soon as that exact head is on `main`, install the final protection and read it back: `enforce_admins: true`; required approving reviews `0`; `require_code_owner_reviews: false`; `require_last_push_approval: false`; strict required checks `Tiny perfect PR`, `Secret scan`, and `merge-and-award`, each bound to GitHub Actions app ID `15368`; conversation resolution `true`; force pushes `false`; deletions `false`. Any mismatch is a release blocker.
 
-- `.github/CODEOWNERS` assigns every path to `@baney75`, but main requires **zero human approving reviews**. The rule must require the strict, current `Tiny perfect PR`, `Secret scan`, and `Trusted agent review` checks, each bound to GitHub Actions app ID `15368`; enforce the rule for administrators; require conversations to be resolved; and disable force pushes and main-branch deletion.
+- `.github/CODEOWNERS` assigns every path to `@baney75`, but main requires **zero human approving reviews**. The rule must require the strict, current `Tiny perfect PR`, `Secret scan`, and `merge-and-award` checks, each bound to GitHub Actions app ID `15368`; enforce the rule for administrators; require conversations to be resolved; and disable force pushes and main-branch deletion.
 - The trusted default-branch workflow runs only after successful `PR quality`. It creates an in-progress `Trusted agent review` check on the exact candidate head, then classifies paths with the default-branch maintenance policy. A product-lane PR must be ready/open against `main`, authored exactly by `baney75`, name exactly one `implementer_agent`, and carry an immutable exact-head SHIP from another agent; it merges with no tile award. A maintain-lane PR must have an active server-verified author, stay within the canonical 3-file/40-line/path/bank gates, and carry an immutable exact-head SHIP from an active verified maintainer whose GitHub principal differs from the PR author's. Both lanes revalidate `Tiny perfect PR` and `Secret scan` as successful checks from GitHub Actions app ID `15368`. Maintenance completes its durable award reservation before the trusted workflow publishes success; validation or reservation failure publishes failure. The workflow then merges only with `--match-head-commit`; no GitHub approval review is required.
 - GitHub Actions app ID `15368` is shared by owner-authored workflows in this repository, so app binding alone cannot distinguish two same-repository workflows. Here that residual spoof path is limited to owner-authored same-repository product changes: fork PR tokens are read-only, and external non-allowlisted changes fail closed before the maintenance lane. Treat every workflow edit as an owner product change and still require the independent immutable exact-head reviewer artifact.
 - The owner must configure `AWARD_SECRET` in both the Worker and GitHub Actions. The trusted merge workflow refuses to merge an awardable PR when the credential is absent.

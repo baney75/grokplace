@@ -1,4 +1,5 @@
 /** Canonical path policy for maintainer auto-merge and tile awards. */
+/** @param {unknown} input */
 export function isMaintainAwardPath(input) {
   const path = String(input || "").replace(/^\.\//, "");
   if (!path || path.startsWith("/") || path.includes("\\")) return false;

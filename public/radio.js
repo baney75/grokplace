@@ -2,17 +2,27 @@
  * grok/place radio: original agent composition data synthesized with Web Audio.
  * Contract: at/duration are sixteenth-note steps; bpm and waveform are per composition.
  */
+/** @typedef {{ at: number, duration: number, velocity: number, frequency: number }} Note */
+/** @typedef {{ bpm: number, waveform: OscillatorType, notes: Note[] }} Composition */
+/** @typedef {{ id?: unknown, startedAt?: unknown, endsAt?: unknown, composition?: unknown }} Track */
+/** @typedef {{ oscillator: OscillatorNode, envelope: GainNode }} Voice */
+/** @typedef {{ ok?: unknown, now?: unknown }} MusicResponse */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const soundBtn = document.getElementById("sound-btn");
   const NOTE_RE = /^[A-G](?:#|b)?[0-8]$/;
+  /** @type {Set<string>} */
   const WAVEFORMS = new Set(["sine", "square", "triangle", "sawtooth"]);
   const MAX_NOTES = 128;
   let muted = true;
+  /** @type {Track | null} */
   let nowTrack = null;
+  /** @type {AudioContext | null} */
   let context = null;
+  /** @type {GainNode | null} */
   let masterGain = null;
   let pollTimer = 0;
+  /** @type {AbortController | null} */
   let musicRequest = null;
   let pollingStopped = false;
   let pollingPaused = Boolean(document.hidden);
@@ -20,6 +30,7 @@
   let musicFailures = 0;
   let liveConnected = false;
   let musicReadThisVisibility = false;
+  /** @type {Set<Voice>} */
   const voices = new Set();
   // Disconnected viewers retain the critic-reviewed 12/min fallback budget.
   const MUSIC_POLL_MS = 30_000;
@@ -28,24 +39,41 @@
   // shortest valid composition even while the invalidation socket is healthy.
   const LIVE_MUSIC_RECONCILE_MS = 30_000;
 
+  /** @param {unknown} value @returns {value is Record<string, unknown>} */
+  function isRecord(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+
+  /** @param {unknown} waveform @returns {waveform is OscillatorType} */
+  function isWaveform(waveform) {
+    return typeof waveform === "string" && WAVEFORMS.has(waveform);
+  }
+
+  /** @param {unknown} note */
   function noteFrequency(note) {
     if (typeof note !== "string" || !NOTE_RE.test(note)) return null;
     const match = note.match(/^([A-G])([#b]?)([0-8])$/);
+    if (!match) return null;
+    /** @type {Record<string, number>} */
     const semitones = { C: -9, D: -7, E: -5, F: -4, G: -2, A: 0, B: 2 };
     const accidental = match[2] === "#" ? 1 : match[2] === "b" ? -1 : 0;
     return 440 * 2 ** ((semitones[match[1]] + accidental + (Number(match[3]) - 4) * 12) / 12);
   }
 
+  /** @param {Track | null} track @returns {Composition | null} */
   function parseComposition(track) {
     const composition = track?.composition;
-    if (!composition || typeof composition !== "object") return null;
+    if (!isRecord(composition)) return null;
     const bpm = Number(composition.bpm);
     const waveform = composition.waveform;
-    if (!Number.isInteger(bpm) || bpm < 60 || bpm > 180 || !WAVEFORMS.has(waveform)) return null;
+    if (!Number.isInteger(bpm) || bpm < 60 || bpm > 180 || !isWaveform(waveform)) return null;
     if (!Array.isArray(composition.notes) || !composition.notes.length || composition.notes.length > MAX_NOTES) return null;
+    /** @type {Note[]} */
     const notes = [];
     let lastAt = -1;
-    for (const value of composition.notes) {
+    for (const rawNote of composition.notes) {
+      if (!isRecord(rawNote)) return null;
+      const value = rawNote;
       const at = Number(value?.at);
       const duration = Number(value?.duration);
       const velocity = value?.velocity == null ? 0.7 : Number(value.velocity);
@@ -70,6 +98,7 @@
     return true;
   }
 
+  /** @param {Voice} voice @param {boolean} stop */
   function releaseVoice(voice, stop) {
     if (!voices.has(voice)) return;
     voices.delete(voice);
@@ -84,6 +113,7 @@
     for (const voice of [...voices]) releaseVoice(voice, true);
   }
 
+  /** @param {Note} note @param {OscillatorType} waveform @param {number} start @param {number} duration */
   function scheduleVoice(note, waveform, start, duration) {
     if (!context || !masterGain || voices.size >= MAX_NOTES || duration <= 0) return;
     const oscillator = context.createOscillator();
@@ -105,9 +135,11 @@
     oscillator.stop(start + duration + 0.01);
   }
 
+  /** @param {Track | null} track */
   function scheduleTrack(track) {
     clearPlayback();
     if (muted || !track || !ensureAudio()) return;
+    if (!context) return;
     const composition = parseComposition(track);
     const startedAt = Number(track.startedAt);
     const endsAt = Number(track.endsAt);
@@ -127,18 +159,24 @@
     }
   }
 
+  /** @param {AbortSignal} signal */
   async function fetchMusic(signal) {
     const response = await fetch(`${API}/v1/music`, { cache: "no-store", signal });
     if (!response.ok) throw new Error(`music ${response.status}`);
-    const data = await response.json();
-    if (!data?.ok) return;
-    const next = data.now || null;
+    /** @type {unknown} */
+    const raw = await response.json();
+    if (!isRecord(raw)) return;
+    /** @type {MusicResponse} */
+    const data = raw;
+    if (data.ok !== true) return;
+    const next = isRecord(data.now) ? data.now : null;
     const changed = next?.id !== nowTrack?.id || next?.startedAt !== nowTrack?.startedAt;
     nowTrack = next;
     musicReadThisVisibility = true;
     if (changed) scheduleTrack(nowTrack);
   }
 
+  /** @param {number} delay */
   function scheduleMusicPoll(delay) {
     if (!isPollingActive()) return;
     clearTimeout(pollTimer);
@@ -179,7 +217,7 @@
       await fetchMusic(controller.signal);
       musicFailures = 0;
     } catch (error) {
-      if (error?.name !== "AbortError") musicFailures++;
+      if (!(error instanceof Error) || error.name !== "AbortError") musicFailures++;
     } finally {
       if (musicRequest === controller) musicRequest = null;
       if (isPollingActive()) {
@@ -202,6 +240,7 @@
     if (label) label.textContent = muted ? "Music" : "Mute";
   }
 
+  /** @param {boolean} next */
   function setMuted(next) {
     muted = Boolean(next);
     if (muted) clearPlayback();

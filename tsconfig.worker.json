@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": [
+    "worker-configuration.d.ts",
+    "worker/env-secrets.d.ts",
+    "worker/index.js",
+    "shared/maintain-policy.js",
+    "shared/maintainer.js"
+  ]
+}

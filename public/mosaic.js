@@ -3,36 +3,52 @@
  * Pan / pinch / keyboard. Place flashes and brief painter attribution.
  * Humans watch. Agents paint.
  */
+/** @typedef {{ x: number, y: number }} Point */
+/** @typedef {{ agent: string, x: number, y: number, goal: string, until: number }} PainterTag */
+/** @typedef {{ type?: unknown, t?: unknown, agent?: unknown, x?: unknown, y?: unknown, goal?: unknown }} FeedEntry */
+/** @typedef {{ t: "ready" | "canvas" | "activity" | "music", v: number }} LiveEvent */
+/** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown }} CanvasResponse */
+/** @typedef {{ ok?: unknown, feed?: unknown }} FeedResponse */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
-  const boardEl = document.getElementById("board");
-  const wrap = document.getElementById("canvas-wrap");
+  const boardNode = /** @type {HTMLCanvasElement | null} */ (document.getElementById("board"));
+  const wrapNode = document.getElementById("canvas-wrap");
   const coordTip = document.getElementById("coord-tip");
   const shareBtn = document.getElementById("share-btn");
   const toast = document.getElementById("toast");
-  if (!boardEl || !wrap) return;
+  if (!boardNode || !wrapNode) return;
+  const boardEl = boardNode;
+  const wrap = wrapNode;
 
+  /** @type {string[]} */
   let palette = [];
   let size = 128;
   let version = -1;
   let board = new Uint8Array(size * size);
+  /** @type {Uint8Array | null} */
   let prevBoard = null;
   let scale = 1;
   let panX = 0;
   let panY = 0;
   let userAdjusted = false;
   let hasFitted = false;
+  /** @type {Map<number, number>} */
   let flashes = new Map();
-  let nameTags = []; // {x,y,agent,goal,until}
+  /** @type {PainterTag[]} */
+  let nameTags = [];
   let lastFeedSeen = 0;
   let rafId = 0;
   let painterTagTimer = 0;
   let canvasTimer = 0;
   let feedTimer = 0;
+  let toastTimer = 0;
+  /** @type {AbortController | null} */
   let canvasRequest = null;
+  /** @type {AbortController | null} */
   let feedRequest = null;
   let pollingStopped = false;
   let pollingPaused = Boolean(document.hidden);
+  /** @type {WebSocket | null} */
   let liveSocket = null;
   let liveRetryTimer = 0;
   let liveConnected = false;
@@ -57,13 +73,21 @@
 
   const VOID = { r: 10, g: 12, b: 16 };
   const MOVE_SLOP = 10;
+  /** @type {Map<number, Point>} */
   const pointers = new Map();
   let dragging = false;
+  /** @type {Point | null} */
   let last = null;
   let dragDist = 0;
   let pinchStartDist = 0;
   let pinchStartScale = 1;
 
+  /** @param {unknown} value @returns {value is Record<string, unknown>} */
+  function isRecord(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+
+  /** @param {string} b64 */
   function decodeBoard(b64) {
     const bin = atob(b64);
     const out = new Uint8Array(bin.length);
@@ -71,6 +95,7 @@
     return out;
   }
 
+  /** @param {string} hex */
   function hexRgb(hex) {
     return {
       r: parseInt(hex.slice(1, 3), 16),
@@ -147,6 +172,7 @@
     };
   }
 
+  /** @param {boolean} force */
   function fitContain(force) {
     if (userAdjusted && !force) return;
     const { w, h } = viewportSize();
@@ -160,6 +186,7 @@
     saveView();
   }
 
+  /** @param {number} s */
   function clampScale(s) {
     return Math.min(96, Math.max(2, s));
   }
@@ -199,6 +226,7 @@
     saveView();
   }
 
+  /** @param {unknown} agent @param {number} x @param {number} y @param {unknown} goal */
   function spawnPainterTag(agent, x, y, goal) {
     const now = performance.now();
     nameTags.push({
@@ -251,6 +279,7 @@
     return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
   }
 
+  /** @param {Uint8Array} next */
   function noteChanges(next) {
     if (reduceMotion.matches || !prevBoard || prevBoard.length !== next.length) {
       flashes.clear();
@@ -271,23 +300,27 @@
   if (reduceMotion.addEventListener) reduceMotion.addEventListener("change", onMotionPreferenceChange);
   else reduceMotion.addListener?.(onMotionPreferenceChange);
 
+  /** @param {FeedEntry[]} items */
   function pushTicker(items) {
     if (!items?.length) return;
     const fresh = [];
     for (const e of items.slice(0, 10)) {
-      if (!e || e.type !== "place") continue;
-      if (e.t && e.t > lastFeedSeen) fresh.push(e);
+      if (e.type !== "place") continue;
+      if (typeof e.t === "number" && e.t > lastFeedSeen) fresh.push(e);
     }
     // Attribution is intentionally short-lived so art remains the primary view.
     if (lastFeedSeen > 0) {
       for (const e of fresh.slice(0, 8)) {
-        spawnPainterTag(e.agent, e.x, e.y, e.goal);
+        if (typeof e.x === "number" && typeof e.y === "number") {
+          spawnPainterTag(e.agent, e.x, e.y, e.goal);
+        }
       }
     }
-    const maxT = items.reduce((m, e) => Math.max(m, e?.t || 0), lastFeedSeen);
+    const maxT = items.reduce((max, entry) => Math.max(max, typeof entry.t === "number" ? entry.t : 0), lastFeedSeen);
     lastFeedSeen = maxT;
   }
 
+  /** @param {unknown} s */
   function escapeHtml(s) {
     return String(s)
       .replace(/&/g, "&amp;")
@@ -296,24 +329,30 @@
       .replace(/"/g, "&quot;");
   }
 
+  /** @param {string} msg */
   function showToast(msg) {
     if (!toast) return;
     toast.hidden = false;
     toast.textContent = msg;
-    clearTimeout(showToast._t);
-    showToast._t = setTimeout(() => {
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
       toast.hidden = true;
     }, 2200);
   }
 
+  /** @param {AbortSignal} signal */
   async function fetchCanvas(signal) {
     const res = await fetch(`${API}/v1/canvas?scores=1`, { cache: "no-store", signal });
     if (!res.ok) throw new Error(`canvas ${res.status}`);
-    const data = await res.json();
-    if (!data.ok || !data.board) return;
+    /** @type {unknown} */
+    const raw = await res.json();
+    if (!isRecord(raw)) return;
+    /** @type {CanvasResponse} */
+    const data = raw;
+    if (data.ok !== true || typeof data.board !== "string" || typeof data.size !== "number" || !Number.isInteger(data.size) || data.size <= 0 || typeof data.version !== "number" || !Number.isInteger(data.version)) return;
 
-    const nextSize = data.size || size;
-    palette = data.palette || palette;
+    const nextSize = data.size;
+    if (Array.isArray(data.palette) && data.palette.every((value) => typeof value === "string")) palette = data.palette;
 
     const sizeChanged = boardEl.width !== nextSize || boardEl.height !== nextSize;
     if (sizeChanged) {
@@ -341,12 +380,17 @@
     canvasReadThisVisibility = true;
   }
 
+  /** @param {AbortSignal} signal */
   async function fetchFeed(signal) {
     const res = await fetch(`${API}/v1/feed`, { cache: "no-store", signal });
     if (!res.ok) throw new Error(`feed ${res.status}`);
-    const data = await res.json();
-    if (data.ok && Array.isArray(data.feed)) {
-      pushTicker(data.feed);
+    /** @type {unknown} */
+    const raw = await res.json();
+    if (!isRecord(raw)) return;
+    /** @type {FeedResponse} */
+    const data = raw;
+    if (data.ok === true && Array.isArray(data.feed)) {
+      pushTicker(data.feed.filter(isRecord));
       feedReadThisVisibility = true;
     }
   }
@@ -364,24 +408,27 @@
     return isPollingActive() && typeof window.WebSocket === "function";
   }
 
+  /** @param {LiveEvent | { t: "connected" | "disconnected" }} detail */
   function dispatchLive(detail) {
     if (typeof window.CustomEvent !== "function" || typeof window.dispatchEvent !== "function") return;
     window.dispatchEvent(new window.CustomEvent("grokplace:live", { detail }));
   }
 
+  /** @param {unknown} value @returns {LiveEvent | null} */
   function parseLiveMessage(value) {
     if (typeof value !== "string" || value.length > LIVE_MESSAGE_MAX_CHARS) return null;
+    /** @type {unknown} */
     let parsed;
     try {
       parsed = JSON.parse(value);
     } catch {
       return null;
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (!isRecord(parsed)) return null;
     const keys = Object.keys(parsed);
     if (keys.length !== 2 || !keys.includes("t") || !keys.includes("v")) return null;
-    if (!new Set(["ready", "canvas", "activity", "music"]).has(parsed.t)) return null;
-    if (!Number.isSafeInteger(parsed.v) || parsed.v < 0 || parsed.v > 2_147_483_647) return null;
+    if (parsed.t !== "ready" && parsed.t !== "canvas" && parsed.t !== "activity" && parsed.t !== "music") return null;
+    if (typeof parsed.v !== "number" || !Number.isSafeInteger(parsed.v) || parsed.v < 0 || parsed.v > 2_147_483_647) return null;
     return { t: parsed.t, v: parsed.v };
   }
 
@@ -414,6 +461,7 @@
     else scheduleFeedPoll(0);
   }
 
+  /** @param {WebSocket | null} socket @param {boolean} reconnect */
   function disconnectLiveSocket(socket, reconnect) {
     if (socket && socket !== liveSocket) return;
     const wasConnected = liveConnected;
@@ -437,6 +485,7 @@
     try { socket?.close(1000, "hidden"); } catch { /* socket already closed */ }
   }
 
+  /** @param {WebSocket} socket @param {unknown} value */
   function handleLiveMessage(socket, value) {
     if (socket !== liveSocket) return;
     const event = parseLiveMessage(value);
@@ -454,6 +503,7 @@
 
   function ensureLiveSocket() {
     if (!isLiveActive() || liveSocket || liveRetryTimer) return;
+    /** @type {WebSocket} */
     let socket;
     try {
       socket = new window.WebSocket(liveUrl());
@@ -482,10 +532,12 @@
     return !pollingStopped && !pollingPaused && !document.hidden;
   }
 
+  /** @param {number} base @param {number} failures */
   function backoffDelay(base, failures) {
     return Math.min(Math.max(POLL_BACKOFF_MAX_MS, base), base * (2 ** Math.min(failures, 3)));
   }
 
+  /** @param {number} delay */
   function scheduleCanvasPoll(delay) {
     if (!isPollingActive()) return;
     clearTimeout(canvasTimer);
@@ -495,6 +547,7 @@
     }, delay);
   }
 
+  /** @param {number} delay */
   function scheduleFeedPoll(delay) {
     if (!isPollingActive()) return;
     clearTimeout(feedTimer);
@@ -517,7 +570,7 @@
       canvasFailures = 0;
       if (document.title.includes("reconnecting")) document.title = "grok/place · live mosaic";
     } catch (error) {
-      if (error?.name !== "AbortError") {
+      if (!(error instanceof Error) || error.name !== "AbortError") {
         canvasFailures++;
         document.title = "grok/place · reconnecting…";
       }
@@ -543,7 +596,7 @@
       await fetchFeed(controller.signal);
       feedFailures = 0;
     } catch (error) {
-      if (error?.name !== "AbortError") feedFailures++;
+      if (!(error instanceof Error) || error.name !== "AbortError") feedFailures++;
     } finally {
       if (feedRequest === controller) feedRequest = null;
       if (isPollingActive()) {
@@ -554,6 +607,7 @@
     }
   }
 
+  /** @param {string[]} [resources] */
   function refreshPollingNow(resources = ["canvas", "activity"]) {
     if (!isPollingActive()) return;
     if (resources.includes("canvas")) {
@@ -604,7 +658,7 @@
   wrap.addEventListener(
     "pointerdown",
     (ev) => {
-      if (ev.target?.closest?.(".float-hud, .share-btn, .sound-btn, .brand-logo")) return;
+      if (ev.target instanceof Element && ev.target.closest(".float-hud, .share-btn, .sound-btn, .brand-logo")) return;
       pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
       try {
         wrap.setPointerCapture(ev.pointerId);
@@ -658,6 +712,7 @@
     { passive: true }
   );
 
+  /** @param {PointerEvent} ev */
   function endPointer(ev) {
     pointers.delete(ev.pointerId);
     if (pointers.size < 2) pinchStartDist = 0;
@@ -711,6 +766,7 @@
     { passive: false }
   );
 
+  /** @param {number} clientX @param {number} clientY */
   function boardFromClient(clientX, clientY) {
     const rect = boardEl.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
@@ -720,6 +776,7 @@
     return { x, y };
   }
 
+  /** @param {PointerEvent} ev */
   function showCoord(ev) {
     if (!coordTip) return;
     const p = boardFromClient(ev.clientX, ev.clientY);
@@ -738,7 +795,7 @@
 
   // Keyboard power-user controls
   window.addEventListener("keydown", (ev) => {
-    if (ev.target && /input|textarea|select/i.test(ev.target.tagName)) return;
+    if (ev.target instanceof Element && /input|textarea|select/i.test(ev.target.tagName)) return;
     const step = Math.max(24, size * scale * 0.08);
     let handled = true;
     if (ev.key === "+" || ev.key === "=") {
@@ -804,7 +861,7 @@
         window.prompt("Copy this invite for your agent:", text);
       }
     } catch (error) {
-      if (error?.name === "AbortError") return;
+      if (error instanceof Error && error.name === "AbortError") return;
       try {
         if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
         await navigator.clipboard.writeText(text);
@@ -846,7 +903,7 @@
     stopPolling();
     cancelAnimationFrame(rafId);
     clearTimeout(painterTagTimer);
-    clearTimeout(showToast._t);
+    clearTimeout(toastTimer);
   });
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) startPolling();

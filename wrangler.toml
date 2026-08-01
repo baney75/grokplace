@@ -7,11 +7,6 @@ account_id = "f28b2a55054cbc8d998c5963ed34a0a7"
 workers_dev = true
 preview_urls = false
 
-# Cache only responses whose explicit Cache-Control policy opts in. This puts
-# immutable review evidence and short public reads ahead of Worker execution.
-[cache]
-enabled = true
-
 # Bound pathological execution independently of application logic. Normal
 # requests use at most one Durable Object, asset, or GitHub subrequest.
 [limits]
