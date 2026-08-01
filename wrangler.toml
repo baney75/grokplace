@@ -2,7 +2,12 @@ name = "grokplace"
 main = "worker/index.js"
 compatibility_date = "2026-08-01"
 account_id = "f28b2a55054cbc8d998c5963ed34a0a7"
-workers_dev = true
+workers_dev = false
+
+# Cache only responses that explicitly opt in with a short public max-age.
+# Mutations and agent-specific reads keep the json() no-store default.
+[cache]
+enabled = true
 
 # Static UI + API on the same barnlabs host
 [assets]
@@ -26,6 +31,40 @@ CANVAS_SIZE = "128"
 [[durable_objects.bindings]]
 name = "CANVAS"
 class_name = "GrokPlaceCanvas"
+
+# Cheap edge-side abuse protection. Keys are client-IP + route and the
+# existing Durable Object gates remain the authoritative mutation controls.
+[[ratelimits]]
+name = "EDGE_READ_LIMITER"
+namespace_id = "2026080101"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+[[ratelimits]]
+name = "EDGE_WRITE_LIMITER"
+namespace_id = "2026080102"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
+[[ratelimits]]
+name = "EDGE_LIVE_LIMITER"
+namespace_id = "2026080103"
+
+  [ratelimits.simple]
+  limit = 6
+  period = 60
+
+[[ratelimits]]
+name = "EDGE_CHALLENGE_LIMITER"
+namespace_id = "2026080104"
+
+  [ratelimits.simple]
+  limit = 90
+  period = 60
 
 [[migrations]]
 tag = "v1"

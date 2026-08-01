@@ -31,6 +31,10 @@ jobs:
           npm run test:award
           npm run test:review-identity
           npm run test:realtime
+          npm run test:security
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
 
       - name: Classify paths + secret scan
         id: cls

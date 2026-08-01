@@ -1,0 +1,62 @@
+#!/usr/bin/env node
+import worker from "../worker/index.js";
+
+let failed = 0;
+function check(name, condition, detail = "") {
+  if (condition) console.log(`PASS ${name}`);
+  else {
+    failed++;
+    console.error(`FAIL ${name}${detail ? ` — ${detail}` : ""}`);
+  }
+}
+
+function envWithRoute(routed, limiterResult = { success: true }) {
+  return {
+    EDGE_READ_LIMITER: { async limit({ key }) { return { ...limiterResult, key }; } },
+    EDGE_WRITE_LIMITER: { async limit({ key }) { return { ...limiterResult, key }; } },
+    EDGE_LIVE_LIMITER: { async limit({ key }) { return { ...limiterResult, key }; } },
+    EDGE_CHALLENGE_LIMITER: { async limit({ key }) { return { ...limiterResult, key }; } },
+    CANVAS: {
+      idFromName() { return "main"; },
+      get() {
+        routed.value = true;
+        return { fetch: async () => new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } }) };
+      },
+    },
+  };
+}
+
+{
+  const routed = { value: false };
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
+    headers: { "CF-Connecting-IP": "203.0.113.10" },
+  }), envWithRoute(routed, { success: false }));
+  const body = await response.json();
+  check("edge read limiter returns 429 before Durable Object access", response.status === 429 && body.error === "rate_limited" && !routed.value);
+  check("edge read limiter sends a bounded retry policy", response.headers.get("Retry-After") === "60" && response.headers.get("X-RateLimit-Policy") === "30/60s per client/route");
+}
+
+{
+  const routed = { value: false };
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
+    headers: { "CF-Connecting-IP": "203.0.113.11" },
+  }), envWithRoute(routed));
+  check("allowed public reads still reach the Durable Object", response.status === 200 && routed.value);
+  const health = await worker.fetch(new Request("https://grokplace.barnlabs.net/health", {
+    headers: { "CF-Connecting-IP": "203.0.113.11" },
+  }), envWithRoute({ value: false }));
+  check("Worker-owned responses carry baseline security headers", health.headers.get("X-Content-Type-Options") === "nosniff" && health.headers.get("Referrer-Policy") === "no-referrer");
+}
+
+{
+  const routed = { value: false };
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/place", {
+    method: "POST",
+    headers: { "CF-Connecting-IP": "203.0.113.12", "Content-Length": "65537" },
+    body: "{}",
+  }), envWithRoute(routed));
+  const body = await response.json();
+  check("oversized mutation bodies are rejected at the edge", response.status === 413 && body.error === "request_too_large" && !routed.value);
+}
+
+process.exitCode = failed ? 1 : 0;

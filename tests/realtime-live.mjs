@@ -101,11 +101,11 @@ const canvas = new GrokPlaceCanvas(state, {});
 {
   const saturatedCanvas = new GrokPlaceCanvas({
     storage: new MemoryStorage(),
-    getWebSockets() { return Array.from({ length: 1000 }, () => socket); },
+    getWebSockets() { return Array.from({ length: 256 }, () => socket); },
   }, {});
   const response = await saturatedCanvas.handleLive(new Request("https://test/internal/live", { headers: { Upgrade: "websocket" } }), "*");
   const data = await response.json();
-  check("live socket cap rejects the 1,001st connection before acceptance", response.status === 503 && response.headers.get("Retry-After") === "1" && data.error === "live_capacity", JSON.stringify(data));
+  check("live socket cap rejects the 257th connection before acceptance", response.status === 503 && response.headers.get("Retry-After") === "1" && data.error === "live_capacity", JSON.stringify(data));
 }
 
 canvas.broadcastLive(["canvas", "activity", "music", "unknown"], 23);

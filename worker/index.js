@@ -28,7 +28,7 @@ const FEATURE_VOTE_CD_MS = 20_000;
 const BOARD_SCHEMA = 3;
 const LIVE_EVENT_TYPES = new Set(["ready", "canvas", "activity", "music"]);
 const LIVE_EVENT_MAX_CHARS = 96;
-const LIVE_SOCKET_MAX = 1000;
+const LIVE_SOCKET_MAX = 256;
 
 // 32-color canvas palette (indices 0–15 preserved; 16–31 add depth)
 const PALETTE = [
@@ -111,6 +111,8 @@ const IP_PLACE_LIMIT = 80;
 const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
 const IP_NEW_AGENTS_LIMIT = 8;
+const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
+const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health"]);
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 const COLOR_HEX_RE = /^#?[0-9A-Fa-f]{6}$/;
 const REPORT_THRESHOLD = 3;
@@ -185,12 +187,21 @@ function corsHeaders(origin) {
   };
 }
 
+function securityHeaders() {
+  return {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), geolocation=(), microphone=()",
+  };
+}
+
 function json(data, status, origin, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
+      ...securityHeaders(),
       ...corsHeaders(origin),
       ...extraHeaders,
     },
@@ -479,6 +490,31 @@ function clientIp(request) {
   );
 }
 
+async function edgeRateLimit(env, bindingName, request, bucket) {
+  const limiter = env?.[bindingName];
+  if (!limiter || typeof limiter.limit !== "function") return { ok: true, configured: false };
+  const key = `${clientIp(request)}:${bucket}`;
+  try {
+    const result = await limiter.limit({ key });
+    return { ok: result?.success !== false, configured: true };
+  } catch (error) {
+    // A configured edge guard must fail closed if its provider call errors.
+    console.error("edge rate limiter unavailable", bindingName, error?.message || error);
+    return { ok: false, configured: true, unavailable: true };
+  }
+}
+
+function edgeRateLimitResponse(origin, policy, unavailable = false) {
+  return json(
+    unavailable
+      ? { ok: false, error: "rate_limiter_unavailable", message: "Request protection is temporarily unavailable. Retry shortly." }
+      : { ok: false, error: "rate_limited", message: "Too many requests. Retry shortly." },
+    unavailable ? 503 : 429,
+    origin,
+    { "Cache-Control": "no-store", "Retry-After": unavailable ? "30" : "60", "X-RateLimit-Policy": policy }
+  );
+}
+
 function buildAgentPrompt(base, size, cooldownSec) {
   const contractExamples = requestContracts(cooldownSec)
     .map((contract) => {
@@ -563,6 +599,7 @@ function plainText(body, origin, status = 200) {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "public, max-age=2",
+      ...securityHeaders(),
       ...corsHeaders(origin),
     },
   });
@@ -767,7 +804,8 @@ function handleInfo(env, origin, requestUrl) {
       agentPrompt: buildAgentPrompt(base, size, cooldownSec),
     },
     200,
-    origin
+    origin,
+    { "Cache-Control": "public, max-age=300" }
   );
 }
 
@@ -3407,6 +3445,35 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
 
+    const isApiSurface = path.startsWith("/v1/") || EDGE_READ_PATHS.has(path) || path === "/place" || path === "/webhook";
+    if (isApiSurface) {
+      const live = path === "/v1/live";
+      const challenge = path === "/v1/challenge";
+      const method = request.method.toUpperCase();
+      const bindingName = live
+        ? "EDGE_LIVE_LIMITER"
+        : challenge
+          ? "EDGE_CHALLENGE_LIMITER"
+          : method === "GET"
+            ? "EDGE_READ_LIMITER"
+            : "EDGE_WRITE_LIMITER";
+      const policy = live ? "6/60s per client" : challenge ? "90/60s per client/scope" : method === "GET" ? "30/60s per client/route" : "20/60s per client/route";
+      const bucket = live
+        ? "live"
+        : challenge
+          ? `${method}:${path}:${url.searchParams.get("scope") || "missing"}`
+          : `${method}:${path}`;
+      const limited = await edgeRateLimit(env, bindingName, request, bucket);
+      if (!limited.ok) return edgeRateLimitResponse(origin, policy, limited.unavailable);
+    }
+
+    if (request.method === "POST") {
+      const length = Number(request.headers.get("Content-Length"));
+      if (Number.isFinite(length) && length > EDGE_REQUEST_BODY_MAX_BYTES) {
+        return json({ ok: false, error: "request_too_large", message: "Request body exceeds the 64 KiB API limit." }, 413, origin, { "Retry-After": "60" });
+      }
+    }
+
     try {
       if (path === "/health" && request.method !== "GET") {
         return json({ ok: false, error: "method_not_allowed" }, 405, origin, { Allow: "GET" });
@@ -3420,7 +3487,7 @@ export default {
           agentBootstrap: "GET /llms.txt or curl / — full playbook + live board",
           ts: Date.now(),
           schema: 3,
-        }, 200, origin);
+        }, 200, origin, { "Cache-Control": "public, max-age=5" });
       }
       if (path === "/v1/info" && request.method === "GET") {
         return handleInfo(env, origin, request.url);
