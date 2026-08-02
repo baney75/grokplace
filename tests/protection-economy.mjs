@@ -8,6 +8,7 @@ class TransactionalMemoryStorage {
     this.nextTransaction = 1;
     this.transactionWrites = [];
     this.tail = Promise.resolve();
+    this.nextGate = null;
   }
 
   async get(key) { return this.values.get(key); }
@@ -36,6 +37,12 @@ class TransactionalMemoryStorage {
     let release;
     this.tail = new Promise((resolve) => { release = resolve; });
     await previous;
+    const gate = this.nextGate;
+    this.nextGate = null;
+    if (gate) {
+      gate.entered();
+      await gate.release;
+    }
     const transaction = this.nextTransaction++;
     this.currentTransaction = transaction;
     const store = {
@@ -50,6 +57,15 @@ class TransactionalMemoryStorage {
       this.currentTransaction = 0;
       release();
     }
+  }
+
+  holdNextTransaction() {
+    let entered;
+    let release;
+    const enteredPromise = new Promise((resolve) => { entered = resolve; });
+    const releasePromise = new Promise((resolve) => { release = resolve; });
+    this.nextGate = { entered, release: releasePromise };
+    return { entered: enteredPromise, release };
   }
 }
 
@@ -105,6 +121,26 @@ async function place(body) {
     body: JSON.stringify(body),
   });
   const response = await canvas.handlePlace(request, size, 60_000, "*", "test-ip");
+  return { response, data: await response.json() };
+}
+
+async function voteOn(targetCanvas, body, targetSize = size) {
+  const request = new Request("https://test/internal/vote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await targetCanvas.handleVote(request, targetSize, "*", "test-ip");
+  return { response, data: await response.json() };
+}
+
+async function reportOn(targetCanvas, body, targetSize = size) {
+  const request = new Request("https://test/internal/report", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await targetCanvas.handleReport(request, targetSize, "*", "test-ip");
   return { response, data: await response.json() };
 }
 
@@ -334,6 +370,189 @@ try {
       && (await growthStorage.get("protection:cell:1:1"))?.colorIndex === 5
       && new Uint8Array(await growthStorage.get("board"))[17] === 6,
     JSON.stringify({ response: growthData, protection: await growthStorage.get("protection:cell:1:1") })
+  );
+
+  const mutationBoard = new Uint8Array(size * size);
+  mutationBoard[0] = 6;
+  mutationBoard[1] = 7;
+  const mutationValues = {
+    board: mutationBoard.buffer,
+    scores: new Int16Array(size * size).buffer,
+    size,
+    schema: 4,
+    meta: { version: 1, tileEpoch: 1, totalPlacements: 2, totalVotes: 0, totalReportsCleared: 0, uniqueAgents: 1, lastPlaceAt: now },
+    feed: [],
+    history: [],
+    leaders: [],
+    "owner:cell:0:0": "artist",
+    "owner:cell:1:0": "artist",
+    "agent:artist": { name: "artist", placements: 2, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 2, firstAt: now, lastAt: now },
+  };
+  for (const agent of ["voter-a", "voter-b", "duplicate-voter", "reporter-a", "reporter-b", "reporter-c"]) {
+    mutationValues[`agent:${agent}`] = { name: agent, placements: 1, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 1, firstAt: now, lastAt: now };
+  }
+  const mutationStorage = new TransactionalMemoryStorage(mutationValues);
+  const mutationCanvas = new GrokPlaceCanvas({ storage: mutationStorage, getWebSockets() { return []; } }, {});
+  mutationCanvas.rateLimit = async () => ({ ok: true });
+  mutationCanvas.consumeProof = async () => ({ ok: true });
+  mutationCanvas.requireAgentCapability = async () => ({ ok: true });
+
+  const distinctVotes = await Promise.all([
+    voteOn(mutationCanvas, { agent: "voter-a", x: 0, y: 0, dir: 1 }),
+    voteOn(mutationCanvas, { agent: "voter-b", x: 0, y: 0, dir: 1 }),
+  ]);
+  check(
+    "concurrent votes from distinct agents serialize without lost counters",
+    distinctVotes.every((item) => item.response.status === 200)
+      && new Int16Array(await mutationStorage.get("scores"))[0] === 2
+      && (await mutationStorage.get("meta"))?.totalVotes === 2
+      && (await mutationStorage.get("agent:artist"))?.upvotesReceived === 2,
+    JSON.stringify({ votes: distinctVotes.map((item) => item.data), meta: await mutationStorage.get("meta"), owner: await mutationStorage.get("agent:artist") })
+  );
+
+  const duplicateVotes = await Promise.all([
+    voteOn(mutationCanvas, { agent: "duplicate-voter", x: 0, y: 0, dir: 1 }),
+    voteOn(mutationCanvas, { agent: "duplicate-voter", x: 0, y: 0, dir: 1 }),
+  ]);
+  check(
+    "concurrent duplicate votes from one agent count exactly once",
+    duplicateVotes.filter((item) => item.response.status === 200).length === 1
+      && duplicateVotes.filter((item) => item.data.error === "cooldown" || item.data.error === "already_voted").length === 1
+      && new Int16Array(await mutationStorage.get("scores"))[0] === 3
+      && (await mutationStorage.get("meta"))?.totalVotes === 3,
+    JSON.stringify(duplicateVotes.map((item) => item.data))
+  );
+
+  const reports = await Promise.all([
+    reportOn(mutationCanvas, { agent: "reporter-a", x: 1, y: 0, reason: "unsafe" }),
+    reportOn(mutationCanvas, { agent: "reporter-b", x: 1, y: 0, reason: "unsafe" }),
+    reportOn(mutationCanvas, { agent: "reporter-c", x: 1, y: 0, reason: "unsafe" }),
+  ]);
+  const clears = (await mutationStorage.get("history") || []).filter((entry) => entry?.type === "clear" && entry.x === 1 && entry.y === 0);
+  check(
+    "three concurrent unique reports clear the tile exactly once",
+    reports.every((item) => item.response.status === 200)
+      && reports.filter((item) => item.data.report?.cleared).length === 1
+      && new Uint8Array(await mutationStorage.get("board"))[1] === 0
+      && new Int16Array(await mutationStorage.get("scores"))[1] === 0
+      && (await mutationStorage.get("meta"))?.totalReportsCleared === 1
+      && clears.length === 1,
+    JSON.stringify({ reports: reports.map((item) => item.data), meta: await mutationStorage.get("meta"), clears })
+  );
+
+  const racePlanId = "pl_cccccccccccccccc";
+  const racePlan = {
+    id: racePlanId, agent: "plan-racer", clientRequestId: "plan-race-create", title: "Serialized plan",
+    summary: "A bounded concurrency fixture.", region: "top left", bounds: { x: 0, y: 0, w: 2, h: 2 },
+    steps: [{ n: 1, text: "Place one tile", done: false }], design: { w: 4, h: 4, cells: [{ x: 0, y: 0, c: 5, color: "#E50000" }] },
+    tileBudget: 2, estimatedTurns: 1, status: "active", ownerConsentAttestedByAgent: true, attestedAt: now,
+    progress: { notes: "" }, acceptedPlacements: 0, assignments: [], version: 1, activatedVersion: 1,
+    acceptedReviewId: "pvr_cccccccccccccccc", createdAt: now, updatedAt: now,
+  };
+  const planRaceStorage = new TransactionalMemoryStorage({
+    board: new Uint8Array(size * size).buffer, scores: new Int16Array(size * size).buffer, size, schema: 4,
+    meta: { version: 0, tileEpoch: 1, totalPlacements: 0, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: now }, feed: [], history: [], leaders: [],
+    [`plan:${racePlanId}`]: racePlan, [`planrev:${racePlanId}:1`]: { ...racePlan }, [`planrevs:${racePlanId}`]: [1],
+    planIndex: [{ id: racePlanId, agent: "plan-racer", updatedAt: now, status: "active", bounds: racePlan.bounds }],
+    "agent:plan-racer": { name: "plan-racer", placements: 1, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 1, firstAt: now, lastAt: now, activePlanId: racePlanId, joinedPlanIds: [], avoidedPlanIds: [] },
+    "turn:plan-racer": { left: 5, nextTurnAt: 0 },
+  });
+  const planRaceCanvas = new GrokPlaceCanvas({ storage: planRaceStorage, getWebSockets() { return []; } }, {});
+  planRaceCanvas.rateLimit = async () => ({ ok: true });
+  planRaceCanvas.consumeProof = async () => ({ ok: true });
+  planRaceCanvas.requireAgentCapability = async () => ({ ok: true });
+  const gate = planRaceStorage.holdNextTransaction();
+  const placementRequest = new Request("https://test/internal/place", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: "plan-racer", goal: "serialized plan", planId: racePlanId, x: 0, y: 0, color: 5 }),
+  });
+  const placementPromise = planRaceCanvas.handlePlace(placementRequest, size, 60_000, "*", "test-ip");
+  const gateResult = await Promise.race([
+    gate.entered.then(() => ({ entered: true })),
+    placementPromise.then(async (earlyResponse) => ({ entered: false, status: earlyResponse.status, data: await earlyResponse.clone().json() })),
+  ]);
+  if (!gateResult.entered) throw new Error(`plan race placement did not reach transaction: ${JSON.stringify(gateResult)}`);
+  const revisionResponse = await planRaceCanvas.handlePlanSave(new Request("https://test/internal/plan", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agent: "plan-racer", id: racePlanId, expectedVersion: 1, title: "Serialized plan revised",
+      summary: racePlan.summary, region: racePlan.region, bounds: racePlan.bounds, steps: racePlan.steps,
+      design: racePlan.design, tileBudget: racePlan.tileBudget, estimatedTurns: racePlan.estimatedTurns,
+      status: "proposed", progress: { notes: "revision wins" }, challengeId: "test", nonce: 0,
+    }),
+  }), "*", "test-ip");
+  gate.release();
+  const placementResponse = await placementPromise;
+  const placementData = await placementResponse.json();
+  check(
+    "an in-flight plan placement cannot overwrite a concurrently committed revision",
+    revisionResponse.status === 200
+      && placementResponse.status === 409
+      && placementData.error === "plan_changed_retry"
+      && (await planRaceStorage.get(`plan:${racePlanId}`))?.version === 2
+      && (await planRaceStorage.get(`plan:${racePlanId}`))?.status === "proposed"
+      && new Uint8Array(await planRaceStorage.get("board"))[0] === 0,
+    JSON.stringify({ revision: await revisionResponse.json(), placement: placementData, plan: await planRaceStorage.get(`plan:${racePlanId}`) })
+  );
+
+  async function checkPlanInvalidationRace(name, idDigit, mutatePlan, verifyPlan) {
+    const id = `pl_${idDigit.repeat(16)}`;
+    const fixturePlan = { ...racePlan, id, clientRequestId: `plan-race-${idDigit}`, acceptedReviewId: `pvr_${idDigit.repeat(16)}` };
+    const raceStorage = new TransactionalMemoryStorage({
+      board: new Uint8Array(size * size).buffer, scores: new Int16Array(size * size).buffer, size, schema: 4,
+      meta: { version: 0, tileEpoch: 1, totalPlacements: 0, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: now }, feed: [], history: [], leaders: [],
+      [`plan:${id}`]: fixturePlan,
+      planIndex: [{ id, agent: "plan-racer", updatedAt: now, status: "active", bounds: fixturePlan.bounds }],
+      "agent:plan-racer": { name: "plan-racer", placements: 1, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 1, firstAt: now, lastAt: now, activePlanId: id, joinedPlanIds: [], avoidedPlanIds: [] },
+      "turn:plan-racer": { left: 5, nextTurnAt: 0 },
+    });
+    const raceCanvas = new GrokPlaceCanvas({ storage: raceStorage, getWebSockets() { return []; } }, {});
+    raceCanvas.rateLimit = async () => ({ ok: true });
+    raceCanvas.consumeProof = async () => ({ ok: true });
+    raceCanvas.requireAgentCapability = async () => ({ ok: true });
+    const raceGate = raceStorage.holdNextTransaction();
+    const pendingResponse = raceCanvas.handlePlace(new Request("https://test/internal/place", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent: "plan-racer", goal: "serialized plan", planId: id, x: 0, y: 0, color: 5 }),
+    }), size, 60_000, "*", "test-ip");
+    await raceGate.entered;
+    const invalidated = mutatePlan({ ...fixturePlan });
+    await raceStorage.put(`plan:${id}`, invalidated);
+    raceGate.release();
+    const raceResponse = await pendingResponse;
+    const raceData = await raceResponse.json();
+    const finalPlan = await raceStorage.get(`plan:${id}`);
+    check(
+      name,
+      raceResponse.status === 409
+        && raceData.error === "plan_changed_retry"
+        && new Uint8Array(await raceStorage.get("board"))[0] === 0
+        && verifyPlan(finalPlan),
+      JSON.stringify({ response: raceData, plan: finalPlan })
+    );
+  }
+
+  await checkPlanInvalidationRace(
+    "an in-flight placement cannot overwrite a concurrent confirmation deactivation",
+    "d",
+    (current) => ({ ...current, status: "attested", activatedVersion: null, acceptedReviewId: null, updatedAt: now + 1 }),
+    (current) => current?.status === "attested" && current?.activatedVersion === null
+  );
+  await checkPlanInvalidationRace(
+    "an in-flight placement cannot overwrite a concurrent owner reset",
+    "e",
+    (current) => ({ ...current, status: "draft", activatedVersion: null, acceptedReviewId: null, ownerConsentAttestedByAgent: false, updatedAt: now + 1 }),
+    (current) => current?.status === "draft" && current?.ownerConsentAttestedByAgent === false
+  );
+  await checkPlanInvalidationRace(
+    "an in-flight unassigned placement cannot bypass a concurrent assignment",
+    "f",
+    (current) => ({
+      ...current,
+      assignments: [{ id: "as_ffffffffffff", agent: "plan-racer", bounds: { x: 0, y: 0, w: 1, h: 1 }, cells: [], tileBudget: 1, dependencies: [], completionCondition: "Place the assigned tile", status: "active", acceptedPlacements: 0, createdAt: now, updatedAt: now + 1 }],
+      updatedAt: now + 1,
+    }),
+    (current) => current?.assignments?.[0]?.id === "as_ffffffffffff" && current?.assignments?.[0]?.acceptedPlacements === 0
   );
 } finally {
   Date.now = realNow;

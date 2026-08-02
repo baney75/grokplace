@@ -2222,6 +2222,19 @@ export class GrokPlaceCanvas extends DurableObject {
     return callback(storage);
   }
 
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {number} x @param {number} y @param {number} size */
+  async readTileOwner(storage, x, y, size) {
+    const coordinateOwner = await storage.get(ownerCellKey(x, y));
+    if (typeof coordinateOwner === "string") return coordinateOwner;
+    const legacyWidth = Number(await storage.get("legacyOwnerWidth"));
+    if (Number.isSafeInteger(legacyWidth) && legacyWidth > 0 && x < legacyWidth && y < legacyWidth) {
+      const legacyOwner = await storage.get(`owner:${y * legacyWidth + x}`);
+      if (typeof legacyOwner === "string") return legacyOwner;
+    }
+    const currentOwner = await storage.get(`owner:${y * size + x}`);
+    return typeof currentOwner === "string" ? currentOwner : null;
+  }
+
   /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {number} x @param {number} y @param {number} size @param {number} now @param {Uint8Array | null} [board] */
   async readActiveProtection(storage, x, y, size, now, board = null) {
     const key = protectionKey(x, y);
@@ -2753,11 +2766,13 @@ export class GrokPlaceCanvas extends DurableObject {
             nextScores[ni] = oldScores[oi] || 0;
           }
         }
+        const legacyOwnerWidth = Number(await this.state.storage.get("legacyOwnerWidth"));
         await this.state.storage.put({
           board: this.bufCopy(next),
           scores: this.scoresCopy(nextScores),
           size,
           schema: BOARD_SCHEMA,
+          legacyOwnerWidth: Number.isSafeInteger(legacyOwnerWidth) && legacyOwnerWidth > 0 ? legacyOwnerWidth : storedN,
         });
         bytes = next;
       } else {
@@ -3082,21 +3097,28 @@ export class GrokPlaceCanvas extends DurableObject {
 
   /** @param {AgentStat} agentStat */
   async updateLeaders(agentStat) {
-    const storedLeaders = await this.state.storage.get("leaders");
+    return this.updateLeadersIn(this.state.storage, [agentStat]);
+  }
+
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {AgentStat[]} stats */
+  async updateLeadersIn(storage, stats) {
+    const storedLeaders = await storage.get("leaders");
     /** @type {PublicLeader[]} */
     let leaders = Array.isArray(storedLeaders)
       ? storedLeaders.map(publicLeader).filter((leader) => leader !== null)
       : [];
-    const key = agentStat.name.toLowerCase();
-    leaders = leaders.filter((l) => l.name.toLowerCase() !== key);
-    leaders.push({
-      name: agentStat.name,
-      reputation: agentStat.reputation || 0,
-      placements: agentStat.placements || 0,
-      upvotesReceived: agentStat.upvotesReceived || 0,
-      lastGoal: agentStat.lastGoal || undefined,
-      trust: UNTRUSTED_ACTIVITY,
-    });
+    const keys = new Set(stats.map((stat) => stat.name.toLowerCase()));
+    leaders = leaders.filter((leader) => !keys.has(leader.name.toLowerCase()));
+    for (const agentStat of stats) {
+      leaders.push({
+        name: agentStat.name,
+        reputation: agentStat.reputation || 0,
+        placements: agentStat.placements || 0,
+        upvotesReceived: agentStat.upvotesReceived || 0,
+        lastGoal: agentStat.lastGoal || undefined,
+        trust: UNTRUSTED_ACTIVITY,
+      });
+    }
     leaders.sort((a, b) => (b.reputation || 0) - (a.reputation || 0) || (b.placements || 0) - (a.placements || 0));
     return leaders.slice(0, LEADERS_MAX);
   }
@@ -4043,27 +4065,6 @@ export class GrokPlaceCanvas extends DurableObject {
     let history = Array.isArray(storedHistory) ? storedHistory : [];
     history = [...entries, ...history].slice(0, HISTORY_MAX);
     const leaders = await this.updateLeaders(agentStat);
-    let nextPlanIndex = null;
-    if (placementPlan) {
-      placementPlan.acceptedPlacements = Math.min(50_000, Math.max(0, Number(placementPlan.acceptedPlacements) || 0) + batch.length);
-      if (placementAssignment) {
-        const assignments = this.planAssignments(placementPlan);
-        const index = assignments.findIndex((assignment) => assignment.id === placementAssignment?.id);
-        if (index >= 0) {
-          assignments[index] = {
-            ...assignments[index],
-            acceptedPlacements: Math.min(50_000, assignments[index].acceptedPlacements + batch.length),
-            updatedAt: now,
-          };
-          placementPlan.assignments = assignments;
-          placementAssignment = assignments[index];
-        }
-      }
-      placementPlan.updatedAt = now;
-      const planIndex = await this.prunePlanIndex(now);
-      nextPlanIndex = this.nextPlanIndex(planIndex, placementPlan, false) || planIndex;
-    }
-
     const onCooldown = turn.nextTurnAt > now;
     // Recheck at the same storage boundary as the board write. A protect
     // transaction that wins this race must make this ordinary write fail.
@@ -4091,6 +4092,48 @@ export class GrokPlaceCanvas extends DurableObject {
       }
       const latestMeta = normalizeCanvasMeta(await storage.get("meta"));
       if ((latestMeta.version || 0) !== meta.version - 1) return { changed: true };
+      let committedPlan = null;
+      let committedPlanIndex = null;
+      if (placementPlan) {
+        const rawPlan = await storage.get(`plan:${placementPlan.id}`);
+        const latestPlan = isPlanRecord(rawPlan) ? rawPlan : null;
+        const latestAgent = this.normalizeAgent(await storage.get(agentKey), agent, now);
+        if (!latestPlan
+          || !this.isPlanActive(latestPlan)
+          || this.planVersion(latestPlan) !== this.planVersion(placementPlan)
+          || latestPlan.acceptedReviewId !== placementPlan.acceptedReviewId
+          || !isPlanBounds(latestPlan.bounds)
+          || !this.boundsContainTiles(latestPlan.bounds, batch)
+          || !this.isPlanParticipant(latestPlan, latestAgent, akey)) return { planChanged: true };
+        const assignments = this.planAssignments(latestPlan);
+        if (placementAssignment) {
+          const assignmentIndex = assignments.findIndex((assignment) => assignment.id === placementAssignment?.id);
+          const assignment = assignments[assignmentIndex];
+          if (!assignment
+            || assignment.status !== "active"
+            || assignment.agent.toLowerCase() !== akey
+            || !this.assignmentDependenciesComplete(assignment, assignments)
+            || !this.assignmentContainsTiles(assignment, batch)
+            || assignment.acceptedPlacements + batch.length > assignment.tileBudget) return { planChanged: true };
+          assignments[assignmentIndex] = {
+            ...assignment,
+            acceptedPlacements: Math.min(50_000, assignment.acceptedPlacements + batch.length),
+            updatedAt: now,
+          };
+          placementAssignment = assignments[assignmentIndex];
+        } else if (assignments.some((assignment) => assignment.agent.toLowerCase() === akey && assignment.status === "active")) {
+          return { planChanged: true };
+        }
+        committedPlan = {
+          ...latestPlan,
+          acceptedPlacements: Math.min(50_000, Math.max(0, Number(latestPlan.acceptedPlacements) || 0) + batch.length),
+          assignments,
+          updatedAt: now,
+        };
+        const rawPlanIndex = await storage.get("planIndex");
+        const planIndex = Array.isArray(rawPlanIndex) ? rawPlanIndex.filter(isPlanIndexEntry) : [];
+        committedPlanIndex = this.nextPlanIndex(planIndex, committedPlan, false) || planIndex;
+      }
       const epoch = this.tileEpoch(meta);
       for (const placedTile of placed) {
         await this.revokeRestorationForTile(storage, epoch, placedTile.priorProvenance, placedTile.x, placedTile.y);
@@ -4131,11 +4174,15 @@ export class GrokPlaceCanvas extends DurableObject {
       [agentKey]: agentStat,
       ...putOwners,
       ...Object.fromEntries([...provenanceRows].map(([rowY, row]) => [provenanceRowKey(rowY), row])),
-      ...(placementPlan ? { [`plan:${placementPlan.id}`]: placementPlan, planIndex: nextPlanIndex } : {}),
+      ...(committedPlan ? { [`plan:${committedPlan.id}`]: committedPlan, planIndex: committedPlanIndex } : {}),
       });
+      if (committedPlan) placementPlan = committedPlan;
       return null;
     });
     if (activeAtCommit) {
+      if (activeAtCommit.planChanged) {
+        return json({ ok: false, error: "plan_changed_retry", message: "The plan or assignment changed before placement committed. Read the exact active version and retry." }, 409, origin);
+      }
       if (activeAtCommit.changed) {
         return json({ ok: false, error: "tile_changed_retry", x: activeAtCommit.x ?? null, y: activeAtCommit.y ?? null, message: "A concurrent tile update won. Read the board and retry the exact batch." }, 409, origin);
       }
@@ -6708,7 +6755,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const recordedProvenance = await this.readTileProvenance(x, y, size);
     const provenance = recordedProvenance?.colorIndex === colorIndex ? recordedProvenance : null;
     if (!provenance) {
-      const owner = (await this.state.storage.get(ownerCellKey(x, y))) ?? await this.state.storage.get(`owner:${index}`);
+      const owner = await this.readTileOwner(this.state.storage, x, y, size);
       const parsedOwner = parseAgent(owner);
       return json({
         ok: true,
@@ -6793,81 +6840,75 @@ export class GrokPlaceCanvas extends DurableObject {
     const capability = await this.requireAgentCapability(request, agent);
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const vcdKey = `vcd:${akey}`;
-    const nextVoteAt = Number((await this.state.storage.get(vcdKey)) || 0);
-    if (nextVoteAt > now) {
-      const remainingMs = nextVoteAt - now;
-      return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil(remainingMs / 1000)}s`, remainingMs, remainingSec: Math.ceil(remainingMs / 1000) }, 429, origin);
-    }
-    const { board, scores } = await this.ensureBoard(size);
-    const idx = y * size + x;
-    const tileCi = fromStoredColor(board[idx]);
-    if (tileCi === null) return json({ ok: false, error: "empty_tile", message: "Only painted tiles can receive votes." }, 409, origin);
-    const meta = await this.readCanvasMeta();
-    const voteKey = meta.tileEpoch ? `vote:${meta.tileEpoch}:${akey}:${x},${y}` : `vote:${akey}:${x},${y}`;
-    const prevVote = Number((await this.state.storage.get(voteKey)) || 0);
-    if (prevVote === dir) {
-      return json({ ok: false, error: "already_voted", message: `Already ${dir === 1 ? "up" : "down"}voted (${x},${y}).` }, 409, origin);
-    }
-    let delta = dir;
-    if (prevVote !== 0) delta = dir - prevVote;
-    const nextScore = Math.max(-50, Math.min(50, (scores[idx] || 0) + delta));
-    scores[idx] = nextScore;
-    const ownerRaw = (await this.state.storage.get(ownerCellKey(x, y))) ?? await this.state.storage.get(`owner:${idx}`);
-    const ownerKey = typeof ownerRaw === "string" ? ownerRaw : null;
-    const agentKey = `agent:${akey}`;
-    const agentStat = await this.readAgent(akey, agent, now);
-    if ((agentStat.placements || 0) < 1) {
-      return json({ ok: false, error: "vote_locked", message: "Place at least one tile before voting." }, 403, origin);
-    }
-    agentStat.votesCast = (agentStat.votesCast || 0) + 1;
-    agentStat.lastAt = now;
-    agentStat.reputation = Math.round(((agentStat.reputation || 0) + (dir === 1 ? 0.25 : 0)) * 100) / 100;
-    if (ownerKey && ownerKey !== akey) {
-      const ownerStat = await this.readAgent(ownerKey, ownerKey, now);
-      if (prevVote === 1) {
-        ownerStat.upvotesReceived = Math.max(0, (ownerStat.upvotesReceived || 0) - 1);
-        ownerStat.reputation = Math.max(0, (ownerStat.reputation || 0) - 2);
-      } else if (prevVote === -1) {
-        ownerStat.downvotesReceived = Math.max(0, (ownerStat.downvotesReceived || 0) - 1);
-        ownerStat.reputation = (ownerStat.reputation || 0) + 1;
+    await this.ensureBoard(size);
+    const result = await this.storageTransaction(async (storage) => {
+      const nextVoteAt = Number((await storage.get(vcdKey)) || 0);
+      if (nextVoteAt > now) {
+        const remainingMs = nextVoteAt - now;
+        return { status: 429, body: { ok: false, error: "cooldown", message: `Wait ${Math.ceil(remainingMs / 1000)}s`, remainingMs, remainingSec: Math.ceil(remainingMs / 1000) }, version: 0 };
       }
-      if (dir === 1) {
-        ownerStat.upvotesReceived = (ownerStat.upvotesReceived || 0) + 1;
-        ownerStat.reputation = (ownerStat.reputation || 0) + 2;
-      } else {
-        ownerStat.downvotesReceived = (ownerStat.downvotesReceived || 0) + 1;
-        ownerStat.reputation = Math.max(0, (ownerStat.reputation || 0) - 1);
+      const agentKey = `agent:${akey}`;
+      const agentStat = this.normalizeAgent(await storage.get(agentKey), agent, now);
+      if ((agentStat.placements || 0) < 1) return { status: 403, body: { ok: false, error: "vote_locked", message: "Place at least one tile before voting." }, version: 0 };
+      const boardRaw = await storage.get("board");
+      const scoresRaw = await storage.get("scores");
+      if (!isBoardBytes(boardRaw) || !isScoreBytes(scoresRaw)) return { status: 409, body: { ok: false, error: "board_unavailable" }, version: 0 };
+      const board = boardRaw instanceof Uint8Array ? new Uint8Array(boardRaw) : new Uint8Array(boardRaw);
+      const scores = scoresRaw instanceof Int16Array ? new Int16Array(scoresRaw) : new Int16Array(scoresRaw);
+      if (board.length !== size * size || scores.length !== size * size) return { status: 409, body: { ok: false, error: "board_unavailable" }, version: 0 };
+      const idx = y * size + x;
+      const tileCi = fromStoredColor(board[idx]);
+      if (tileCi === null) return { status: 409, body: { ok: false, error: "empty_tile", message: "Only painted tiles can receive votes." }, version: 0 };
+      const meta = normalizeCanvasMeta(await storage.get("meta"));
+      const voteKey = meta.tileEpoch ? `vote:${meta.tileEpoch}:${akey}:${x},${y}` : `vote:${akey}:${x},${y}`;
+      const prevVote = Number((await storage.get(voteKey)) || 0);
+      if (prevVote === dir) return { status: 409, body: { ok: false, error: "already_voted", message: `Already ${dir === 1 ? "up" : "down"}voted (${x},${y}).` }, version: meta.version || 0 };
+      const delta = prevVote !== 0 ? dir - prevVote : dir;
+      const nextScore = Math.max(-50, Math.min(50, (scores[idx] || 0) + delta));
+      scores[idx] = nextScore;
+      const ownerKey = await this.readTileOwner(storage, x, y, size);
+      agentStat.votesCast = (agentStat.votesCast || 0) + 1;
+      agentStat.lastAt = now;
+      agentStat.reputation = Math.round(((agentStat.reputation || 0) + (dir === 1 ? 0.25 : 0)) * 100) / 100;
+      /** @type {AgentStat[]} */
+      const changedStats = [agentStat];
+      /** @type {Record<string, unknown>} */
+      const put = { [agentKey]: agentStat };
+      if (ownerKey && ownerKey !== akey) {
+        const ownerStat = this.normalizeAgent(await storage.get(`agent:${ownerKey}`), ownerKey, now);
+        if (prevVote === 1) {
+          ownerStat.upvotesReceived = Math.max(0, (ownerStat.upvotesReceived || 0) - 1);
+          ownerStat.reputation = Math.max(0, (ownerStat.reputation || 0) - 2);
+        } else if (prevVote === -1) {
+          ownerStat.downvotesReceived = Math.max(0, (ownerStat.downvotesReceived || 0) - 1);
+          ownerStat.reputation = (ownerStat.reputation || 0) + 1;
+        }
+        if (dir === 1) {
+          ownerStat.upvotesReceived = (ownerStat.upvotesReceived || 0) + 1;
+          ownerStat.reputation = (ownerStat.reputation || 0) + 2;
+        } else {
+          ownerStat.downvotesReceived = (ownerStat.downvotesReceived || 0) + 1;
+          ownerStat.reputation = Math.max(0, (ownerStat.reputation || 0) - 1);
+        }
+        ownerStat.lastAt = now;
+        changedStats.push(ownerStat);
+        put[`agent:${ownerKey}`] = ownerStat;
       }
-      ownerStat.lastAt = now;
-      await this.state.storage.put(`agent:${ownerKey}`, ownerStat);
-      await this.state.storage.put("leaders", await this.updateLeaders(ownerStat));
-    }
-    meta.totalVotes = (meta.totalVotes || 0) + 1;
-    meta.version = (meta.version || 0) + 1;
-    const tileColor = PALETTE[tileCi];
-    const entry = { type: "vote", x, y, dir, c: tileCi, color: tileColor || "#FFFFFF", agent, score: nextScore, t: now, v: meta.version };
-    const storedFeed = await this.state.storage.get("feed");
-    /** @type {unknown[]} */
-    let feed = Array.isArray(storedFeed) ? storedFeed : [];
-    feed = [entry, ...feed].slice(0, FEED_MAX);
-    const storedHistory = await this.state.storage.get("history");
-    /** @type {unknown[]} */
-    let history = Array.isArray(storedHistory) ? storedHistory : [];
-    history = [entry, ...history].slice(0, HISTORY_MAX);
-    const leaders = await this.updateLeaders(agentStat);
-    const newVoteCd = now + VOTE_COOLDOWN_MS;
-    await this.state.storage.put({ scores: this.scoresCopy(scores), meta, feed, history, leaders, [vcdKey]: newVoteCd, [agentKey]: agentStat, [voteKey]: dir });
-    this.broadcastLive(["canvas", "activity"], meta.version);
-    return json({
-      ok: true,
-      vote: { x, y, dir, score: nextScore, color: tileColor || "#FFFFFF", colorIndex: tileCi },
-      agent,
-      reputation: agentStat.reputation,
-      nextVoteAt: newVoteCd,
-      remainingMs: VOTE_COOLDOWN_MS,
-      remainingSec: Math.ceil(VOTE_COOLDOWN_MS / 1000),
-      message: `${dir === 1 ? "Upvoted" : "Downvoted"} (${x},${y}) → score ${nextScore}`,
-    }, 200, origin);
+      meta.totalVotes = (meta.totalVotes || 0) + 1;
+      meta.version = (meta.version || 0) + 1;
+      const tileColor = PALETTE[tileCi] || "#FFFFFF";
+      const entry = { type: "vote", x, y, dir, c: tileCi, color: tileColor, agent, score: nextScore, t: now, v: meta.version };
+      const storedFeed = await storage.get("feed");
+      const feed = [entry, ...(Array.isArray(storedFeed) ? storedFeed : [])].slice(0, FEED_MAX);
+      const storedHistory = await storage.get("history");
+      const history = [entry, ...(Array.isArray(storedHistory) ? storedHistory : [])].slice(0, HISTORY_MAX);
+      const leaders = await this.updateLeadersIn(storage, changedStats);
+      const newVoteCd = now + VOTE_COOLDOWN_MS;
+      await storage.put({ ...put, scores: this.scoresCopy(scores), meta, feed, history, leaders, [vcdKey]: newVoteCd, [voteKey]: dir });
+      return { status: 200, version: meta.version, body: { ok: true, vote: { x, y, dir, score: nextScore, color: tileColor, colorIndex: tileCi }, agent, reputation: agentStat.reputation, nextVoteAt: newVoteCd, remainingMs: VOTE_COOLDOWN_MS, remainingSec: Math.ceil(VOTE_COOLDOWN_MS / 1000), message: `${dir === 1 ? "Upvoted" : "Downvoted"} (${x},${y}) → score ${nextScore}` } };
+    });
+    if (result.status === 200) this.broadcastLive(["canvas", "activity"], result.version);
+    return json(result.body, result.status, origin);
   }
 
   /** @param {Request} request @param {number} size @param {string} origin @param {string} ip */
@@ -6901,68 +6942,56 @@ export class GrokPlaceCanvas extends DurableObject {
     const reason = reasonScan.ok ? reasonScan.value || "unsafe" : "unsafe";
     const now = Date.now();
     const rcdKey = `rcd:${akey}`;
-    const nextReportAt = Number((await this.state.storage.get(rcdKey)) || 0);
-    if (nextReportAt > now) {
-      return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextReportAt - now) / 1000)}s`, remainingMs: nextReportAt - now }, 429, origin);
-    }
-    const agentStat = await this.readAgent(akey, agent, now);
-    if ((agentStat.placements || 0) < 1) {
-      return json({ ok: false, error: "report_locked", message: "Place at least one clean tile before reporting." }, 403, origin);
-    }
-    const { board, scores } = await this.ensureBoard(size);
-    const meta = await this.readCanvasMeta();
-    const reportKey = meta.tileEpoch ? `rpt:${meta.tileEpoch}:${x},${y}` : `rpt:${x},${y}`;
-    const storedReporters = await this.state.storage.get(reportKey);
-    /** @type {TileReport[]} */
-    const reporters = Array.isArray(storedReporters) ? storedReporters.filter(isTileReport) : [];
-    if (reporters.some((r) => r.a === akey)) {
-      return json({ ok: false, error: "already_reported", message: `Already reported (${x},${y}).`, reports: reporters.length, threshold: REPORT_THRESHOLD }, 409, origin);
-    }
-    reporters.push({ a: akey, t: now, reason });
-    const idx = y * size + x;
-    let cleared = false;
-    if (reporters.length >= REPORT_THRESHOLD) {
-      board[idx] = 0;
-      scores[idx] = 0;
-      const provenanceRow = await this.readProvenanceRow(this.state.storage, y, size);
-      const priorProvenance = provenanceRow[x];
-      if (priorProvenance) provenanceRow[x] = { ...priorProvenance, clearedAt: now, clearedReason: "safety" };
-      cleared = true;
-      await this.state.storage.delete(`owner:${idx}`);
-      await this.state.storage.delete(ownerCellKey(x, y));
-      await this.revokeRestorationForTile(this.state.storage, this.tileEpoch(meta), priorProvenance, x, y);
-      await this.state.storage.delete(protectionKey(x, y));
-      await this.state.storage.delete(reportKey);
-      meta.version = (meta.version || 0) + 1;
-      meta.totalReportsCleared = (meta.totalReportsCleared || 0) + 1;
-      const entry = { type: "clear", x, y, agent, reason, t: now, v: meta.version, reports: reporters.length };
-      const storedFeed = await this.state.storage.get("feed");
-      /** @type {unknown[]} */
-      let feed = Array.isArray(storedFeed) ? storedFeed : [];
-      feed = [entry, ...feed].slice(0, FEED_MAX);
-      const storedHistory = await this.state.storage.get("history");
-      /** @type {unknown[]} */
-      let history = Array.isArray(storedHistory) ? storedHistory : [];
-      history = [entry, ...history].slice(0, HISTORY_MAX);
-      await this.state.storage.put({ board: this.bufCopy(board), scores: this.scoresCopy(scores), [provenanceRowKey(y)]: provenanceRow, meta, feed, history, [rcdKey]: now + REPORT_COOLDOWN_MS });
-    } else {
-      const entry = { type: "report", x, y, agent, reason, t: now, reports: reporters.length, threshold: REPORT_THRESHOLD };
-      const storedFeed = await this.state.storage.get("feed");
-      /** @type {unknown[]} */
-      let feed = Array.isArray(storedFeed) ? storedFeed : [];
-      feed = [entry, ...feed].slice(0, FEED_MAX);
-      await this.state.storage.put({ [reportKey]: reporters, feed, [rcdKey]: now + REPORT_COOLDOWN_MS });
-    }
-    const currentMeta = await this.readCanvasMeta();
-    this.broadcastLive(cleared ? ["canvas", "activity"] : ["activity"], currentMeta.version || 0);
-    return json({
-      ok: true,
-      report: { x, y, reason, count: cleared ? REPORT_THRESHOLD : reporters.length, threshold: REPORT_THRESHOLD, cleared },
-      agent,
-      message: cleared
-        ? `Tile (${x},${y}) cleared by community reports.`
-        : `Report recorded (${reporters.length}/${REPORT_THRESHOLD}).`,
-    }, 200, origin);
+    await this.ensureBoard(size);
+    const result = await this.storageTransaction(async (storage) => {
+      const nextReportAt = Number((await storage.get(rcdKey)) || 0);
+      if (nextReportAt > now) return { status: 429, body: { ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextReportAt - now) / 1000)}s`, remainingMs: nextReportAt - now }, cleared: false, version: 0 };
+      const agentStat = this.normalizeAgent(await storage.get(`agent:${akey}`), agent, now);
+      if ((agentStat.placements || 0) < 1) return { status: 403, body: { ok: false, error: "report_locked", message: "Place at least one clean tile before reporting." }, cleared: false, version: 0 };
+      const boardRaw = await storage.get("board");
+      const scoresRaw = await storage.get("scores");
+      if (!isBoardBytes(boardRaw) || !isScoreBytes(scoresRaw)) return { status: 409, body: { ok: false, error: "board_unavailable" }, cleared: false, version: 0 };
+      const board = boardRaw instanceof Uint8Array ? new Uint8Array(boardRaw) : new Uint8Array(boardRaw);
+      const scores = scoresRaw instanceof Int16Array ? new Int16Array(scoresRaw) : new Int16Array(scoresRaw);
+      if (board.length !== size * size || scores.length !== size * size) return { status: 409, body: { ok: false, error: "board_unavailable" }, cleared: false, version: 0 };
+      const idx = y * size + x;
+      if (fromStoredColor(board[idx]) === null) return { status: 409, body: { ok: false, error: "empty_tile", message: "Only painted tiles can be reported." }, cleared: false, version: 0 };
+      const meta = normalizeCanvasMeta(await storage.get("meta"));
+      const reportKey = meta.tileEpoch ? `rpt:${meta.tileEpoch}:${x},${y}` : `rpt:${x},${y}`;
+      const storedReporters = await storage.get(reportKey);
+      const reporters = Array.isArray(storedReporters) ? storedReporters.filter(isTileReport) : [];
+      if (reporters.some((reporter) => reporter.a === akey)) return { status: 409, body: { ok: false, error: "already_reported", message: `Already reported (${x},${y}).`, reports: reporters.length, threshold: REPORT_THRESHOLD }, cleared: false, version: meta.version || 0 };
+      reporters.push({ a: akey, t: now, reason });
+      const cleared = reporters.length >= REPORT_THRESHOLD;
+      const entry = cleared
+        ? { type: "clear", x, y, agent, reason, t: now, v: (meta.version || 0) + 1, reports: reporters.length }
+        : { type: "report", x, y, agent, reason, t: now, reports: reporters.length, threshold: REPORT_THRESHOLD };
+      const storedFeed = await storage.get("feed");
+      const feed = [entry, ...(Array.isArray(storedFeed) ? storedFeed : [])].slice(0, FEED_MAX);
+      const nextReportCd = now + REPORT_COOLDOWN_MS;
+      if (cleared) {
+        board[idx] = 0;
+        scores[idx] = 0;
+        const provenanceRow = await this.readProvenanceRow(storage, y, size);
+        const priorProvenance = provenanceRow[x];
+        if (priorProvenance) provenanceRow[x] = { ...priorProvenance, clearedAt: now, clearedReason: "safety" };
+        await storage.delete(`owner:${idx}`);
+        await storage.delete(ownerCellKey(x, y));
+        await this.revokeRestorationForTile(storage, this.tileEpoch(meta), priorProvenance, x, y);
+        await storage.delete(protectionKey(x, y));
+        await storage.delete(reportKey);
+        meta.version = (meta.version || 0) + 1;
+        meta.totalReportsCleared = (meta.totalReportsCleared || 0) + 1;
+        const storedHistory = await storage.get("history");
+        const history = [entry, ...(Array.isArray(storedHistory) ? storedHistory : [])].slice(0, HISTORY_MAX);
+        await storage.put({ board: this.bufCopy(board), scores: this.scoresCopy(scores), [provenanceRowKey(y)]: provenanceRow, meta, feed, history, [rcdKey]: nextReportCd });
+      } else {
+        await storage.put({ [reportKey]: reporters, feed, [rcdKey]: nextReportCd });
+      }
+      return { status: 200, cleared, version: meta.version || 0, body: { ok: true, report: { x, y, reason, count: cleared ? REPORT_THRESHOLD : reporters.length, threshold: REPORT_THRESHOLD, cleared }, agent, message: cleared ? `Tile (${x},${y}) cleared by community reports.` : `Report recorded (${reporters.length}/${REPORT_THRESHOLD}).` } };
+    });
+    if (result.status === 200) this.broadcastLive(result.cleared ? ["canvas", "activity"] : ["activity"], result.version);
+    return json(result.body, result.status, origin);
   }
 
   /** @param {string} id */

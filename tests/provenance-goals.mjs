@@ -224,4 +224,42 @@ check(
   JSON.stringify(data)
 );
 
+const legacyGrowthBoard = new Uint8Array([0, 0, 6, 0]);
+const legacyGrowthStorage = new MemoryStorage({
+  size: 2,
+  board: legacyGrowthBoard.buffer,
+  scores: new Int16Array(4).buffer,
+  schema: 4,
+  meta: { version: 1, tileEpoch: 1, totalPlacements: 1, totalVotes: 0, uniqueAgents: 2, lastPlaceAt: now },
+  feed: [],
+  history: [],
+  leaders: [],
+  "owner:2": owner,
+  [`agent:${owner}`]: { name: owner, placements: 1, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 1, firstAt: now, lastAt: now },
+  "agent:growth-voter": { name: "growth-voter", placements: 1, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 1, firstAt: now, lastAt: now },
+});
+const legacyGrowthCanvas = new GrokPlaceCanvas({ storage: legacyGrowthStorage, getWebSockets() { return []; } }, {});
+legacyGrowthCanvas.rateLimit = async () => ({ ok: true });
+legacyGrowthCanvas.consumeProof = async () => ({ ok: true });
+legacyGrowthCanvas.requireAgentCapability = async () => ({ ok: true });
+await legacyGrowthCanvas.handleCanvas(new URL("https://test/internal/canvas"), 4, "*");
+response = await legacyGrowthCanvas.handleTile(new URL("https://test/internal/tile?x=0&y=1"), 4, "*");
+data = await response.json();
+const legacyVoteResponse = await legacyGrowthCanvas.handleVote(new Request("https://test/internal/vote", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ agent: "growth-voter", x: 0, y: 1, dir: 1 }),
+}), 4, "*", "test-ip");
+const legacyVoteData = await legacyVoteResponse.json();
+check(
+  "legacy index ownership survives canvas growth for inspection and reputation",
+  response.ok
+    && data.tile?.placement?.agent === owner
+    && legacyVoteResponse.ok
+    && legacyVoteData.vote?.score === 1
+    && (await legacyGrowthStorage.get(`agent:${owner}`))?.upvotesReceived === 1
+    && (await legacyGrowthStorage.get("legacyOwnerWidth")) === 2,
+  JSON.stringify({ tile: data, vote: legacyVoteData, owner: await legacyGrowthStorage.get(`agent:${owner}`) })
+);
+
 process.exitCode = failed ? 1 : 0;

@@ -248,7 +248,7 @@ class MemoryStorage {
   }), 128, "*", "test-ip");
   const oldAgentAfterVote = await storage.get("agent:old-agent");
   check(
-    "reset removes tile state and atomically epochs new reports away from orphaned records",
+    "reset removes tile state and rejects post-reset mutations against empty tiles",
     response.status === 200
       && body.ok === true
       && /^[a-f0-9]{16}$/.test(resetMeta.tileEpoch)
@@ -258,9 +258,10 @@ class MemoryStorage {
       && (await storage.get("vote:alice:1,1")) === undefined
       && (await storage.get("owner:250")) === "old-agent"
       && (await storage.get("agent:alice")) !== undefined
-      && reportResponse.status === 200
+      && reportResponse.status === 409
+      && (await reportResponse.clone().json()).error === "empty_tile"
       && (await storage.get("rpt:1,1"))?.length === 2
-      && (await storage.get(`rpt:${resetMeta.tileEpoch}:1,1`))?.length === 1
+      && (await storage.get(`rpt:${resetMeta.tileEpoch}:1,1`)) === undefined
       && voteResponse.status === 409
       && (await voteResponse.clone().json()).error === "empty_tile"
       && oldAgentAfterVote.reputation === 7
