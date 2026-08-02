@@ -187,7 +187,8 @@ const browserRoot = await fetch(`${API}/`, {
   headers: { Accept: "text/html", "User-Agent": "Mozilla/5.0 smoke-browser" },
 });
 const browserHtml = await browserRoot.text();
-check("browser root serves compact HTML", browserRoot.ok && /id="board"/.test(browserHtml) && browserHtml.length < 10_000, `status ${browserRoot.status}, bytes ${browserHtml.length}`);
+// Production may include bounded Cloudflare security and analytics scripts.
+check("browser root serves compact HTML", browserRoot.ok && /id="board"/.test(browserHtml) && browserHtml.length < 12_000, `status ${browserRoot.status}, bytes ${browserHtml.length}`);
 check("browser shell keeps the approved inspector and ticker without dashboard bloat", /id="tile-inspector"/.test(browserHtml) && /id="activity-ticker"/.test(browserHtml) && !/(empty-card|leaderboard|minimap|stats-strip|player-host|class="modal)/i.test(browserHtml));
 
 const agentRoot = await fetch(`${API}/`, { headers: { Accept: "text/plain", "User-Agent": "curl/8.0" } });
