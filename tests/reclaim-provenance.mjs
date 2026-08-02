@@ -91,6 +91,10 @@ async function reclaim(agent, body) {
   const response = await canvas.handleReclaim(request(agent, "/internal/reclaim", body), size, 60_000, "*", "test-ip");
   return { response, data: await response.json() };
 }
+async function footprintReset(agent, body) {
+  const response = await canvas.handlePlanFootprintReset(request(agent, "/internal/plan/footprint-reset", body), size, "*", "test-ip");
+  return { response, data: await response.json() };
+}
 async function inventory(agent) {
   const response = await canvas.handleReclaimInventory(new Request(`https://test/internal/reclaim?agent=${agent}&planId=${planId}`, { headers: { Authorization: `Agent proof-${agent}` } }), size, "*");
   return { response, data: await response.json() };
@@ -237,6 +241,250 @@ try {
   await storage.put(filteredEventKey, { ...filteredEvent, prior: { ...filteredEvent.prior, goal: "porn" } });
   result = await reclaim(owner, { planId, action: "restore", eventId: filteredId, clientRequestId: "filtered-restore-01" });
   check("a filtered historical source cannot be restored and its event is removed", result.response.status === 409 && result.data.error === "content_filtered" && (await storage.get(filteredEventKey)) === undefined, JSON.stringify(result.data));
+
+  const footprintPlanId = "pl_bbbbbbbbbbbbbbbb";
+  const footprintPlan = {
+    ...plan,
+    id: footprintPlanId,
+    clientRequestId: "footprint-plan-001",
+    title: "Footprint plan",
+    bounds: { x: 0, y: 5, w: 4, h: 1 },
+    version: 1,
+    activatedVersion: 1,
+    acceptedReviewId: "pvr_bbbbbbbbbbbbbbbb",
+    updatedAt: now,
+  };
+  await storage.put(`plan:${footprintPlanId}`, footprintPlan);
+  await storage.put("planIndex", [
+    ...(await storage.get("planIndex")),
+    { id: footprintPlanId, agent: owner, updatedAt: now, status: "active", bounds: footprintPlan.bounds },
+  ]);
+  await storage.put(`turn:${owner}`, { left: 5, nextTurnAt: 0 });
+  result = await place(owner, {
+    planId: footprintPlanId,
+    tiles: [{ x: 0, y: 5, color: 5 }, { x: 1, y: 5, color: 5 }, { x: 2, y: 5, color: 5 }, { x: 3, y: 5, color: 5 }],
+  });
+  check("footprint reset fixture records current tiles under the exact plan version", result.response.ok && (await storage.get("provenance:row:5"))?.[0]?.planVersion === 1, JSON.stringify(result.data));
+  await storage.put(`turn:${blocker}`, { left: 5, nextTurnAt: 0 });
+  result = await protect(blocker, { x: 1, y: 5, action: "protect", clientRequestId: "footprint-protect-01" });
+  await storage.put(`turn:${intruder}`, { left: 5, nextTurnAt: 0 });
+  await place(intruder, { goal: "foreign footprint overwrite", x: 2, y: 5, color: 12 });
+  const safetyBoard = new Uint8Array(await storage.get("board"));
+  const safetyRow = await storage.get("provenance:row:5");
+  safetyBoard[5 * size + 3] = 0;
+  safetyRow[3] = { ...safetyRow[3], clearedAt: now, clearedReason: "safety" };
+  const safetyMeta = await storage.get("meta");
+  await storage.put({ board: safetyBoard.buffer, ["provenance:row:5"]: safetyRow, meta: { ...safetyMeta, version: safetyMeta.version + 1 } });
+
+  const beforeFootprintStat = { ...(await storage.get(`agent:${owner}`)) };
+  const beforeFootprintMeta = { ...(await storage.get("meta")) };
+  let footprint = await footprintReset(owner, { id: footprintPlanId, version: 1, boardVersion: beforeFootprintMeta.version, dryRun: true, clientRequestId: "footprint-reset-001" });
+  const firstFootprintHash = footprint.data.footprint?.hash;
+  const firstConfirmationId = footprint.data.confirmationId;
+  check(
+    "footprint dry-run derives the exact current plan/version footprint and excludes protected, foreign, and safety-cleared cells",
+    footprint.response.ok
+      && footprint.data.footprint?.ownedCurrentCount === 2
+      && footprint.data.footprint?.clearableCount === 1
+      && footprint.data.footprint?.protectedCount === 1
+      && typeof firstFootprintHash === "string"
+      && typeof firstConfirmationId === "string",
+    JSON.stringify(footprint.data)
+  );
+  result = await footprintReset(owner, { id: footprintPlanId, version: 1, boardVersion: beforeFootprintMeta.version, footprintHash: "0".repeat(64), dryRun: false, confirmationId: firstConfirmationId, clientRequestId: "footprint-reset-001" });
+  check("footprint confirmation rejects a forged exact-footprint binding without clearing", result.response.status === 409 && result.data.error === "footprint_confirmation_required" && new Uint8Array(await storage.get("board"))[5 * size] !== 0, JSON.stringify(result.data));
+
+  await storage.put("meta", { ...(await storage.get("meta")), version: beforeFootprintMeta.version + 1 });
+  result = await footprintReset(owner, { id: footprintPlanId, version: 1, boardVersion: beforeFootprintMeta.version, footprintHash: firstFootprintHash, dryRun: false, confirmationId: firstConfirmationId, clientRequestId: "footprint-reset-001" });
+  check("footprint confirmation fails closed when the bound board version is stale", result.response.status === 409 && result.data.error === "footprint_stale_board", JSON.stringify(result.data));
+
+  const freshFootprintMeta = await storage.get("meta");
+  const freshFootprintBoardVersion = freshFootprintMeta.version;
+  footprint = await footprintReset(owner, { id: footprintPlanId, version: 1, boardVersion: freshFootprintBoardVersion, dryRun: true, clientRequestId: "footprint-reset-002" });
+  const freshFootprintHash = footprint.data.footprint?.hash;
+  const freshConfirmationId = footprint.data.confirmationId;
+  const footprintStatBeforeConfirm = { ...(await storage.get(`agent:${owner}`)) };
+  const footprintMetaBeforeConfirm = { ...(await storage.get("meta")) };
+  result = await footprintReset(owner, { id: footprintPlanId, version: 1, boardVersion: freshFootprintBoardVersion, footprintHash: freshFootprintHash, dryRun: false, confirmationId: freshConfirmationId, clientRequestId: "footprint-reset-002" });
+  const footprintBoardAfterConfirm = new Uint8Array(await storage.get("board"));
+  const footprintRowAfterConfirm = await storage.get("provenance:row:5");
+  const creditsAfterConfirm = await storage.get(`relocationcredits:${owner}`);
+  check(
+    "confirmed footprint reset clears only current unprotected exact-plan tiles, audits provenance, and issues the exact relocation credit count",
+    result.response.ok
+      && result.data.clearedCount === 1
+      && result.data.relocationCredit?.amount === 1
+      && footprintBoardAfterConfirm[5 * size] === 0
+      && footprintBoardAfterConfirm[5 * size + 1] !== 0
+      && footprintBoardAfterConfirm[5 * size + 2] !== 0
+      && footprintBoardAfterConfirm[5 * size + 3] === 0
+      && footprintRowAfterConfirm?.[0]?.action === "footprint_reset"
+      && footprintRowAfterConfirm?.[0]?.clearedReason === "footprint_reset"
+      && Array.isArray(creditsAfterConfirm) && creditsAfterConfirm.length === 1 && creditsAfterConfirm[0]?.amount === 1,
+    JSON.stringify(result.data)
+  );
+  const footprintReplay = await footprintReset(owner, { id: footprintPlanId, version: 1, boardVersion: freshFootprintBoardVersion, footprintHash: freshFootprintHash, dryRun: false, confirmationId: freshConfirmationId, clientRequestId: "footprint-reset-002" });
+  const footprintStatAfterConfirm = await storage.get(`agent:${owner}`);
+  const footprintMetaAfterConfirm = await storage.get("meta");
+  check(
+    "footprint reset replay is idempotent and cannot inflate bonus bank, placements, reputation, protection, or total placement counts",
+    footprintReplay.response.ok
+      && footprintReplay.data.already === true
+      && (await storage.get(`relocationcredits:${owner}`))?.length === 1
+      && footprintStatAfterConfirm?.bonusTiles === footprintStatBeforeConfirm?.bonusTiles
+      && footprintStatAfterConfirm?.placements === footprintStatBeforeConfirm?.placements
+      && footprintStatAfterConfirm?.reputation === footprintStatBeforeConfirm?.reputation
+      && footprintMetaAfterConfirm?.totalPlacements === footprintMetaBeforeConfirm?.totalPlacements
+      && beforeFootprintStat?.bonusTiles === footprintStatBeforeConfirm?.bonusTiles,
+    JSON.stringify({ replay: footprintReplay.data, before: footprintStatBeforeConfirm, after: footprintStatAfterConfirm, meta: footprintMetaAfterConfirm })
+  );
+  now = Number(creditsAfterConfirm?.[0]?.expiresAt) + 1;
+  check("relocation credits expire without becoming bonus-bank or placement credit", (await canvas.readRelocationCredits(storage, owner, now)).length === 0 && (await storage.get(`agent:${owner}`))?.bonusTiles === footprintStatAfterConfirm?.bonusTiles);
+
+  const batchPlanId = "pl_cccccccccccccccc";
+  const batchEpoch = "2".repeat(16);
+  const batchBoard = new Uint8Array(size * size);
+  const batchRows = {};
+  for (let y = 0; y < size; y++) batchRows[`provenance:row:${y}`] = Array(size).fill(null);
+  for (let index = 0; index < 40; index++) {
+    const x = index % size;
+    const y = Math.floor(index / size);
+    batchBoard[index] = 6;
+    batchRows[`provenance:row:${y}`][x] = {
+      version: index + 1,
+      agent: owner,
+      colorIndex: 5,
+      placedAt: now,
+      goal: "bounded batch fixture",
+      planId: batchPlanId,
+      planTitle: "Batch footprint plan",
+      planVersion: 1,
+      assignmentId: null,
+      step: 1,
+      x,
+      y,
+      action: index === 2 ? "restore" : "place",
+      history: [],
+    };
+  }
+  const foreignCoordinate = { x: 0, y: 5 };
+  batchBoard[foreignCoordinate.y * size + foreignCoordinate.x] = 10;
+  batchRows["provenance:row:5"][0] = {
+    version: 41,
+    agent: intruder,
+    colorIndex: 9,
+    placedAt: now,
+    goal: "foreign overwrite",
+    planId: null,
+    planTitle: null,
+    assignmentId: null,
+    step: null,
+    x: foreignCoordinate.x,
+    y: foreignCoordinate.y,
+    action: "overwrite",
+    history: [],
+  };
+  const batchPlan = {
+    ...plan,
+    id: batchPlanId,
+    clientRequestId: "batch-footprint-plan",
+    title: "Batch footprint plan",
+    bounds: { x: 0, y: 0, w: size, h: size },
+    design: { w: size, h: size, cells: [] },
+    version: 1,
+    activatedVersion: 1,
+    updatedAt: now,
+  };
+  const griefEventId = "d".repeat(32);
+  const griefSnapshot = {
+    version: 40,
+    agent: owner,
+    colorIndex: 5,
+    placedAt: now - 1,
+    goal: "bounded batch fixture",
+    planId: batchPlanId,
+    planTitle: batchPlan.title,
+    planVersion: 1,
+    assignmentId: null,
+    step: 1,
+    x: foreignCoordinate.x,
+    y: foreignCoordinate.y,
+    action: "place",
+  };
+  const batchStorage = new TransactionalMemoryStorage({
+    size,
+    board: batchBoard.buffer,
+    scores: new Int16Array(size * size).buffer,
+    schema: 4,
+    meta: { version: 50, totalPlacements: 41, totalVotes: 0, uniqueAgents: 2, lastPlaceAt: now, tileEpoch: batchEpoch },
+    feed: [],
+    history: [],
+    leaders: [],
+    [`plan:${batchPlanId}`]: batchPlan,
+    planIndex: [{ id: batchPlanId, agent: owner, updatedAt: now, status: "active", bounds: batchPlan.bounds }],
+    [`agent:${owner}`]: { name: owner, placements: 40, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 40, firstAt: now, lastAt: now, lastGoal: "", lastTile: null, bonusTiles: 0, maintainer: false, github: null, activePlanId: batchPlanId, joinedPlanIds: [], avoidedPlanIds: [] },
+    [`reclaim:event:${batchEpoch}:${griefEventId}`]: { version: 1, id: griefEventId, epoch: batchEpoch, owner, planId: batchPlanId, x: foreignCoordinate.x, y: foreignCoordinate.y, prior: griefSnapshot, overwritten: { ...griefSnapshot, version: 41, agent: intruder, colorIndex: 9, planId: null, planTitle: null, step: null, action: "overwrite" }, createdAt: now, expiresAt: now + 600_000 },
+    [`reclaim:agent:${batchEpoch}:${owner}`]: [griefEventId],
+    "protection:cell:7:4": { version: 1, x: 7, y: 4, colorIndex: 5, color: "#E50000", protector: blocker, protectedAt: now, expiresAt: now + 60_000 },
+    ...batchRows,
+  });
+  const batchCanvas = new GrokPlaceCanvas({ storage: batchStorage, getWebSockets() { return []; } }, { CANVAS_SIZE: String(size), RESET_SECRET: "test-reset" });
+  batchCanvas.rateLimit = async () => ({ ok: true });
+  batchCanvas.consumeProof = async () => ({ ok: true });
+  batchCanvas.requireAgentCapability = async (incoming, agent) => incoming.headers.get("Authorization") === `Agent proof-${agent}`
+    ? { ok: true }
+    : { ok: false, status: 401, error: "agent_claim_required", message: "capability required" };
+  const batchReset = async (body) => {
+    const response = await batchCanvas.handlePlanFootprintReset(request(owner, "/internal/plan/footprint-reset", body), size, "*", "test-ip");
+    return { response, data: await response.json() };
+  };
+
+  let batchResult = await batchReset({ id: batchPlanId, version: 1, boardVersion: 50, selected: [{ x: 0, y: 0 }, { x: 0, y: 0 }], dryRun: true, clientRequestId: "batch-duplicate-01" });
+  check("explicit footprint selection rejects duplicate coordinates deterministically", batchResult.response.status === 400 && batchResult.data.error === "duplicate_selection", JSON.stringify(batchResult.data));
+  batchResult = await batchReset({ id: batchPlanId, version: 1, boardVersion: 50, selected: [{ x: 8, y: 0 }], dryRun: true, clientRequestId: "batch-bounds-0001" });
+  check("explicit footprint selection rejects out-of-bounds coordinates deterministically", batchResult.response.status === 400 && batchResult.data.error === "selection_out_of_bounds", JSON.stringify(batchResult.data));
+  batchResult = await batchReset({ id: batchPlanId, version: 1, boardVersion: 50, selected: [foreignCoordinate], dryRun: true, clientRequestId: "batch-foreign-001" });
+  check("foreign griefed tiles are rejected without consuming restoration rights or issuing credits", batchResult.response.status === 409 && batchResult.data.error === "selection_foreign" && await batchStorage.get(`reclaim:event:${batchEpoch}:${griefEventId}`) !== undefined && await batchStorage.get(`relocationcredits:${owner}`) === undefined, JSON.stringify(batchResult.data));
+  batchResult = await batchReset({ id: batchPlanId, version: 1, boardVersion: 50, selected: [{ x: 7, y: 4 }], dryRun: true, clientRequestId: "batch-protected-01" });
+  check("explicit footprint selection rejects protected owned tiles deterministically", batchResult.response.status === 409 && batchResult.data.error === "selection_protected", JSON.stringify(batchResult.data));
+  batchResult = await batchReset({ id: batchPlanId, version: 1, boardVersion: 50, selected: [{ x: 7, y: 7 }], dryRun: true, clientRequestId: "batch-stale-0001" });
+  check("explicit footprint selection rejects stale empty coordinates deterministically", batchResult.response.status === 409 && batchResult.data.error === "selection_stale", JSON.stringify(batchResult.data));
+
+  const explicitSelection = [{ x: 1, y: 0 }, { x: 0, y: 0 }];
+  let batchDry = await batchReset({ id: batchPlanId, version: 1, boardVersion: 50, selected: explicitSelection, dryRun: true, clientRequestId: "batch-explicit-001" });
+  check("explicit dry-run canonicalizes and binds only the requested eligible tiles", batchDry.response.ok && batchDry.data.footprint?.selectedCount === 2 && batchDry.data.footprint?.selected?.[0]?.x === 0 && batchDry.data.footprint?.remainingCount === 37, JSON.stringify(batchDry.data));
+  batchResult = await batchReset({ id: batchPlanId, version: 1, boardVersion: 50, selected: [{ x: 0, y: 0 }, { x: 2, y: 0 }], footprintHash: batchDry.data.footprint?.hash, dryRun: false, confirmationId: batchDry.data.confirmationId, clientRequestId: "batch-explicit-001" });
+  check("confirmation rejects an altered explicit selection binding", batchResult.response.status === 409 && batchResult.data.error === "footprint_confirmation_required", JSON.stringify(batchResult.data));
+  batchResult = await batchReset({ id: batchPlanId, version: 1, boardVersion: 50, selected: explicitSelection, footprintHash: batchDry.data.footprint?.hash, dryRun: false, confirmationId: batchDry.data.confirmationId, clientRequestId: "batch-explicit-001" });
+  check("exact explicit confirmation clears and credits only the selected tiles", batchResult.response.ok && batchResult.data.clearedCount === 2 && batchResult.data.relocationCredit?.amount === 2 && batchResult.data.relocationCredit?.balanceAfter === 2, JSON.stringify(batchResult.data));
+
+  await batchStorage.delete("protection:cell:7:4");
+  batchDry = await batchReset({ id: batchPlanId, version: 1, boardVersion: batchResult.data.boardVersion, dryRun: true, clientRequestId: "batch-all-first-01" });
+  check("all-owned dry-run returns one bounded batch plus continuation", batchDry.response.ok && batchDry.data.footprint?.selectedCount === 32 && batchDry.data.footprint?.remainingCount === 6 && typeof batchDry.data.footprint?.nextCursor === "string", JSON.stringify(batchDry.data));
+  batchResult = await batchReset({ id: batchPlanId, version: 1, boardVersion: batchResult.data.boardVersion, footprintHash: batchDry.data.footprint?.hash, dryRun: false, confirmationId: batchDry.data.confirmationId, clientRequestId: "batch-all-first-01" });
+  check("first continuation batch clears at most the fixed transaction bound", batchResult.response.ok && batchResult.data.clearedCount === 32 && batchResult.data.remainingCount === 6 && batchResult.data.relocationCredit?.balanceAfter === 34, JSON.stringify(batchResult.data));
+  const continuationCursor = batchResult.data.nextCursor;
+  batchDry = await batchReset({ id: batchPlanId, version: 1, boardVersion: batchResult.data.boardVersion, cursor: continuationCursor, dryRun: true, clientRequestId: "batch-all-final-01" });
+  batchResult = await batchReset({ id: batchPlanId, version: 1, boardVersion: batchResult.data.boardVersion, cursor: continuationCursor, footprintHash: batchDry.data.footprint?.hash, dryRun: false, confirmationId: batchDry.data.confirmationId, clientRequestId: "batch-all-final-01" });
+  const batchBalance = await batchStorage.get(`relocationcredits:${owner}`);
+  const batchStatAfter = await batchStorage.get(`agent:${owner}`);
+  const batchMetaAfter = await batchStorage.get("meta");
+  check(
+    "continuation clears every eligible owned tile with exact aggregate credit and zero reward inflation",
+    batchResult.response.ok
+      && batchResult.data.clearedCount === 6
+      && batchResult.data.remainingCount === 0
+      && batchResult.data.nextCursor === null
+      && Array.isArray(batchBalance) && batchBalance.length === 1 && batchBalance[0]?.amount === 40
+      && batchStatAfter?.bonusTiles === 0 && batchStatAfter?.placements === 40 && batchStatAfter?.reputation === 40
+      && batchMetaAfter?.totalPlacements === 41
+      && new Uint8Array(await batchStorage.get("board")).filter((value) => value === 6).length === 0
+      && new Uint8Array(await batchStorage.get("board"))[foreignCoordinate.y * size + foreignCoordinate.x] === 10
+      && await batchStorage.get(`reclaim:event:${batchEpoch}:${griefEventId}`) !== undefined,
+    JSON.stringify({ result: batchResult.data, balance: batchBalance, stat: batchStatAfter, meta: batchMetaAfter })
+  );
+  const finalReplay = await batchReset({ id: batchPlanId, version: 1, boardVersion: batchDry.data.boardVersion, cursor: continuationCursor, footprintHash: batchDry.data.footprint?.hash, dryRun: false, confirmationId: batchDry.data.confirmationId, clientRequestId: "batch-all-final-01" });
+  check("final continuation replay cannot duplicate clears or relocation credit", finalReplay.response.ok && finalReplay.data.already === true && (await batchStorage.get(`relocationcredits:${owner}`))?.[0]?.amount === 40, JSON.stringify(finalReplay.data));
 
   const resetResponse = await canvas.handleReset(new Request("https://test/internal/reset", { method: "POST", headers: { Authorization: "Bearer test-reset", "Content-Type": "application/json" }, body: "{}" }), "*");
   check("reset advances the epoch and cleans bounded reclaim state", resetResponse.ok && (await storage.list({ prefix: "reclaim:" })).size === 0, await resetResponse.text());

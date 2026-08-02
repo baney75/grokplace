@@ -22,6 +22,8 @@
   const shareBtn = document.getElementById("share-btn");
   const followBtn = document.getElementById("follow-btn");
   const toast = document.getElementById("toast");
+  const livePill = document.getElementById("live-pill");
+  const liveText = document.getElementById("live-text");
   const activityTicker = document.getElementById("activity-ticker");
   const tickerTrack = document.getElementById("ticker-track");
   const tickerToggle = document.getElementById("ticker-toggle");
@@ -29,6 +31,8 @@
   const tileInspectorTitle = document.getElementById("tile-inspector-title");
   const tileInspectorState = document.getElementById("tile-inspector-state");
   const tileInspectorClose = document.getElementById("tile-inspector-close");
+  const tileInspectorRetry = document.getElementById("tile-inspector-retry");
+  const selectedCellMarker = document.getElementById("selected-cell-marker");
   const planOverlay = document.getElementById("plan-overlay");
   const planOverlayTitle = document.getElementById("plan-overlay-title");
   const planOverlayVersion = document.getElementById("plan-overlay-version");
@@ -228,6 +232,28 @@
       planOverlayEl.style.height = width;
       planOverlayEl.style.transform = transform;
     }
+    renderSelectedCellMarker();
+  }
+
+  function renderSelectedCellMarker() {
+    if (!selectedCellMarker) return;
+    if (!selectedTile) {
+      selectedCellMarker.hidden = true;
+      return;
+    }
+    const rect = boardEl.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      selectedCellMarker.hidden = true;
+      return;
+    }
+    const cellWidth = rect.width / size;
+    const cellHeight = rect.height / size;
+    selectedCellMarker.hidden = false;
+    selectedCellMarker.style.left = `${rect.left - wrapRect.left + selectedTile.x * cellWidth}px`;
+    selectedCellMarker.style.top = `${rect.top - wrapRect.top + selectedTile.y * cellHeight}px`;
+    selectedCellMarker.style.width = `${cellWidth}px`;
+    selectedCellMarker.style.height = `${cellHeight}px`;
   }
 
   function paintPlanOverlay() {
@@ -693,24 +719,33 @@
     if (row) row.hidden = !visible;
   }
 
-  /** @param {SelectedTile} selected @param {string} state */
-  function showInspectorState(selected, state) {
+  /** @param {boolean} reconnecting */
+  function setLiveStatus(reconnecting) {
+    livePill?.classList.toggle("is-reconnecting", reconnecting);
+    livePill?.setAttribute("aria-label", reconnecting ? "Canvas reconnecting; last mosaic remains visible" : "Live canvas");
+    livePill?.setAttribute("title", reconnecting ? "Reconnecting" : "Live");
+    if (liveText) liveText.textContent = reconnecting ? "RECONNECTING" : "LIVE";
+  }
+
+  /** @param {SelectedTile} selected @param {string} state @param {boolean} [retryAvailable] */
+  function showInspectorState(selected, state, retryAvailable = false) {
     if (!tileInspector) return;
     tileInspector.hidden = false;
     document.body?.classList.toggle("inspector-open", true);
     if (tileInspectorTitle) tileInspectorTitle.textContent = `Tile (${selected.x}, ${selected.y})`;
     if (tileInspectorState) tileInspectorState.textContent = state;
+    if (tileInspectorRetry) tileInspectorRetry.hidden = !retryAvailable;
   }
 
   /** @param {unknown} raw @param {SelectedTile} selected */
   function renderTileInspector(raw, selected) {
     if (!isRecord(raw) || !isRecord(raw.tile)) {
-      showInspectorState(selected, "Details unavailable");
+      showInspectorState(selected, "Details unavailable", true);
       return;
     }
     const tile = raw.tile;
     const state = tile.state === "empty" ? "Empty" : tile.state === "painted" ? "Painted" : "Details unavailable";
-    showInspectorState(selected, state);
+    showInspectorState(selected, state, state === "Details unavailable");
     const protection = isRecord(tile.protection) ? tile.protection : {};
     const protectedTile = protection.protected === true;
     const score = typeof protection.score === "number" ? protection.score : 0;
@@ -756,7 +791,7 @@
       renderTileInspector(raw, selected);
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
-        if (selectedTile === selected && selectionVersion === tileSelectionVersion) showInspectorState(selected, "Details unavailable");
+        if (selectedTile === selected && selectionVersion === tileSelectionVersion) showInspectorState(selected, "Details unavailable", true);
       }
     } finally {
       if (tileRequest === controller) tileRequest = null;
@@ -766,6 +801,7 @@
   /** @param {SelectedTile} selected */
   function selectTile(selected) {
     selectedTile = selected;
+    renderSelectedCellMarker();
     if (typeof boardEl.focus === "function") boardEl.focus({ preventScroll: true });
     showInspectorState(selected, "Loading");
     void fetchSelectedTile(selected);
@@ -777,7 +813,9 @@
     tileRequest?.abort();
     tileRequest = null;
     if (tileInspector) tileInspector.hidden = true;
+    if (tileInspectorRetry) tileInspectorRetry.hidden = true;
     document.body?.classList.toggle("inspector-open", false);
+    renderSelectedCellMarker();
   }
 
   /** @param {string} msg */
@@ -797,10 +835,10 @@
     if (!res.ok) throw requestError("canvas", res);
     /** @type {unknown} */
     const raw = await res.json();
-    if (!isRecord(raw)) return;
+    if (!isRecord(raw)) throw new Error("canvas response invalid");
     /** @type {CanvasResponse} */
     const data = raw;
-    if (data.ok !== true || typeof data.board !== "string" || typeof data.size !== "number" || !Number.isInteger(data.size) || data.size <= 0 || typeof data.version !== "number" || !Number.isInteger(data.version)) return;
+    if (data.ok !== true || typeof data.board !== "string" || typeof data.size !== "number" || !Number.isInteger(data.size) || data.size <= 0 || typeof data.version !== "number" || !Number.isInteger(data.version)) throw new Error("canvas response invalid");
 
     const nextSize = data.size;
     if (Array.isArray(data.palette) && data.palette.every((value) => typeof value === "string")) palette = data.palette;
@@ -1076,6 +1114,7 @@
       await fetchCanvas(controller.signal);
       canvasFailures = 0;
       canvasRetryNotBefore = 0;
+      setLiveStatus(false);
       if (document.title.includes("reconnecting")) document.title = "grok/place · live mosaic";
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
@@ -1083,6 +1122,7 @@
         const retry = retryPolicyFromError(error);
         canvasRetryAfterMs = retry.retryAfterMs;
         canvasRetryJitter = retry.jitter;
+        setLiveStatus(true);
         document.title = "grok/place · reconnecting…";
       }
     } finally {
@@ -1331,6 +1371,12 @@
 
   // Keyboard power-user controls
   window.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !tileInspector?.hidden) {
+      ev.preventDefault();
+      clearSelectedTile();
+      if (typeof boardEl.focus === "function") boardEl.focus({ preventScroll: true });
+      return;
+    }
     if (ev.target instanceof Element && /input|textarea|select/i.test(ev.target.tagName)) return;
     const boardFocused = document.activeElement === boardEl;
     if (boardFocused && !ev.shiftKey && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(ev.key)) {
@@ -1389,6 +1435,12 @@
   });
 
   tileInspectorClose?.addEventListener("click", clearSelectedTile);
+  tileInspectorRetry?.addEventListener("click", () => {
+    const selected = selectedTile;
+    if (!selected || tileRequest) return;
+    showInspectorState(selected, "Loading");
+    void fetchSelectedTile(selected);
+  });
 
   // Invite agent — Web Share first, then clipboard, then a readable fallback.
   shareBtn?.addEventListener("click", async () => {

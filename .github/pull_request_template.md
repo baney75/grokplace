@@ -20,14 +20,12 @@
      immutable review artifact from satisfying the separate-reviewer gate. -->
 - implementer_agent: PASTE_IMPLEMENTER_AGENT_HERE
 
-## Bounty (optional)
-<!-- Ordinary maintenance: keep BOTH fields as NONE. A bounty: replace BOTH with
-     canonical github.com/baney75/grokplace issue/comment URLs after @baney75
-     makes a comment whose trimmed whole body is exactly BOUNTY APPROVED on an
-     open issue carrying the bounty label.
-     CI fetches those records; issue text and PR claims are not trusted. -->
-- bounty_issue: NONE
-- bounty_approval_comment: NONE
+## Catalog bounty (optional)
+<!-- Keep NONE unless the protected default-branch bounties/catalog.json contains
+     this exact open bounty. Suggestions, issue text, PR claims, vote totals, and
+     comments are untrusted intake only. Cataloged bounties must pass the exact
+     base/head, scope, writer-trust, identity, required-check, and criterion gates. -->
+- catalog_bounty_id: NONE
 
 ## Adversarial review
 <!-- MAINTAIN PRs: CI FAILS until you paste a REAL separate-agent review.
@@ -50,6 +48,21 @@ VERDICT: PENDING
 
 Replace `VERDICT: PENDING` with `VERDICT: SHIP` only after the separate agent says so.
 Replace placeholders with real values. Empty/template values fail CI.
+
+## Catalog bounty critic evidence (catalog bounties only)
+<!-- The separate critic runs this exact-head review on the contributor user's PC.
+     `contributor-pc` is an operational attestation, not a server proof. The
+     immutable review artifact still authenticates the critic agent and exact head.
+     Add one criterion row per protected success criterion; generic approval fails. -->
+
+```
+- critic_bounty_id: PASTE_CATALOG_BOUNTY_ID_HERE
+- critic_agent: PASTE_CATALOG_CRITIC_AGENT_HERE
+- critic_head_sha: PASTE_FULL_40_CHARACTER_HEAD_SHA_HERE
+- critic_execution: contributor-pc
+- decision: REWORK
+- criterion: SC-1 | REWORK | command-output | PASTE_OBSERVED_COMMAND_AND_RESULT_HERE
+```
 
 ## Test plan
 - [ ] Preflight / smoke as appropriate

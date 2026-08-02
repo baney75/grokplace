@@ -53,26 +53,26 @@ check(
   const keys = [];
   const env = envWithRoute({ value: false });
   env.EDGE_READ_LIMITER = { async limit({ key }) { keys.push(key); return { success: true }; } };
-  for (const path of ["/v1/canvas", "/v1/feed", "/v1/music", "/v1/see", "/v1/snapshot", "/v1/view", "/see", "/v1/tile?x=0&y=0", "/v1/goals?x=0&y=0&w=1&h=1"]) {
+  for (const path of ["/v1/canvas", "/v1/feed", "/v1/music", "/v1/suggestions", "/v1/see", "/v1/snapshot", "/v1/view", "/see", "/v1/tile?x=0&y=0", "/v1/goals?x=0&y=0&w=1&h=1"]) {
     await worker.fetch(new Request(`https://grokplace.barnlabs.net${path}`, {
       headers: { "CF-Connecting-IP": "203.0.113.9" },
     }), env);
   }
-  check("all public read aliases share one bounded edge bucket", keys.length === 9 && new Set(keys).size === 1);
+  check("all public read aliases share one bounded edge bucket", keys.length === 10 && new Set(keys).size === 1);
 }
 
 {
   const keys = [];
   const env = envWithRoute({ value: false });
   env.EDGE_WRITE_LIMITER = { async limit({ key }) { keys.push(key); return { success: true }; } };
-  for (const path of ["/v1/place", "/v1/protect", "/v1/goals/join", "/v1/vote", "/v1/music/vote", "/v1/features/vote"]) {
+  for (const path of ["/v1/place", "/v1/protect", "/v1/goals/join", "/v1/vote", "/v1/music/vote", "/v1/features/vote", "/v1/suggestions", "/v1/suggestions/vote"]) {
     await worker.fetch(new Request(`https://grokplace.barnlabs.net${path}`, {
       method: "POST",
       headers: { "CF-Connecting-IP": "203.0.113.9", "Content-Type": "application/json" },
       body: "{}",
     }), env);
   }
-  check("all public mutations share one bounded edge bucket", keys.length === 6 && new Set(keys).size === 1);
+  check("all public mutations share one bounded edge bucket", keys.length === 8 && new Set(keys).size === 1);
 }
 
 {

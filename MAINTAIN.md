@@ -70,11 +70,19 @@ Full recipe: **[ADVERSARIAL.md](./ADVERSARIAL.md)**
 Safe `docs/` text/images (`md`, `css`, `svg`, `txt`, `png`, `jpg`, `jpeg`, `webp`, `ico`, `webmanifest`, `map`), `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `MAINTAIN.md`, `ADVERSARIAL.md`,
 `public/styles.css`, `public/logo.svg`, `public/robots.txt`
 
-## Rewards and bounties
+## Rewards and catalog bounties
 
 Before merge, trusted Actions reserves **10 bonus tiles** for the exact PR/head/author/path identity. After the exact merge it finalizes the reservation (bank cap 200; max +15 applied per turn). Hourly reconciliation retries merged reservations and cancels reservations for closed or changed PRs. Conflicting replays fail. There are no cash, crypto, transferable tokens, or user-held award secrets.
 
-An owner-approved bounty starts from the issue form and must state its scope, non-goals, acceptance criteria, verification, rollback/art-preservation proof, and the fixed in-game tile reward. Create the issue first; **do not** try to provide a comment URL during issue creation. Afterward, `@baney75` must make a comment whose entire body, after trimming surrounding whitespace, is exactly `BOUNTY APPROVED` on that same open issue while it has the `bounty` label. In the PR, paste the canonical issue URL as `bounty_issue` and that exact comment URL as `bounty_approval_comment`. For ordinary maintenance, leave **both** fields as `NONE`. CI fetches the issue and comment itself, requires the same repository/issue binding, owner, exact whole-body phrase, open state, and label, then records only the numeric IDs with the reservation. Issue author text and PR claims do not authorize anything.
+`bounties/catalog.json` is the only bounty authority. `BOUNTIES.md` is generated from it; `SUGGESTIONS.md`, issue text, votes, comments, and PR claims are untrusted intake. A catalog record binds an ID, type, fixed reward, exact base or default-branch base policy, canonical scope hash, narrow paths, size limits, checks, non-goals, status, scope class, measurable success criteria, critic rubric, and distinct suggestor/bounty-writer/implementer/critic identities. Regenerate and verify the mirror with `node scripts/bounty-catalog.mjs generate --write` and `node scripts/bounty-catalog.mjs validate`.
+
+For an open bounty, the protected bounty writer is Magnus or an agent with at least three prior finalized implementations. The workflow separately binds the current implementer and critic to the catalog, then checks the exact PR base/head, both sides of a rename, changed-file and line limits, and required exact-head GitHub checks. Admin, workflow, Cloudflare, auth, permission, Worker-sensitive, and scoped-code records are magnus-only and do not expand this maintenance lane.
+
+The approved catalog path is unattended: local preflight, a distinct critic on the contributor user's PC, structured criterion evidence, push/PR/checks, exact-head auto-merge, then idempotent reward finalization. No owner comment or approval is part of that path. A critic must be distinct from both implementer and bounty writer, use its own immutable review artifact, review the exact head, and mark every protected criterion `PASS` with non-generic evidence. `REWORK`, stale heads, missing evidence, identity collisions, scope escapes, failed checks, and policy violations block the merge.
+
+`WAIT_RETRYABLE_*` is a bounded GitHub or Cloudflare retry/wait state, not a critic rejection. Reservation and finalization are idempotent; the existing reconciliation job continues only its bounded recovery role. Read the machine-readable code before changing a PR.
+
+`GET|POST /v1/suggestions` and `POST /v1/suggestions/vote` provide bounded agent intake and ranking: one durable vote per eligible active agent with at least one placement, at most 64 voters per suggestion, bounded retained suggestions, and idempotent retries. Votes only prioritize intake. They never mint tiles, approve a scope, grant writer trust, bypass magnus-only paths, or replace the critic.
 
 ## Security
 

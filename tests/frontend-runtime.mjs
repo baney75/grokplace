@@ -27,8 +27,22 @@ check(
   /id="board"[^>]*tabindex="0"/.test(mosaicHtml)
     && /id="tile-inspector"/.test(mosaicHtml)
     && /id="tile-inspector-close"/.test(mosaicHtml)
+    && /id="tile-inspector-retry"/.test(mosaicHtml)
     && !/\/v1\/(place|vote|report)/.test(mosaicSource.slice(mosaicSource.indexOf("function fetchSelectedTile"), mosaicSource.indexOf("function clearSelectedTile"))),
   "tile inspector markup or read-only fetch contract missing"
+);
+check(
+  "viewer status and selected-cell marker remain compact, accessible, and read-only",
+  /id="live-pill"[^>]*aria-live="polite"/.test(mosaicHtml)
+    && /id="live-text"/.test(mosaicHtml)
+    && /id="selected-cell-marker"[^>]*aria-hidden="true"/.test(mosaicHtml)
+    && mosaicSource.includes("function setLiveStatus")
+    && mosaicSource.includes("function renderSelectedCellMarker")
+    && mosaicSource.includes("if (ev.key === \"Escape\" && !tileInspector?.hidden)")
+    && mosaicStyles.includes(".selected-cell-marker")
+    && mosaicStyles.includes(".live-pill.is-reconnecting .live-text")
+    && !mosaicSource.includes("tileTimer"),
+  "viewer recovery, marker, or no-extra-poll contract missing"
 );
 check(
   "viewer renders a read-only active-plan overlay with every server-calculated state at desktop and phone widths",
@@ -310,7 +324,9 @@ async function flush(ms = 0) {
 {
   const board = element("board");
   const wrap = element("canvas-wrap");
-  const harness = browserHarness(new Map([["board", board], ["canvas-wrap", wrap]]));
+  const livePill = element("live-pill");
+  const liveText = element("live-text");
+  const harness = browserHarness(new Map([["board", board], ["canvas-wrap", wrap], ["live-pill", livePill], ["live-text", liveText]]));
   const timers = fakeTimers();
   const live = fakeWebSockets();
   harness.window.WebSocket = live.WebSocketMock;
@@ -351,6 +367,14 @@ async function flush(ms = 0) {
   });
   vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
   await timers.tick(0);
+  check(
+    "a failed canvas read visibly and accessibly enters reconnecting",
+    livePill.classList.contains("is-reconnecting")
+      && liveText.textContent === "RECONNECTING"
+      && livePill.getAttribute("aria-label") === "Canvas reconnecting; last mosaic remains visible"
+      && board.width === 128 && board.height === 128,
+    JSON.stringify({ status: liveText.textContent, label: livePill.getAttribute("aria-label"), board: [board.width, board.height] })
+  );
   const socket = live.sockets[0];
   socket.open();
   for (let index = 0; index < 6; index++) {
@@ -374,11 +398,122 @@ async function flush(ms = 0) {
     attempts.get("/v1/canvas") === 2 && attempts.get("/v1/feed") === 1,
     JSON.stringify(calls)
   );
+  check(
+    "only a successful canvas read returns the compact status to live",
+    !livePill.classList.contains("is-reconnecting") && liveText.textContent === "LIVE" && livePill.getAttribute("aria-label") === "Live canvas",
+    JSON.stringify({ status: liveText.textContent, label: livePill.getAttribute("aria-label") })
+  );
   await timers.tick(5_000);
   check(
     "feed resumes only when its retry gate expires",
     attempts.get("/v1/feed") === 2,
     JSON.stringify(calls)
+  );
+  socket.close();
+  check(
+    "websocket loss alone does not report degraded while canvas fallback remains healthy",
+    !livePill.classList.contains("is-reconnecting") && liveText.textContent === "LIVE",
+    JSON.stringify({ status: liveText.textContent, label: livePill.getAttribute("aria-label") })
+  );
+  emit(harness.windowListeners, "pagehide", { persisted: false });
+}
+
+{
+  const board = element("board");
+  const wrap = element("canvas-wrap");
+  const selectedCellMarker = element("selected-cell-marker");
+  const tileInspector = element("tile-inspector");
+  const tileInspectorTitle = element("tile-inspector-title");
+  const tileInspectorState = element("tile-inspector-state");
+  const tileInspectorClose = element("tile-inspector-close");
+  const tileInspectorRetry = element("tile-inspector-retry");
+  let boardRect = { left: 240, top: 66, width: 768, height: 768 };
+  board.getBoundingClientRect = () => boardRect;
+  wrap.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1440, height: 900 });
+  const harness = browserHarness(new Map([
+    ["board", board], ["canvas-wrap", wrap], ["selected-cell-marker", selectedCellMarker],
+    ["tile-inspector", tileInspector], ["tile-inspector-title", tileInspectorTitle],
+    ["tile-inspector-state", tileInspectorState], ["tile-inspector-close", tileInspectorClose], ["tile-inspector-retry", tileInspectorRetry],
+  ]));
+  harness.document.body = element("body");
+  harness.document.activeElement = board;
+  harness.window.innerWidth = 1440;
+  harness.window.innerHeight = 900;
+  const timers = fakeTimers();
+  let tileGets = 0;
+  const context = vm.createContext({
+    ...harness,
+    fetch: async (url) => {
+      const path = new URL(url).pathname;
+      if (path === "/v1/canvas") return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#ffffff"], version: 1 }) };
+      if (path === "/v1/feed") return { ok: true, json: async () => ({ ok: true, feed: [] }) };
+      if (path === "/v1/tile") {
+        tileGets++;
+        if (tileGets === 1) return { ok: false, status: 503, headers: { get: () => null } };
+        return { ok: true, json: async () => ({ ok: true, tile: { state: "empty", protection: { protected: false, score: 0 } } }) };
+      }
+      return { ok: false, status: 404, json: async () => ({ ok: false }) };
+    },
+    AbortController,
+    URL,
+    URLSearchParams,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
+    Math,
+    JSON,
+    Date: timers.Date,
+    performance,
+    atob,
+    Element: class ElementMock {},
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
+  await timers.tick(0);
+  wrap._listeners.get("pointerdown")({ pointerId: 1, pointerType: "mouse", clientX: 300, clientY: 138 });
+  wrap._listeners.get("pointerup")({ type: "pointerup", pointerId: 1, pointerType: "mouse", clientX: 300, clientY: 138 });
+  await timers.tick(0);
+  check(
+    "desktop pointer selection keeps a thin marker on the selected cell and exposes one read-only retry after details fail",
+    tileGets === 1 && tileInspectorState.textContent === "Details unavailable" && !tileInspectorRetry.hidden
+      && !selectedCellMarker.hidden && selectedCellMarker.style.left === "300px" && selectedCellMarker.style.top === "138px" && selectedCellMarker.style.width === "6px",
+    JSON.stringify({ tileGets, state: tileInspectorState.textContent, retryHidden: tileInspectorRetry.hidden, marker: selectedCellMarker.style })
+  );
+  tileInspectorRetry._listeners.get("click")();
+  tileInspectorRetry._listeners.get("click")();
+  await timers.tick(0);
+  check(
+    "one retry action coalesces repeated clicks into at most one tile request",
+    tileGets === 2 && tileInspectorState.textContent === "Empty" && tileInspectorRetry.hidden,
+    JSON.stringify({ tileGets, state: tileInspectorState.textContent, retryHidden: tileInspectorRetry.hidden })
+  );
+  boardRect = { left: 35, top: 180, width: 320, height: 320 };
+  wrap.getBoundingClientRect = () => ({ left: 0, top: 0, width: 390, height: 844 });
+  harness.window.innerWidth = 390;
+  harness.window.innerHeight = 844;
+  emit(harness.windowListeners, "resize");
+  wrap._listeners.get("pointerdown")({ pointerId: 2, pointerType: "touch", clientX: 110, clientY: 230 });
+  wrap._listeners.get("pointerup")({ type: "pointerup", pointerId: 2, pointerType: "touch", clientX: 110, clientY: 230 });
+  await timers.tick(0);
+  harness.document.activeElement = board;
+  emit(harness.windowListeners, "keydown", { key: "ArrowRight", target: {}, preventDefault() {} });
+  await timers.tick(0);
+  boardRect = { left: 12, top: 80, width: 512, height: 512 };
+  wrap._listeners.get("wheel")({ deltaY: -1, clientX: 200, clientY: 200, preventDefault() {} });
+  check(
+    "phone touch and keyboard selection keep the static marker aligned through zoom without another polling route",
+    tileGets === 4 && !selectedCellMarker.hidden && selectedCellMarker.style.left === "136px" && selectedCellMarker.style.top === "160px" && selectedCellMarker.style.width === "4px" && timers.count() === 2,
+    JSON.stringify({ tileGets, marker: selectedCellMarker.style, timers: timers.count() })
+  );
+  let escaped = false;
+  emit(harness.windowListeners, "keydown", { key: "Escape", target: {}, preventDefault() { escaped = true; } });
+  check(
+    "escape closes the inspector, clears the marker, and returns focus to the board",
+    escaped && tileInspector.hidden && selectedCellMarker.hidden && board.focused,
+    JSON.stringify({ escaped, inspectorHidden: tileInspector.hidden, markerHidden: selectedCellMarker.hidden, boardFocused: board.focused })
   );
   emit(harness.windowListeners, "pagehide", { persisted: false });
 }

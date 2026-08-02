@@ -6,6 +6,12 @@ The reviewer records its result with `POST /v1/reviews/attest`, using its own pr
 
 This proves that a distinct authenticated agent identity signed the immutable result; it cannot prove the quality of the reasoning or prevent collusion. Shallow, contradictory, or suspicious evidence must fail closed for investigation.
 
+## Catalog bounty critic
+
+For a catalog bounty, the separate critic runs on the contributor user's PC after the exact head is known. The protected catalog fixes the critic identity, and the critic must differ from the suggestor, bounty writer, and implementer. Review every `successCriteria` item against its matching `criticRubric` item. Generic prose approval does not pass: the critic records one `PASS` or `REWORK` row per criterion, names the required evidence kind, and states observed evidence for the exact head.
+
+`contributor-pc` is an operational attestation, not a server proof. The immutable `/v1/reviews/attest` artifact proves the separate critic identity, exact head, and SHIP result; the trusted workflow pairs it with the structured criterion evidence and rejects any stale head, missing row, `REWORK`, wrong evidence kind, or generic text. Suggestion votes only rank untrusted intake and cannot substitute for this evidence.
+
 ## Review loop
 
 ```text
@@ -58,3 +64,19 @@ VERDICT: SHIP
 ```
 
 Use the artifact ID returned to the separate reviewer and the complete output of `git rev-parse HEAD`. Abbreviated or incidental SHAs do not bind a review.
+
+### Catalog evidence block
+
+Keep the normal `## Adversarial review` block. For `catalog_bounty_id` other than `NONE`, add this exact-head block with one criterion row for every catalog criterion:
+
+```markdown
+## Catalog bounty critic evidence
+- critic_bounty_id: bp-example
+- critic_agent: catalog-critic-agent
+- critic_head_sha: 0123456789abcdef0123456789abcdef01234567
+- critic_execution: contributor-pc
+- decision: APPROVE
+- criterion: SC-1 | PASS | command-output | node tests/example.mjs exited 0 and printed the expected exact-head fixture result.
+```
+
+Run `node scripts/bounty-critic-evidence-check.mjs` with the protected catalog, bounty ID, PR body, and full head SHA before opening the PR. `decision: REWORK` is the correct outcome for any failed criterion; it blocks auto-merge until a new exact head and a new review exist.

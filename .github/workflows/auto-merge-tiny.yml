@@ -20,6 +20,11 @@ on:
         required: true
         default: all
         type: string
+      attempt:
+        description: "Bounded transient retry attempt"
+        required: false
+        default: "1"
+        type: string
 
 permissions: {}
 
@@ -98,9 +103,10 @@ jobs:
           [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Exact-head merge gate check-run ID was not returned."; exit 1; }
           echo "check_id=$CHECK_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Validate exact head, lane, reviewer identity, bounty, and checks
+      - name: Validate exact head, lane, reviewer identity, catalog bounty, and checks
         id: validation
         if: steps.candidate.outputs.inactive != 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -112,17 +118,34 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] && [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "Candidate outputs are invalid."; exit 1; }
-          gh api "repos/$REPO/pulls/$PR" > /tmp/pr.json
+          gh_api_retry() {
+            local attempt=1
+            local delay=2
+            until gh api "$@"; do
+              if [ "$attempt" -ge 3 ]; then
+                echo "WAIT_RETRYABLE_GITHUB_API: bounded GitHub API retry exhausted." >&2
+                echo "retryable=true" >> "$GITHUB_OUTPUT"
+                return 75
+              fi
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          gh_api_retry "repos/$REPO/pulls/$PR" > /tmp/pr.json
           CURRENT_HEAD=$(jq -r '.head.sha' /tmp/pr.json)
           CURRENT_AUTHOR=$(jq -r '.user.login' /tmp/pr.json)
           [ "$CURRENT_HEAD" = "$HEAD" ] && [ "$CURRENT_AUTHOR" = "$AUTHOR" ] || { echo "PR identity changed after trusted check creation."; exit 1; }
           jq -e '.draft == false and .state == "open" and .base.ref == "main"' /tmp/pr.json >/dev/null
 
-          gh api --paginate --slurp "repos/$REPO/pulls/$PR/files?per_page=100" | jq 'add // []' > /tmp/files.json
+          gh_api_retry --paginate --slurp "repos/$REPO/pulls/$PR/files?per_page=100" | jq 'add // []' > /tmp/files.json
           jq -e 'length >= 1' /tmp/files.json >/dev/null || { echo "PR has no changed files."; exit 1; }
           FILES=$(jq 'length' /tmp/files.json)
           TOTAL=$(jq '[.[].changes] | add' /tmp/files.json)
           PATHS=$(jq -c '[.[].filename]' /tmp/files.json)
+          BASE=$(jq -r '.base.sha' /tmp/pr.json)
+          [[ "$BASE" =~ ^[a-f0-9]{40}$ ]] || { echo "POLICY_INVALID: PR base is not a full SHA."; exit 1; }
+          gh_api_retry "repos/$REPO/commits/$HEAD/check-runs?per_page=100" > /tmp/checks.json
           if [ "$AUTHOR" = "baney75" ]; then
             LANE=product
           elif jq -r '.[].filename' /tmp/files.json | node scripts/maintain-path-check.mjs >/tmp/lane-check.log 2>&1; then
@@ -142,16 +165,28 @@ jobs:
           mapfile -t ARTIFACTS < <(sed -nE 's/^[[:space:]]*-?[[:space:]]*review_artifact_id[[:space:]]*:[[:space:]]*(rv_[a-f0-9]{32})[[:space:]]*$/\1/p' /tmp/pr-body.md)
           [ "${#ARTIFACTS[@]}" -eq 1 ] || { echo "PR must contain exactly one immutable review_artifact_id."; exit 1; }
           ARTIFACT=${ARTIFACTS[0]}
-          curl --ipv4 --retry 3 --retry-delay 15 --retry-max-time 75 --retry-all-errors --fail-with-body -sS --http1.1 \
+          if ! curl --ipv4 --retry 3 --retry-delay 15 --retry-max-time 75 --retry-all-errors --fail-with-body -sS --http1.1 \
             -H "Accept: application/json, text/plain, */*" \
             -H "Origin: https://github.com" \
             -H "Referer: https://github.com/$REPO/pull/$PR" \
             -H "User-Agent: Mozilla/5.0 (compatible; grokplace-trusted-gate/$GITHUB_RUN_ID)" \
-            --get --data-urlencode "id=$ARTIFACT" "$REVIEW_API/v1/reviews" -o /tmp/review.json
+            --get --data-urlencode "id=$ARTIFACT" "$REVIEW_API/v1/reviews" -o /tmp/review.json; then
+            echo "WAIT_RETRYABLE_REVIEW_API: bounded review artifact lookup exhausted; no critic rejection was inferred."
+            echo "retryable=true" >> "$GITHUB_OUTPUT"
+            exit 75
+          fi
 
           AGENT=""
-          BOUNTY_ISSUE_ID=""
-          BOUNTY_APPROVAL_COMMENT_ID=""
+          CATALOG_BOUNTY_ID="NONE"
+          [ "$(field_count catalog_bounty_id)" -le 1 ] || { echo "POLICY_INVALID: PR may contain at most one catalog_bounty_id."; exit 1; }
+          if [ "$(field_count catalog_bounty_id)" = "1" ]; then
+            CATALOG_BOUNTY_ID=$(field_value catalog_bounty_id)
+            [ -n "$CATALOG_BOUNTY_ID" ] || { echo "POLICY_INVALID: catalog_bounty_id cannot be blank."; exit 1; }
+          fi
+          [ "$CATALOG_BOUNTY_ID" = "NONE" ] || [[ "$CATALOG_BOUNTY_ID" =~ ^bp-[a-z0-9]+(-[a-z0-9]+)*$ ]] || {
+            echo "POLICY_INVALID: catalog_bounty_id must be NONE or a canonical protected bounty ID."
+            exit 1
+          }
           if [ "$LANE" = "product" ]; then
             [ "$AUTHOR" = "baney75" ] || { echo "Product-lane PR author must be exactly baney75."; exit 1; }
             [ "$(field_count implementer_agent)" = "1" ] || { echo "Product PR must contain exactly one implementer_agent field."; exit 1; }
@@ -168,13 +203,21 @@ jobs:
             }
             jq -r '.[].filename' /tmp/files.json | node scripts/maintain-path-check.mjs
 
-            curl -fsS "$APP_API/v1/maintainers" -o /tmp/maintainers.json
+            if ! curl --retry 3 --retry-delay 5 --retry-max-time 45 --retry-all-errors --fail-with-body -sS "$APP_API/v1/maintainers" -o /tmp/maintainers.json; then
+              echo "WAIT_RETRYABLE_MAINTAINER_API: bounded maintainer lookup exhausted."
+              echo "retryable=true" >> "$GITHUB_OUTPUT"
+              exit 75
+            fi
             jq -e --arg user "$AUTHOR" '[.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active")] | length == 1' /tmp/maintainers.json >/dev/null || {
               echo "Author must resolve to exactly one active grok/place maintainer."
               exit 1
             }
             AGENT=$(jq -r --arg user "$AUTHOR" '.maintainers[] | select((.github | ascii_downcase) == ($user | ascii_downcase) and .status == "active") | .agent' /tmp/maintainers.json)
-            curl -fsS --get --data-urlencode "agent=$AGENT" "$APP_API/v1/bank" -o /tmp/bank.json
+            if ! curl --retry 3 --retry-delay 5 --retry-max-time 45 --retry-all-errors --fail-with-body -sS --get --data-urlencode "agent=$AGENT" "$APP_API/v1/bank" -o /tmp/bank.json; then
+              echo "WAIT_RETRYABLE_BANK_API: bounded bank lookup exhausted."
+              echo "retryable=true" >> "$GITHUB_OUTPUT"
+              exit 75
+            fi
             jq -e '.ok == true and .bank.bankCap == 200 and .bank.bonusTiles >= 0 and .bank.bonusTiles <= 190' /tmp/bank.json >/dev/null || {
               echo "Maintainer bank cannot accept the fixed 10-tile award."
               exit 1
@@ -182,42 +225,33 @@ jobs:
 
             HEAD_SHA="$HEAD" node scripts/adversarial-review-check.mjs --body-file /tmp/pr-body.md --head-sha "$HEAD"
             node scripts/review-artifact-check.mjs --mode maintainer --file /tmp/review.json --artifact "$ARTIFACT" --head "$HEAD" --implementer-agent "$AGENT" --author-github "$AUTHOR" --require-verified-maintainer
-
-            [ "$(field_count bounty_issue)" = "1" ] || { echo "PR must contain exactly one bounty_issue field."; exit 1; }
-            [ "$(field_count bounty_approval_comment)" = "1" ] || { echo "PR must contain exactly one bounty_approval_comment field."; exit 1; }
-            BOUNTY_ISSUE=$(field_value bounty_issue)
-            BOUNTY_COMMENT=$(field_value bounty_approval_comment)
-            [ -n "$BOUNTY_ISSUE" ] && [ -n "$BOUNTY_COMMENT" ] || { echo "Bounty fields must contain one non-whitespace value each."; exit 1; }
-            if [ "$BOUNTY_ISSUE" = "NONE" ] && [ "$BOUNTY_COMMENT" = "NONE" ]; then
-              : # Ordinary maintenance: no bounty identity is sent to the award service.
-            elif [ "$BOUNTY_ISSUE" = "NONE" ] || [ "$BOUNTY_COMMENT" = "NONE" ]; then
-              echo "A claimed bounty requires both bounty_issue and bounty_approval_comment; otherwise use NONE for both."
-              exit 1
-            else
-              ISSUE_PREFIX="https://github.com/$REPO/issues/"
-              [[ "$BOUNTY_ISSUE" == "$ISSUE_PREFIX"* ]] || { echo "Bounty issue URL must name this repository."; exit 1; }
-              BOUNTY_ISSUE_ID=${BOUNTY_ISSUE#"$ISSUE_PREFIX"}
-              [[ "$BOUNTY_ISSUE_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Bounty issue URL must be canonical and numeric."; exit 1; }
-              COMMENT_PREFIX="${ISSUE_PREFIX}${BOUNTY_ISSUE_ID}#issuecomment-"
-              [[ "$BOUNTY_COMMENT" == "$COMMENT_PREFIX"* ]] || { echo "Bounty approval URL must bind to the exact bounty issue in this repository."; exit 1; }
-              BOUNTY_APPROVAL_COMMENT_ID=${BOUNTY_COMMENT#"$COMMENT_PREFIX"}
-              [[ "$BOUNTY_APPROVAL_COMMENT_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Bounty approval comment URL must be canonical and numeric."; exit 1; }
-
-              gh api "repos/$REPO/issues/$BOUNTY_ISSUE_ID" > /tmp/bounty-issue.json
-              jq -e --argjson issue "$BOUNTY_ISSUE_ID" '.number == $issue and .state == "open" and (.pull_request? == null) and ([.labels[]?.name] | index("bounty")) != null' /tmp/bounty-issue.json >/dev/null || {
-                echo "Bounty issue must remain open, be an issue (not a PR), and carry the bounty label."
-                exit 1
-              }
-              gh api "repos/$REPO/issues/comments/$BOUNTY_APPROVAL_COMMENT_ID" > /tmp/bounty-comment.json
-              ISSUE_API_URL="https://api.github.com/repos/$REPO/issues/$BOUNTY_ISSUE_ID"
-              jq -e --argjson comment "$BOUNTY_APPROVAL_COMMENT_ID" --arg commentUrl "$BOUNTY_COMMENT" --arg issueUrl "$ISSUE_API_URL" --arg phrase "BOUNTY APPROVED" '.id == $comment and .html_url == $commentUrl and .issue_url == $issueUrl and .user.login == "baney75" and ((.body | strings | gsub("^[[:space:]]+|[[:space:]]+$"; "")) == $phrase)' /tmp/bounty-comment.json >/dev/null || {
-                echo "Bounty approval must be the exact trimmed @baney75 comment body: BOUNTY APPROVED"
-                exit 1
-              }
-            fi
+            IMPLEMENTER_AGENT="$AGENT"
           fi
 
-          gh api "repos/$REPO/commits/$HEAD/check-runs?per_page=100" > /tmp/checks.json
+          if [ "$CATALOG_BOUNTY_ID" != "NONE" ]; then
+            CATALOG_HEAD=$(git rev-parse HEAD)
+            CRITIC_AGENT=$(jq -r '.review.reviewerAgent // empty' /tmp/review.json)
+            node scripts/bounty-preflight.mjs \
+              --catalog bounties/catalog.json \
+              --mirror BOUNTIES.md \
+              --bounty "$CATALOG_BOUNTY_ID" \
+              --base "$BASE" \
+              --head "$HEAD" \
+              --catalog-head "$CATALOG_HEAD" \
+              --default-branch-head "$CATALOG_HEAD" \
+              --lane "$LANE" \
+              --author-github "$AUTHOR" \
+              --implementer-agent "$IMPLEMENTER_AGENT" \
+              --critic-agent "$CRITIC_AGENT" \
+              --files /tmp/files.json \
+              --checks /tmp/checks.json
+            node scripts/bounty-critic-evidence-check.mjs \
+              --catalog bounties/catalog.json \
+              --bounty "$CATALOG_BOUNTY_ID" \
+              --body-file /tmp/pr-body.md \
+              --head "$HEAD"
+          fi
+
           jq -e '[.check_runs[] | select((.name == "Tiny perfect PR" or .name == "Secret scan") and .app.id == 15368 and .status == "completed" and .conclusion == "success") | .name] | unique | sort == ["Secret scan", "Tiny perfect PR"]' /tmp/checks.json >/dev/null
 
           {
@@ -225,12 +259,13 @@ jobs:
             echo "files=$FILES"
             echo "total=$TOTAL"
             echo "paths=$PATHS"
-            echo "bounty_issue=$BOUNTY_ISSUE_ID"
-            echo "bounty_approval_comment_id=$BOUNTY_APPROVAL_COMMENT_ID"
+            echo "catalog_bounty_id=$CATALOG_BOUNTY_ID"
           } >> "$GITHUB_OUTPUT"
 
       - name: Reserve the exact maintain award before merge
-        if: steps.validation.outputs.lane == 'maintain'
+        id: reservation
+        if: steps.validation.outcome == 'success' && steps.validation.outputs.lane == 'maintain'
+        continue-on-error: true
         env:
           AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
           API: https://grokplace.projectbarnlab.workers.dev
@@ -240,18 +275,23 @@ jobs:
           FILES: ${{ steps.validation.outputs.files }}
           TOTAL: ${{ steps.validation.outputs.total }}
           PATHS: ${{ steps.validation.outputs.paths }}
-          BOUNTY_ISSUE: ${{ steps.validation.outputs.bounty_issue }}
-          BOUNTY_APPROVAL_COMMENT_ID: ${{ steps.validation.outputs.bounty_approval_comment_id }}
         run: |
           set -euo pipefail
           [ -n "${AWARD_SECRET:-}" ] || { echo "AWARD_SECRET is not configured."; exit 1; }
-          BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --argjson files "$FILES" --argjson lines "$TOTAL" --argjson paths "$PATHS" --arg bountyIssue "${BOUNTY_ISSUE:-}" --arg bountyApprovalCommentId "${BOUNTY_APPROVAL_COMMENT_ID:-}" '{phase:"reserve",github:$github,prNumber:$pr,headSha:$head,filesChanged:$files,linesChanged:$lines,paths:$paths} + (if $bountyIssue == "" and $bountyApprovalCommentId == "" then {} else {bountyIssue: ($bountyIssue | tonumber), bountyApprovalCommentId: ($bountyApprovalCommentId | tonumber)} end)')
-          curl --retry 5 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/reserve.json
+          BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --argjson files "$FILES" --argjson lines "$TOTAL" --argjson paths "$PATHS" '{phase:"reserve",github:$github,prNumber:$pr,headSha:$head,filesChanged:$files,linesChanged:$lines,paths:$paths}')
+          if ! curl --retry 5 --retry-max-time 75 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/reserve.json; then
+            echo "WAIT_RETRYABLE_AWARD_RESERVE: bounded idempotent reservation retry exhausted."
+            echo "retryable=true" >> "$GITHUB_OUTPUT"
+            exit 75
+          fi
           jq -e '.ok == true and (.reserved == true or .already == true)' /tmp/reserve.json >/dev/null
 
       - name: Publish successful exact-head merge gate
         id: trusted_success
-        if: steps.candidate.outputs.inactive != 'true'
+        if: >-
+          steps.candidate.outputs.inactive != 'true' &&
+          steps.validation.outcome == 'success' &&
+          (steps.validation.outputs.lane != 'maintain' || steps.reservation.outcome == 'success')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -266,11 +306,42 @@ jobs:
           gh api "repos/$REPO/check-runs/$CHECK_ID" > /tmp/trusted-check.json
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "merge-and-award" and .app.id == 15368 and .status == "in_progress"' /tmp/trusted-check.json >/dev/null
           COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="success" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted merge gate passed' -f 'output[summary]=Exact-head reviewer, lane, bounty, and reservation gates passed.' > /tmp/trusted-success.json
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="success" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted merge gate passed' -f 'output[summary]=Exact-head reviewer, catalog scope, required checks, and reservation gates passed.' > /tmp/trusted-success.json
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "merge-and-award" and .app.id == 15368 and .status == "completed" and .conclusion == "success"' /tmp/trusted-success.json >/dev/null
 
+      - name: Publish retryable wait and redispatch
+        id: retry_wait
+        if: >-
+          always() && steps.candidate.outputs.inactive != 'true' &&
+          steps.candidate.outputs.check_id != '' &&
+          (steps.validation.outputs.retryable == 'true' || steps.reservation.outputs.retryable == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.candidate.outputs.pr }}
+          HEAD: ${{ steps.candidate.outputs.head }}
+          CHECK_ID: ${{ steps.candidate.outputs.check_id }}
+          ATTEMPT: ${{ github.event_name == 'workflow_dispatch' && inputs.attempt || '1' }}
+        run: |
+          set -euo pipefail
+          [[ "$ATTEMPT" =~ ^[1-3]$ ]] || ATTEMPT=1
+          COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="cancelled" -f completed_at="$COMPLETED_AT" -f 'output[title]=Waiting on transient infrastructure' -f 'output[summary]=No critic rejection occurred. A bounded local gate retry will run automatically.' >/dev/null
+          if [ "$ATTEMPT" -lt 3 ]; then
+            NEXT=$((ATTEMPT + 1))
+            sleep $((ATTEMPT * 15))
+            gh workflow run auto-merge-tiny.yml --repo "$REPO" -f action=merge -f pr="$PR" -f attempt="$NEXT"
+            echo "Scheduled bounded retry $NEXT/3 for PR #$PR at exact head $HEAD."
+          else
+            echo "Bounded immediate retries exhausted without critic rejection; the next exact-head PR-quality event may retry."
+          fi
+
       - name: Publish failed exact-head merge gate
-        if: ${{ always() && steps.candidate.outputs.inactive != 'true' && steps.candidate.outputs.check_id != '' && steps.trusted_success.outcome != 'success' }}
+        if: >-
+          always() && steps.candidate.outputs.inactive != 'true' &&
+          steps.candidate.outputs.check_id != '' &&
+          steps.trusted_success.outcome != 'success' &&
+          steps.retry_wait.outcome != 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -282,12 +353,12 @@ jobs:
           gh api "repos/$REPO/check-runs/$CHECK_ID" > /tmp/trusted-check.json
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "merge-and-award" and .app.id == 15368' /tmp/trusted-check.json >/dev/null
           COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="failure" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted merge gate failed' -f 'output[summary]=The exact-head separate-agent artifact or lane validation failed; merge remains blocked. See the job log for the rejected gate.' > /tmp/trusted-failure.json
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="failure" -f completed_at="$COMPLETED_AT" -f 'output[title]=Trusted merge gate blocked' -f 'output[summary]=A fail-closed policy gate or bounded retryable upstream wait blocked this exact head. Read the machine-readable code in the job log; this is not a critic rejection unless it reports a CRITIC_* code.' > /tmp/trusted-failure.json
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "merge-and-award" and .app.id == 15368 and .status == "completed" and .conclusion == "failure"' /tmp/trusted-failure.json >/dev/null
 
       - name: Merge the exact eligible head
         id: merge
-        if: steps.candidate.outputs.inactive != 'true'
+        if: steps.trusted_success.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -321,7 +392,8 @@ jobs:
           echo "Exact-head auto-merge is enabled; durable reconciliation will finalize a maintenance award after GitHub completes the merge."
 
       - name: Finalize the reserved maintain award
-        if: steps.validation.outputs.lane == 'maintain'
+        if: steps.merge.outcome == 'success' && steps.validation.outputs.lane == 'maintain'
+        continue-on-error: true
         env:
           AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
           API: https://grokplace.projectbarnlab.workers.dev
@@ -338,7 +410,10 @@ jobs:
           }
           MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha')
           BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --arg merge "$MERGE_SHA" '{phase:"finalize",github:$github,prNumber:$pr,headSha:$head,mergeSha:$merge}')
-          curl --retry 10 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/award.json
+          if ! curl --retry 10 --retry-max-time 120 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/award.json; then
+            echo "WAIT_RETRYABLE_AWARD_FINALIZE: bounded idempotent finalization retry exhausted."
+            exit 75
+          fi
           jq -e '.ok == true and (.awarded == 10 or .already == true)' /tmp/award.json >/dev/null
 
   reconcile-reservations:
@@ -349,6 +424,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Reconcile durable reservations
+        continue-on-error: true
         env:
           AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
           API: https://grokplace.projectbarnlab.workers.dev
@@ -360,11 +436,18 @@ jobs:
           [ -n "${AWARD_SECRET:-}" ] || { echo "AWARD_SECRET is not configured."; exit 1; }
           [ "${ONLY_PR:-}" != "all" ] || ONLY_PR=""
           CURSOR=""
+          PAGES=0
+          MAX_RECONCILE_PAGES=20
           while :; do
+            PAGES=$((PAGES + 1))
+            [ "$PAGES" -le "$MAX_RECONCILE_PAGES" ] || {
+              echo "WAIT_RETRYABLE_RECONCILE_PAGE_CAP: stopped after $MAX_RECONCILE_PAGES pages; the next scheduled bounded reconciliation will continue."
+              exit 0
+            }
             if [ -n "$CURSOR" ]; then
-              curl --retry 5 --retry-all-errors --fail-with-body -sS --get "$API/v1/maintain/reservations" --data-urlencode "cursor=$CURSOR" -H "Authorization: Bearer $AWARD_SECRET" -o /tmp/reservations.json
+              curl --retry 5 --retry-max-time 75 --retry-all-errors --fail-with-body -sS --get "$API/v1/maintain/reservations" --data-urlencode "cursor=$CURSOR" -H "Authorization: Bearer $AWARD_SECRET" -o /tmp/reservations.json
             else
-              curl --retry 5 --retry-all-errors --fail-with-body -sS "$API/v1/maintain/reservations" -H "Authorization: Bearer $AWARD_SECRET" -o /tmp/reservations.json
+              curl --retry 5 --retry-max-time 75 --retry-all-errors --fail-with-body -sS "$API/v1/maintain/reservations" -H "Authorization: Bearer $AWARD_SECRET" -o /tmp/reservations.json
             fi
             jq -c '.reservations[]' /tmp/reservations.json | while read -r RESERVATION; do
               PR=$(jq -r '.prNumber' <<<"$RESERVATION")
@@ -378,10 +461,10 @@ jobs:
               if [ "$MERGED" = "true" ] && [ "$CURRENT" = "$HEAD" ]; then
                 MERGE_SHA=$(jq -r '.merge_commit_sha' /tmp/reconcile-pr.json)
                 BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --arg merge "$MERGE_SHA" '{phase:"finalize",github:$github,prNumber:$pr,headSha:$head,mergeSha:$merge}')
-                curl --retry 10 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY"
+                curl --retry 10 --retry-max-time 120 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY"
               elif [ "$STATE" = "closed" ] || [ "$CURRENT" != "$HEAD" ]; then
                 BODY=$(jq -n --argjson pr "$PR" --arg head "$HEAD" '{phase:"cancel",prNumber:$pr,headSha:$head,reason:"closed unmerged or head changed"}')
-                curl --retry 5 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY"
+                curl --retry 5 --retry-max-time 75 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY"
               fi
             done
             NEXT=$(jq -r '.nextCursor // empty' /tmp/reservations.json)
