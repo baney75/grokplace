@@ -55,23 +55,30 @@ check(
   "open-inspector responsive state missing"
 );
 check(
-  "painter attribution binds a CSS brush tip and escaped nametag to the exact feed color",
+  "painter attribution binds a physical layered brush and escaped nametag to the exact feed color",
   /color: string/.test(mosaicSource)
     && /entry\.color, index \* 90/.test(mosaicSource)
     && /setProperty\("--brush-color", t\.color\)/.test(mosaicSource)
-    && /class="brush-tip"/.test(mosaicSource)
+    && /class="brush-handle"><span class="brush-grain"/.test(mosaicSource)
+    && /class="brush-ferrule"/.test(mosaicSource)
+    && /class="brush-bristle"/.test(mosaicSource)
+    && /class="brush-paint-tip"/.test(mosaicSource)
     && /class="who">\$\{escapeHtml\(t\.agent\)\}/.test(mosaicSource)
     && /background:var\(--brush-color,#fff\)/.test(mosaicStyles),
   "paintbrush color or escaped nametag binding missing"
 );
 check(
-  "painter attribution is ordered, bounded, motion-aware, and cleared when polling pauses",
+  "painter attribution is ordered, bounded, direction-aware, and cleared when polling pauses",
   /fresh\.sort\(\(a, b\) => a\.t - b\.t \|\| a\.batchOrder - b\.batchOrder\)\.slice\(-8\)/.test(mosaicSource)
     && /nameTags\.length > 24/.test(mosaicSource)
     && /delayMs: Math\.max\(0, Math\.min\(630, delayMs\)\)/.test(mosaicSource)
+    && /Math\.atan2\(dy, dx\)/.test(mosaicSource)
+    && /--brush-travel-x/.test(mosaicSource)
     && /clearPainterTags\(\);/.test(mosaicSource)
-    && /@keyframes brush-paint/.test(mosaicStyles)
-    && /prefers-reduced-motion:reduce/.test(mosaicStyles),
+    && /@keyframes brush-travel/.test(mosaicStyles)
+    && /@keyframes bristle-compress/.test(mosaicStyles)
+    && /prefers-reduced-motion:reduce/.test(mosaicStyles)
+    && /\.brush-tool,.brush-bristles \{ animation:none !important; \}/.test(mosaicStyles),
   "painter lifecycle or reduced-motion contract missing"
 );
 

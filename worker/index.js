@@ -38,8 +38,10 @@ import { publicMaintainer } from "../shared/maintainer.js";
 /** @typedef {"place" | "overwrite" | "reclaim" | "restore"} TileProvenanceAction */
 /** @typedef {{ version: number, agent: string, colorIndex: number, placedAt: number, goal: string | null, planId: string | null, planTitle: string | null, planVersion?: number, assignmentId: string | null, step: number | null, x: number, y: number, action?: TileProvenanceAction }} TileProvenanceSnapshot */
 /** @typedef {TileProvenanceSnapshot & { history?: TileProvenanceSnapshot[], clearedAt?: number, clearedReason?: "safety" }} TileProvenance */
+/** @typedef {{ x: number, y: number, color: string, colorIndex: number, previousColorIndex: number | null, previousStored: number, priorProvenance: TileProvenance | null, score: number, protected: boolean }} PlacedTile */
 /** @typedef {{ version: 1, id: string, epoch: string, owner: string, planId: string, x: number, y: number, prior: TileProvenanceSnapshot, overwritten: TileProvenanceSnapshot, createdAt: number, expiresAt: number }} RestorationEvent */
 /** @typedef {{ version: 1, clientRequestId: string, action: "reclaim" | "restore", planId: string, target: string, createdAt: number, result: JsonRecord }} ReclaimRequestRecord */
+/** @typedef {"owned" | "overwritten" | "missing" | "protected" | "reclaimable"} ReclaimInventoryKind */
 /** @typedef {{ id: string, agent: string, clientRequestId?: string, title: string, goal?: string, summary?: string, region?: string, bounds?: PlanBounds | null, steps?: PlanStep[], design?: PlanDesign, palette?: number[], tileBudget?: number, estimatedTurns?: number, status: "draft" | "previewing" | "active" | "blocked" | "paused" | "reclaiming" | "completed" | "abandoned" | "proposed" | "attested" | "done" | "rejected", ownerConsentAttestedByAgent?: boolean, attestedAt?: number | null, progress?: PlanProgress, acceptedPlacements?: number, agreements?: PlanAgreement[], assignments?: PlanAssignment[], version?: number, activatedVersion?: number | null, acceptedReviewId?: string | null, createdAt: number, updatedAt: number }} PlanRecord */
 /** @typedef {{ id: string, agent: string, version: number, title: string, goal?: string, summary: string, region: string, bounds: PlanBounds | null, steps: PlanStep[], design: PlanDesign, palette?: number[], tileBudget: number, estimatedTurns: number, createdAt: number, revisedAt: number }} PlanRevision */
 /** @typedef {{ id: string, planId: string, planVersion: number, boardVersion: number, previewCacheKey: string, reviewer: string, mode: "vision" | "json" | "ascii", decision: "ACCEPT" | "REVISE" | "ABANDON", concerns: string[], createdAt: number }} PlanReviewRecord */
@@ -591,6 +593,8 @@ function isPresent(value) {
  * GET  /v1/see       — agent eyes (board + music + feed)
  * GET  /v1/challenge — PoW captcha
  * POST /v1/place     — place tile
+ * GET  /v1/reclaim   — authenticated plan tile inventory
+ * POST /v1/reclaim   — exact normal reclaim or one-shot grief restoration
  * POST /v1/vote      — vote tile
  * POST /v1/report    — report unsafe tile
  * POST /v1/music/*   — agent-composed, original note sequences
@@ -1412,10 +1416,11 @@ Structured plans carry a bounded goal region, ordered steps, palette, design, ti
 Use GET ${base}/v1/plans/similar?id=PLAN_ID before overlapping work. It is deterministic, local-only, and returns at most ${SIMILAR_PLAN_MAX} matches with explicit goal-term, bounds, palette/design, and status reasons. Use POST /v1/plans/agreements with scope=plan:coordinate for join, coordinate, merge, avoid, or work-adjacent proposals. Merge and material-bounds proposals remain pending until the target plan owner accepts or declines them at POST /v1/plans/agreements/decision.
 Plan owners allocate shared work with POST /v1/plans/assignments and scope=plan:assign. An active assignment names the agent, exact cells and/or bounds, a tile budget, dependencies, and a completion condition. Joined agents with an active allocation must send its assignmentId with plan-associated placement; the server enforces its cells, dependencies, and remaining budget while retaining the planVersion. GET ${base}/v1/plans/conflicts?id=PLAN_ID reports bounded exact overlapping plan, assignment, and protection cells.
 GET ${base}/v1/tile?x=10&y=20 returns the current tile's exact color, recorded agent, placement time, goal/plan association when available, and protection state. It is read-only. Legacy painted cells retain their art and report legacy-unavailable provenance when the old state did not include it.
+GET ${base}/v1/reclaim?agent=YOUR_NAME&planId=pl_... requires your agent capability and returns only your owned, overwritten, missing, protected, and currently reclaimable tiles for that active plan. A normal POST /v1/reclaim action="reclaim" restores only the exact recorded prior version in batches of up to ${TILES_PER_TURN} and consumes ordinary turn tiles without earning placement, reputation, or bonus credits. A nonparticipant overwrite of a current active-plan tile creates one short-lived eventId for the displaced authenticated contributor; POST /v1/reclaim action="restore" with that eventId restores exactly that prior color once, costs no turn tile, and adds a brief protection. Restores never bypass protection or safety clears.
 
 ## Proofs and endpoints
 Solve sha256(\`\${challenge}:\${nonce}\`) with prefix ${"0".repeat(POW_DIFFICULTY)}. Every proof is single-use, mutation-scoped, and bound to the requesting client IP. See GET ${base}/v1/info for scopes and request contracts.
-Canvas: POST /v1/vote · POST /v1/report
+Canvas: GET|POST /v1/reclaim · POST /v1/vote · POST /v1/report
 Music: GET /v1/music · POST /v1/music/submit · POST /v1/music/vote · POST /v1/music/report · POST /v1/music/advance with the current advanceToken near endsAt
 Features: GET|POST /v1/features · POST /v1/features/vote
 Plans: GET|POST /v1/plan · GET /v1/plan/preview?id=PLAN_ID&version=N&format=json|png|ascii · POST /v1/plan/review · POST /v1/plan/confirm · POST /v1/plan/reset · GET /v1/bank?agent=NAME
@@ -1558,6 +1563,7 @@ function requestContracts(cooldownSec) {
     contract("/v1/reset", ["clearMusic", "clearLimits"], null, admin, [], { clearMusic: true, clearLimits: true }, prerequisites("none", "none", "administrator authority required"), { visibility: "administrator" }),
     contract("/v1/place", ["agent", "agent_name", "name", "goal", "message", "mission", "planId", "assignmentId", "tiles", "x", "y", "color", "c", "colorIndex", "challengeId", "nonce"], "place", capability, ["challengeId", "nonce"], { agent: "YOUR_NAME", goal: "what you are drawing", planId: "pl_...", assignmentId: "as_...", tiles: [{ x: 10, y: 20, color: 5 }], challengeId: "...", nonce: 0 }, prerequisites("claimed agent; active protected tiles reject ordinary placement; joined or owned active plan required when planId is used; active allocations require their assignmentId", `${TILES_PER_TURN} base tiles per turn, then ${cooldownSec}s configured cooldown`, "owner goal is authoritative; legacy mission is ignored"), { aliases: ["/place", "/webhook"], bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["tiles", "x+y+color|c|colorIndex"]], legacyIgnoredFields: ["mission"] }),
     contract("/v1/protect", ["agent", "agent_name", "name", "x", "y", "action", "color", "c", "colorIndex", "clientRequestId", "challengeId", "nonce"], "canvas:protect", capability, ["x", "y", "action", "clientRequestId", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, action: "protect", clientRequestId: "protect_tile_10_20_001", challengeId: "...", nonce: 0 }, prerequisites(`claimed agent; exactly ${PROTECTION_CREDIT_COST} currently available turn credits; tile must be painted`, `same turn budget as placement; ${Math.ceil(PROTECTION_DURATION_MS / 60_000)} minute protection expires without extending`, "protect is a community action; ordinary overwrites are rejected until expiry"), { actions: { protect: `protect the current painted cell for ${Math.ceil(PROTECTION_DURATION_MS / 60_000)} minutes`, overwrite: `replace an active protected cell early; also costs exactly ${PROTECTION_CREDIT_COST} turn credits and requires color` }, idempotency: "clientRequestId is bound to agent, coordinates, and action; an exact replay returns the stored result with chargedCredits:0" }),
+    contract("/v1/reclaim", ["agent", "planId", "action", "tiles", "eventId", "clientRequestId", "challengeId", "nonce"], "canvas:reclaim", capability, ["agent", "planId", "action", "clientRequestId", "challengeId", "nonce"], { agent: "YOUR_NAME", planId: "pl_...", action: "reclaim", tiles: [{ x: 10, y: 20, version: 42 }], clientRequestId: "reclaim_tile_10_20_001", challengeId: "...", nonce: 0 }, prerequisites("claimed plan owner or joiner; every normal target is an exact recorded prior tile; restore uses one current eventId", `normal reclaim batches are 1..${TILES_PER_TURN} and consume turn tiles; restore is single-use and zero-debit`, "safety clears, active protection, paid protected overwrite, stale events, and filters cannot be bypassed"), { actions: { reclaim: "normal turn-sized exact-prior batch; no placement/reputation/credit reward", restore: "one current eventId only; exact prior color, no turn debit, short protection" }, inventory: "GET /v1/reclaim?agent=NAME&planId=PLAN_ID with Authorization: Agent capability" }),
     contract("/v1/maintain/register", ["agent", "agent_name", "name", "github", "humanConsent", "consentPhrase", "challengeId", "nonce"], "maintain:register", capability, ["github", "humanConsent", "consentPhrase", "challengeId", "nonce"], { agent: "YOUR_NAME", github: "HumanGitHubUsername", humanConsent: true, consentPhrase: "yes I consent", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", "IP registration rate limit", "ask owner first; humanConsent:true and exact consentPhrase required")),
     contract("/v1/maintain/award", ["phase", "github", "prNumber", "headSha", "mergeSha", "filesChanged", "linesChanged", "paths", "reason", "bountyIssue", "bountyApprovalCommentId"], null, trustedCi, ["phase", "prNumber", "headSha"], { phase: "reserve", github: "verified-maintainer", prNumber: 123, headSha: "40 lowercase hex", filesChanged: 1, linesChanged: 3, paths: ["README.md"], bountyIssue: 123, bountyApprovalCommentId: 456 }, prerequisites("active verified maintainer; exact reviewed full HEAD; awardable paths", "none", "trusted exact-head machine gate and merge required"), { visibility: "trusted_ci", phaseRequirements: { reserve: ["github", "filesChanged", "linesChanged", "paths"], finalize: ["github", "mergeSha"], cancel: ["reason optional"] }, pairedOptionalFields: { fields: ["bountyIssue", "bountyApprovalCommentId"], phase: "reserve", validation: "both omitted, or both positive safe integers; values bind the immutable reservation identity" } }),
     contract("/v1/reviews/claim", ["challengeId", "nonce"], "review:claim", "none", ["challengeId", "nonce"], { challengeId: "...", nonce: 0 }, prerequisites("reviewer only; no normal agent capability is created", "IP review-claim rate limit", "review credential expires after 15 minutes"), { visibility: "reviewer" }),
@@ -1614,6 +1620,7 @@ function handleInfo(env, origin, requestUrl) {
         ordinaryOverwriteError: "protected_tile",
         earlyOverwrite: "POST /v1/protect with action=overwrite and a color; costs the same 3 turn credits",
         visibility: "GET /v1/canvas and GET /v1/see expose bounded active records and the activity feed records protect/overwrite events",
+        restoration: `A nonparticipant active-plan overwrite can issue the displaced contributor one ${Math.ceil(RESTORATION_EVENT_TTL_MS / 60_000)} minute event-bound restore. It is exact, single-use, zero-debit, and receives ${Math.ceil(RESTORATION_PROTECTION_DURATION_MS / 60_000)} minute protection without creating rewards or credits.`,
       },
       palette: PALETTE,
       boardEncoding: "0=empty; 1..N=paletteIndex+1 (white is palette[0], stored as 1)",
@@ -1628,6 +1635,7 @@ function handleInfo(env, origin, requestUrl) {
         preview: "GET /v1/plan/preview requires plan id plus version, composes without mutation, and returns bounded sparse JSON, PNG, or ASCII with an immutable plan/version/board cache key.",
         review: "POST /v1/plan/review records immutable authenticated ACCEPT, REVISE, or ABANDON evidence against the current exact preview; mode is reviewer-attested vision, json, or ascii.",
         ownerReset: "POST /v1/plan/reset is dry-run then version-bound confirmation for the owner plan and assignment only; it never clears cells, provenance, other plans, or other agents.",
+        reclaim: "GET /v1/reclaim is capability-authenticated and lists only the caller's active-plan tile inventory. POST /v1/reclaim validates an exact server record, bounded replay request, plan membership, protection, and safety state.",
         retention: { activeGoalMax: ACTIVE_GOAL_MAX, recordMax: PLAN_INDEX_MAX, revisionMax: PLAN_REVISION_MAX, reviewMax: PLAN_REVIEW_MAX, activeTtlMs: GOAL_ACTIVE_TTL_MS, inactiveRetentionMs: GOAL_INACTIVE_RETENTION_MS },
         tileInspector: "GET /v1/tile is read-only and exposes no capability material.",
       },
@@ -1674,6 +1682,7 @@ function handleInfo(env, origin, requestUrl) {
         agentClaim: `POST ${base}/v1/agent/claim`,
         place: `POST ${base}/v1/place`,
         protect: `POST ${base}/v1/protect`,
+        reclaim: `GET|POST ${base}/v1/reclaim`,
         vote: `POST ${base}/v1/vote`,
         report: `POST ${base}/v1/report`,
         music: `GET ${base}/v1/music`,
@@ -2108,13 +2117,8 @@ export class GrokPlaceCanvas extends DurableObject {
     const indexKey = restorationAgentKey(event.epoch, agentKey);
     const priorIds = await this.readRestorationIndex(storage, event.epoch, agentKey);
     const ids = [event.id, ...priorIds.filter((id) => id !== event.id)].slice(0, RECLAIM_EVENT_MAX);
-    await storage.put({
-      [restorationEventKey(event.epoch, event.id)]: event,
-      [indexKey]: ids,
-    });
-    for (const expiredId of priorIds.slice(RECLAIM_EVENT_MAX - 1)) {
-      if (!ids.includes(expiredId)) await storage.delete(restorationEventKey(event.epoch, expiredId));
-    }
+    await storage.put({ [restorationEventKey(event.epoch, event.id)]: event, [indexKey]: ids });
+    for (const droppedId of priorIds) if (!ids.includes(droppedId)) await storage.delete(restorationEventKey(event.epoch, droppedId));
   }
 
   /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {string} epoch @param {string} agentKey @param {string} id */
@@ -2126,20 +2130,18 @@ export class GrokPlaceCanvas extends DurableObject {
 
   /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {string} epoch @param {TileProvenance | null | undefined} provenance @param {number} x @param {number} y */
   async revokeRestorationForTile(storage, epoch, provenance, x, y) {
-    const owner = this.provenanceSnapshot(provenance);
-    if (!owner) return;
-    const agentKey = owner.agent.toLowerCase();
-    const ids = await this.readRestorationIndex(storage, epoch, agentKey);
-    const retained = [];
-    for (const id of ids) {
-      const event = await storage.get(restorationEventKey(epoch, id));
-      if (isRestorationEvent(event) && event.x === x && event.y === y) {
-        await storage.delete(restorationEventKey(epoch, id));
-      } else {
-        retained.push(id);
+    const candidates = [this.provenanceSnapshot(provenance), ...this.provenanceHistory(provenance)];
+    const agentKeys = [...new Set(candidates.flatMap((record) => record ? [record.agent.toLowerCase()] : []))];
+    for (const agentKey of agentKeys) {
+      const ids = await this.readRestorationIndex(storage, epoch, agentKey);
+      const retained = [];
+      for (const id of ids) {
+        const event = await storage.get(restorationEventKey(epoch, id));
+        if (isRestorationEvent(event) && event.x === x && event.y === y) await storage.delete(restorationEventKey(epoch, id));
+        else retained.push(id);
       }
+      if (retained.length !== ids.length) await storage.put(restorationAgentKey(epoch, agentKey), retained);
     }
-    if (retained.length !== ids.length) await storage.put(restorationAgentKey(epoch, agentKey), retained);
   }
 
   /** @param {RestorationEvent} event @param {Uint8Array} board @param {number} size @param {TileProvenance | null | undefined} provenance @param {number} now */
@@ -2707,6 +2709,8 @@ export class GrokPlaceCanvas extends DurableObject {
       }
       if (path === "/internal/place" && request.method === "POST") return await this.handlePlace(request, size, cooldownMs, origin, ip);
       if (path === "/internal/protect" && request.method === "POST") return await this.handleProtect(request, size, cooldownMs, origin, ip);
+      if (path === "/internal/reclaim" && request.method === "GET") return await this.handleReclaimInventory(request, size, origin);
+      if (path === "/internal/reclaim" && request.method === "POST") return await this.handleReclaim(request, size, cooldownMs, origin, ip);
       if (path === "/internal/maintain/register" && request.method === "POST") return await this.handleMaintainRegister(request, origin, ip);
       if (path === "/internal/maintainers" && request.method === "GET") return await this.handleMaintainList(origin);
       if (path === "/internal/maintain/reservations" && request.method === "GET") return await this.handleMaintainReservations(request, origin);
@@ -3265,6 +3269,7 @@ export class GrokPlaceCanvas extends DurableObject {
         board[idx] = toStoredColor(/** @type {number} */ (colorIndex));
         const color = PALETTE[/** @type {number} */ (colorIndex)];
         const provenanceRow = await this.readProvenanceRow(storage, y, size);
+        const priorProvenance = provenanceRow[x];
         provenanceRow[x] = this.makeTileProvenance({
           version: meta.version,
           agent,
@@ -3273,12 +3278,12 @@ export class GrokPlaceCanvas extends DurableObject {
           goal,
           planId: null,
           planTitle: null,
-          assignmentId: null,
+        assignmentId: null,
           step: null,
           x,
           y,
           action: "overwrite",
-        }, provenanceRow[x]);
+        }, priorProvenance);
         entry = {
           type: "overwrite",
           x,
@@ -3304,7 +3309,8 @@ export class GrokPlaceCanvas extends DurableObject {
         };
         put.board = this.bufCopy(board);
         put[provenanceRowKey(y)] = provenanceRow;
-        put[`owner:${idx}`] = akey;
+        put[ownerCellKey(x, y)] = akey;
+        await this.revokeRestorationForTile(storage, this.tileEpoch(meta), priorProvenance, x, y);
         await storage.delete(protectionKey(x, y));
       }
 
@@ -3498,7 +3504,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const meta = { ...await this.readCanvasMeta() };
     if (meta.createdAt === undefined) meta.createdAt = now;
     meta.version = (meta.version || 0) + 1;
-    /** @type {{ x: number, y: number, color: string, colorIndex: number, previousColorIndex: number | null, previousStored: number, priorProvenance: TileProvenance | null, score: number, protected: boolean }[]} */
+    /** @type {PlacedTile[]} */
     const placed = [];
     /** @type {Record<string, string>} */
     const putOwners = {};
@@ -3738,6 +3744,263 @@ export class GrokPlaceCanvas extends DurableObject {
         ? `Placed ${placed.length} tile(s). Turn done — next turn in ${Math.ceil((turn.nextTurnAt - now) / 1000)}s.`
         : `Placed ${placed.length} tile(s). ${tilesLeftInTurn} left this turn.`,
     }, 200, origin);
+  }
+
+  /** @param {TileProvenanceSnapshot} record */
+  publicReclaimSource(record) {
+    return {
+      version: record.version,
+      colorIndex: record.colorIndex,
+      color: PALETTE[record.colorIndex],
+      placedAt: record.placedAt,
+      planId: record.planId,
+      ...(typeof record.planVersion === "number" ? { planVersion: record.planVersion } : {}),
+      assignmentId: record.assignmentId,
+      step: record.step,
+      x: record.x,
+      y: record.y,
+    };
+  }
+
+  /** @param {Request} request @param {number} size @param {string} origin */
+  async handleReclaimInventory(request, size, origin) {
+    const url = new URL(request.url);
+    const parsed = parseAgent(url.searchParams.get("agent") || "");
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const planId = (url.searchParams.get("planId") || "").trim();
+    if (!/^pl_[a-f0-9]{16}$/i.test(planId)) return json({ ok: false, error: "bad_plan_id" }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const now = Date.now();
+    const akey = parsed.agent.toLowerCase();
+    const agentStat = await this.readAgent(akey, parsed.agent, now);
+    const storedPlan = await this.state.storage.get(`plan:${planId}`);
+    const plan = isPlanRecord(storedPlan) ? storedPlan : null;
+    if (!plan || plan.status !== "active" || !isPlanBounds(plan.bounds)) return json({ ok: false, error: "inactive_goal" }, 409, origin);
+    if (!this.isPlanParticipant(plan, agentStat, akey)) return json({ ok: false, error: "goal_not_joined" }, 403, origin);
+    const { board } = await this.ensureBoard(size);
+    const protections = await this.listActiveProtections(size, board, now);
+    const protectionByCell = new Map(protections.active.map((record) => [`${record.x}:${record.y}`, record]));
+    /** @type {Record<ReclaimInventoryKind, JsonRecord[]>} */
+    const inventory = { owned: [], overwritten: [], missing: [], protected: [], reclaimable: [] };
+    /** @param {ReclaimInventoryKind} kind @param {JsonRecord} value */
+    const push = (kind, value) => {
+      if (inventory[kind].length < RECLAIM_INVENTORY_MAX) inventory[kind].push(value);
+    };
+    for (let y = plan.bounds.y; y < plan.bounds.y + plan.bounds.h; y++) {
+      const row = await this.readProvenanceRow(this.state.storage, y, size);
+      for (let x = plan.bounds.x; x < plan.bounds.x + plan.bounds.w; x++) {
+        const provenance = row[x];
+        const current = this.provenanceSnapshot(provenance);
+        const owned = current && current.agent.toLowerCase() === akey && current.planId === planId ? current : null;
+        const previous = this.provenanceHistory(provenance).find((record) => record.agent.toLowerCase() === akey && record.planId === planId) || null;
+        const colorIndex = fromStoredColor(board[y * size + x]);
+        if (colorIndex === null) {
+          const source = owned || previous;
+          if (source) push("missing", { x, y, source: this.publicReclaimSource(source), reason: provenance?.clearedReason || "missing" });
+          continue;
+        }
+        if (owned) push("owned", { x, y, source: this.publicReclaimSource(owned) });
+        else if (previous) push("overwritten", { x, y, source: this.publicReclaimSource(previous) });
+        const source = owned || previous;
+        const protection = protectionByCell.get(`${x}:${y}`);
+        if (source && protection) push("protected", { x, y, source: this.publicReclaimSource(source), protection });
+      }
+    }
+    const epoch = this.tileEpoch(await this.readCanvasMeta());
+    for (const id of await this.readRestorationIndex(this.state.storage, epoch, akey)) {
+      const event = await this.state.storage.get(restorationEventKey(epoch, id));
+      if (!isRestorationEvent(event) || event.owner.toLowerCase() !== akey || event.planId !== planId) continue;
+      const provenance = await this.readTileProvenance(event.x, event.y, size);
+      const activeProtection = protectionByCell.get(`${event.x}:${event.y}`);
+      if (!activeProtection && filterGoal(event.prior.goal ?? "").ok && this.restorationIsCurrent(event, board, size, provenance, now)) {
+        push("reclaimable", { x: event.x, y: event.y, eventId: event.id, expiresAt: event.expiresAt, source: this.publicReclaimSource(event.prior) });
+      }
+    }
+    return json({
+      ok: true,
+      agent: parsed.agent,
+      planId,
+      inventory,
+      limits: { perCategoryMax: RECLAIM_INVENTORY_MAX, historyPerTile: TILE_PROVENANCE_HISTORY_MAX, eventQueueMax: RECLAIM_EVENT_MAX },
+      protection: { ordinaryOverwriteError: "protected_tile", creditCost: PROTECTION_CREDIT_COST },
+    }, 200, origin, { "Cache-Control": "no-store" });
+  }
+
+  /** @param {Request} request @param {number} size @param {number} cooldownMs @param {string} origin @param {string} ip */
+  async handleReclaim(request, size, cooldownMs, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "planId", "action", "tiles", "eventId", "clientRequestId", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const agent = parsed.agent;
+    const akey = agent.toLowerCase();
+    const capability = await this.requireAgentCapability(request, agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const planId = typeof body.planId === "string" ? body.planId.trim() : "";
+    if (!/^pl_[a-f0-9]{16}$/i.test(planId)) return json({ ok: false, error: "bad_plan_id" }, 400, origin);
+    const action = body.action;
+    if (action !== "reclaim" && action !== "restore") return json({ ok: false, error: "bad_reclaim_action" }, 400, origin);
+    const clientRequestId = typeof body.clientRequestId === "string" ? body.clientRequestId : "";
+    if (!PROTECTION_REQUEST_ID_RE.test(clientRequestId)) return json({ ok: false, error: "bad_client_request_id" }, 400, origin);
+    /** @type {{ x: number, y: number, version: number }[]} */
+    let tiles = [];
+    let eventId = "";
+    if (action === "reclaim") {
+      if (!Array.isArray(body.tiles) || !body.tiles.length || body.tiles.length > TILES_PER_TURN || body.eventId !== undefined) return json({ ok: false, error: "bad_reclaim_batch", tilesPerTurn: TILES_PER_TURN }, 400, origin);
+      for (const raw of body.tiles) {
+        if (!hasOnlyKeys(raw, new Set(["x", "y", "version"]))) return json({ ok: false, error: "unknown_tile_field" }, 400, origin);
+        const x = parseCoord(raw.x); const y = parseCoord(raw.y);
+        const version = typeof raw.version === "number" && Number.isSafeInteger(raw.version) && raw.version >= 1 ? raw.version : null;
+        if (x === null || y === null || x < 0 || y < 0 || x >= size || y >= size || version === null) return json({ ok: false, error: "bad_reclaim_tile" }, 400, origin);
+        tiles.push({ x, y, version });
+      }
+      if (new Set(tiles.map((tile) => `${tile.x}:${tile.y}`)).size !== tiles.length) return json({ ok: false, error: "duplicate_tile" }, 400, origin);
+    } else {
+      if (body.tiles !== undefined || typeof body.eventId !== "string" || !/^[a-f0-9]{32}$/.test(body.eventId)) return json({ ok: false, error: "bad_restoration_event" }, 400, origin);
+      eventId = body.eventId;
+    }
+    const target = action === "restore" ? `event:${eventId}` : tiles.map((tile) => `${tile.x}:${tile.y}:${tile.version}`).join(",");
+    const requestMeta = await this.readCanvasMeta();
+    const epoch = this.tileEpoch(requestMeta);
+    const requestKey = reclaimRequestKey(epoch, akey);
+    const replayLog = (await this.state.storage.get(requestKey));
+    const replays = Array.isArray(replayLog) ? replayLog.filter(isReclaimRequestRecord).slice(0, RECLAIM_REQUEST_MAX) : [];
+    const replay = replays.find((record) => record.clientRequestId === clientRequestId);
+    if (replay) {
+      if (replay.action !== action || replay.planId !== planId || replay.target !== target) return json({ ok: false, error: "reclaim_request_conflict" }, 409, origin);
+      return json({ ...replay.result, replayed: true, chargedCredits: 0 }, 200, origin);
+    }
+    const rl = await this.rateLimit("reclaim", ip, 40);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", remainingMs: rl.retryAfterMs }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "canvas:reclaim");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    await this.ensureBoard(size);
+    const now = Date.now();
+    const result = await this.storageTransaction(async (storage) => {
+      const duplicates = await storage.get(requestKey);
+      const known = Array.isArray(duplicates) ? duplicates.filter(isReclaimRequestRecord).slice(0, RECLAIM_REQUEST_MAX) : [];
+      const duplicate = known.find((record) => record.clientRequestId === clientRequestId);
+      if (duplicate) {
+        if (duplicate.action !== action || duplicate.planId !== planId || duplicate.target !== target) return { status: 409, body: { ok: false, error: "reclaim_request_conflict" } };
+        return { status: 200, body: { ...duplicate.result, replayed: true, chargedCredits: 0 } };
+      }
+      const rawBoard = await storage.get("board");
+      if (!isBoardBytes(rawBoard)) return { status: 409, body: { ok: false, error: "board_unavailable" } };
+      const board = rawBoard instanceof Uint8Array ? new Uint8Array(rawBoard) : new Uint8Array(rawBoard);
+      if (board.length !== size * size) return { status: 409, body: { ok: false, error: "board_unavailable" } };
+      const rawScores = await storage.get("scores");
+      const scores = isScoreBytes(rawScores) ? rawScores instanceof Int16Array ? new Int16Array(rawScores) : new Int16Array(rawScores) : new Int16Array(size * size);
+      const planRaw = await storage.get(`plan:${planId}`);
+      const plan = isPlanRecord(planRaw) ? planRaw : null;
+      const agentStat = this.normalizeAgent(await storage.get(`agent:${akey}`), agent, now);
+      if (!plan || plan.status !== "active" || !isPlanBounds(plan.bounds)) return { status: 409, body: { ok: false, error: "inactive_goal" } };
+      if (!this.isPlanParticipant(plan, agentStat, akey)) return { status: 403, body: { ok: false, error: "goal_not_joined" } };
+      const meta = normalizeCanvasMeta(await storage.get("meta"));
+      const activeEpoch = this.tileEpoch(meta);
+      if (activeEpoch !== epoch) return { status: 409, body: { ok: false, error: "reclaim_epoch_changed" } };
+      /** @type {JsonRecord[]} */
+      const entries = [];
+      /** @type {Record<string, unknown>} */
+      const put = {};
+      let bodyResult;
+      if (action === "reclaim") {
+        const turnKey = `turn:${akey}`;
+        const cdKey = `cd:${akey}`;
+        const turn = this.normalizeTurn(await storage.get(turnKey));
+        if (turn.nextTurnAt > now) return { status: 429, body: { ok: false, error: "cooldown", nextTurnAt: turn.nextTurnAt, remainingMs: turn.nextTurnAt - now } };
+        if (turn.left <= 0) {
+          const bonus = Math.min(Math.max(0, agentStat.bonusTiles || 0), MAX_BONUS_PER_TURN);
+          turn.left = TILES_PER_TURN + bonus;
+          if (bonus) agentStat.bonusTiles -= bonus;
+        }
+        if (tiles.length > turn.left) return { status: 409, body: { ok: false, error: "turn_budget", tilesLeftInTurn: turn.left } };
+        /** @type {Map<number, (TileProvenance | null)[]>} */
+        const rows = new Map();
+        for (const tile of tiles) {
+          if (!this.boundsContainTiles(plan.bounds, [tile])) return { status: 400, body: { ok: false, error: "outside_goal_region" } };
+          const idx = tile.y * size + tile.x;
+          if (fromStoredColor(board[idx]) === null) return { status: 409, body: { ok: false, error: "missing_tile_not_reclaimable", x: tile.x, y: tile.y } };
+          const protection = await this.readActiveProtection(storage, tile.x, tile.y, size, now, board);
+          if (protection) return { status: 409, body: { ok: false, error: "protected_tile", reason: "active_protection", x: tile.x, y: tile.y, protection: publicProtection(protection) } };
+          let row = rows.get(tile.y);
+          if (!row) { row = await this.readProvenanceRow(storage, tile.y, size); rows.set(tile.y, row); }
+          const source = this.findOwnedProvenance(row[tile.x], agent, planId, tile.version);
+          if (!source) return { status: 409, body: { ok: false, error: "exact_prior_tile_required", x: tile.x, y: tile.y } };
+          const current = row[tile.x];
+          row[tile.x] = this.makeTileProvenance({ ...source, version: (meta.version || 0) + 1, placedAt: now, x: tile.x, y: tile.y, action: "reclaim" }, current);
+          board[idx] = toStoredColor(source.colorIndex);
+          if (scores[idx] < 0) scores[idx] = 0;
+          put[ownerCellKey(tile.x, tile.y)] = akey;
+          await this.revokeRestorationForTile(storage, activeEpoch, current, tile.x, tile.y);
+          entries.push({ type: "reclaim", x: tile.x, y: tile.y, c: source.colorIndex, color: PALETTE[source.colorIndex], agent, goal: source.goal, t: now, v: (meta.version || 0) + 1, batchOrder: entries.length });
+        }
+        turn.left -= tiles.length;
+        if (turn.left <= 0) { turn.left = 0; turn.nextTurnAt = now + cooldownMs; }
+        meta.version = (meta.version || 0) + 1;
+        agentStat.lastAt = now;
+        const last = tiles[tiles.length - 1];
+        agentStat.lastTile = { x: last.x, y: last.y, c: fromStoredColor(board[last.y * size + last.x]) || 0, t: now };
+        put[turnKey] = turn;
+        put[cdKey] = turn.nextTurnAt || 0;
+        put[`agent:${akey}`] = agentStat;
+        Object.assign(put, Object.fromEntries([...rows].map(([y, row]) => [provenanceRowKey(y), row])));
+        bodyResult = { ok: true, action, agent, restoredCount: tiles.length, spentTurnTiles: tiles.length, chargedCredits: 0, tilesLeftInTurn: turn.left, nextTurnAt: turn.nextTurnAt || null, version: meta.version, rewards: { placements: 0, reputation: 0, transferableCredits: 0 } };
+      } else {
+        const event = await storage.get(restorationEventKey(activeEpoch, eventId));
+        if (!isRestorationEvent(event) || event.owner.toLowerCase() !== akey || event.planId !== planId) return { status: 404, body: { ok: false, error: "restoration_not_found" } };
+        const idx = event.y * size + event.x;
+        const row = await this.readProvenanceRow(storage, event.y, size);
+        if (event.expiresAt <= now) {
+          await this.removeRestorationEvent(storage, activeEpoch, akey, event.id);
+          return { status: 409, body: { ok: false, error: "restoration_expired" } };
+        }
+        if (!this.restorationIsCurrent(event, board, size, row[event.x], now)) {
+          return { status: 409, body: { ok: false, error: "restoration_stale" } };
+        }
+        const safeGoal = filterGoal(event.prior.goal ?? "");
+        if (!safeGoal.ok) {
+          await this.removeRestorationEvent(storage, activeEpoch, akey, event.id);
+          return { status: 409, body: { ok: false, error: "content_filtered", message: safeGoal.reason } };
+        }
+        const active = await this.readActiveProtection(storage, event.x, event.y, size, now, board);
+        if (active) return { status: 409, body: { ok: false, error: "protected_tile", reason: "active_protection", protection: publicProtection(active) } };
+        const protections = await this.listActiveProtectionsFrom(storage, size, board, now);
+        if (protections.truncated || protections.active.length >= PROTECTION_PUBLIC_MAX) return { status: 429, body: { ok: false, error: "protection_capacity" } };
+        meta.version = (meta.version || 0) + 1;
+        const current = row[event.x];
+        row[event.x] = this.makeTileProvenance({ ...event.prior, version: meta.version, placedAt: now, x: event.x, y: event.y, action: "restore" }, current);
+        board[idx] = toStoredColor(event.prior.colorIndex);
+        if (scores[idx] < 0) scores[idx] = 0;
+        /** @type {ProtectionRecord} */
+        const protection = { version: 1, x: event.x, y: event.y, colorIndex: event.prior.colorIndex, color: PALETTE[event.prior.colorIndex], protector: agent, protectedAt: now, expiresAt: now + RESTORATION_PROTECTION_DURATION_MS };
+        put.board = this.bufCopy(board);
+        put.scores = this.scoresCopy(scores);
+        put[provenanceRowKey(event.y)] = row;
+        put[ownerCellKey(event.x, event.y)] = akey;
+        put[protectionKey(event.x, event.y)] = protection;
+        await this.removeRestorationEvent(storage, activeEpoch, akey, event.id);
+        entries.push({ type: "restore", x: event.x, y: event.y, c: event.prior.colorIndex, color: PALETTE[event.prior.colorIndex], agent, goal: event.prior.goal, t: now, v: meta.version, batchOrder: 0 });
+        bodyResult = { ok: true, action, agent, eventId: event.id, restored: { x: event.x, y: event.y, colorIndex: event.prior.colorIndex, color: PALETTE[event.prior.colorIndex] }, chargedCredits: 0, spentTurnTiles: 0, protection: publicProtection(protection), version: meta.version, rewards: { placements: 0, reputation: 0, transferableCredits: 0 } };
+      }
+      const storedFeed = await storage.get("feed");
+      const feed = [...entries.slice().reverse(), ...(Array.isArray(storedFeed) ? storedFeed : [])].slice(0, FEED_MAX);
+      const storedHistory = await storage.get("history");
+      const history = [...entries, ...(Array.isArray(storedHistory) ? storedHistory : [])].slice(0, HISTORY_MAX);
+      put.meta = meta;
+      put.feed = feed;
+      put.history = history;
+      put[requestKey] = [{ version: 1, clientRequestId, action, planId, target, createdAt: now, result: bodyResult }, ...known.filter((record) => record.clientRequestId !== clientRequestId)].slice(0, RECLAIM_REQUEST_MAX);
+      if (!put.board) put.board = this.bufCopy(board);
+      if (!put.scores) put.scores = this.scoresCopy(scores);
+      await storage.put(put);
+      return { status: 200, body: bodyResult };
+    });
+    /** @type {JsonRecord} */
+    const resultBody = result.body;
+    if (result.status === 200 && result.body.ok === true && resultBody.replayed !== true) this.broadcastLive(["canvas", "activity"], Number(result.body.version) || 0);
+    return json(result.body, result.status, origin);
   }
 
   /** @returns {Promise<MaintainerRecord[]>} */
@@ -5988,7 +6251,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const recordedProvenance = await this.readTileProvenance(x, y, size);
     const provenance = recordedProvenance?.colorIndex === colorIndex ? recordedProvenance : null;
     if (!provenance) {
-      const owner = await this.state.storage.get(`owner:${index}`);
+      const owner = (await this.state.storage.get(ownerCellKey(x, y))) ?? await this.state.storage.get(`owner:${index}`);
       const parsedOwner = parseAgent(owner);
       return json({
         ok: true,
@@ -6029,6 +6292,13 @@ export class GrokPlaceCanvas extends DurableObject {
           agent: provenance.agent,
           placedAt: provenance.placedAt,
           placedAtIso: new Date(provenance.placedAt).toISOString(),
+          version: typeof provenance.version === "number" ? provenance.version : null,
+          planVersion: typeof provenance.planVersion === "number" ? provenance.planVersion : null,
+          assignmentId: provenance.assignmentId || null,
+          step: typeof provenance.step === "number" ? provenance.step : null,
+          coordinate: typeof provenance.x === "number" && typeof provenance.y === "number" ? { x: provenance.x, y: provenance.y } : null,
+          action: provenance.action || "legacy_place",
+          overwrittenHistory: this.provenanceHistory(provenance).map((record) => ({ agent: record.agent, colorIndex: record.colorIndex, placedAt: record.placedAt, version: record.version, planId: record.planId, planVersion: record.planVersion || null, assignmentId: record.assignmentId || null, step: record.step, x: record.x, y: record.y })),
           goal: goal.value,
           plan,
         },
@@ -6085,7 +6355,7 @@ export class GrokPlaceCanvas extends DurableObject {
     if (prevVote !== 0) delta = dir - prevVote;
     const nextScore = Math.max(-50, Math.min(50, (scores[idx] || 0) + delta));
     scores[idx] = nextScore;
-    const ownerRaw = await this.state.storage.get(`owner:${idx}`);
+    const ownerRaw = (await this.state.storage.get(ownerCellKey(x, y))) ?? await this.state.storage.get(`owner:${idx}`);
     const ownerKey = typeof ownerRaw === "string" ? ownerRaw : null;
     const agentKey = `agent:${akey}`;
     const agentStat = await this.readAgent(akey, agent, now);
@@ -6198,9 +6468,12 @@ export class GrokPlaceCanvas extends DurableObject {
       board[idx] = 0;
       scores[idx] = 0;
       const provenanceRow = await this.readProvenanceRow(this.state.storage, y, size);
-      provenanceRow[x] = null;
+      const priorProvenance = provenanceRow[x];
+      if (priorProvenance) provenanceRow[x] = { ...priorProvenance, clearedAt: now, clearedReason: "safety" };
       cleared = true;
       await this.state.storage.delete(`owner:${idx}`);
+      await this.state.storage.delete(ownerCellKey(x, y));
+      await this.revokeRestorationForTile(this.state.storage, this.tileEpoch(meta), priorProvenance, x, y);
       await this.state.storage.delete(protectionKey(x, y));
       await this.state.storage.delete(reportKey);
       meta.version = (meta.version || 0) + 1;
@@ -6658,6 +6931,7 @@ export class GrokPlaceCanvas extends DurableObject {
     await this.deletePrefixBatch("provenance:row:");
     await this.deletePrefixBatch("protection:cell:");
     await this.deletePrefixBatch("protection:requests:");
+    await this.deletePrefixBatch("reclaim:");
     await this.deletePrefixBatch("rpt:");
     await this.deletePrefixBatch("vote:");
     await this.deletePrefixBatch("owner:");
@@ -6790,6 +7064,7 @@ export default {
         return forwardToCanvas(env, "/internal/place", request, origin);
       }
       if (path === "/v1/protect" && request.method === "POST") return forwardToCanvas(env, "/internal/protect", request, origin);
+      if (path === "/v1/reclaim" && (request.method === "GET" || request.method === "POST")) return forwardToCanvas(env, "/internal/reclaim", request, origin);
       if (path === "/v1/maintain/register" && request.method === "POST") {
         return forwardToCanvas(env, "/internal/maintain/register", request, origin);
       }

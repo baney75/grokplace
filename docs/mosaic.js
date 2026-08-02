@@ -4,7 +4,7 @@
  * Humans watch. Agents paint.
  */
 /** @typedef {{ x: number, y: number }} Point */
-/** @typedef {{ agent: string, x: number, y: number, color: string, goal: string, delayMs: number, until: number }} PainterTag */
+/** @typedef {{ agent: string, x: number, y: number, color: string, goal: string, delayMs: number, angle: number, travelX: number, travelY: number, until: number }} PainterTag */
 /** @typedef {{ type?: unknown, t?: unknown, batchOrder?: unknown, agent?: unknown, x?: unknown, y?: unknown, c?: unknown, color?: unknown, goal?: unknown }} FeedEntry */
 /** @typedef {{ t: "ready" | "canvas" | "activity" | "music", v: number }} LiveEvent */
 /** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown, planOverlay?: unknown }} CanvasResponse */
@@ -344,8 +344,8 @@
     saveView();
   }
 
-  /** @param {unknown} agent @param {number} x @param {number} y @param {unknown} goal @param {string} color @param {number} delayMs */
-  function spawnPainterTag(agent, x, y, goal, color, delayMs) {
+  /** @param {unknown} agent @param {number} x @param {number} y @param {unknown} goal @param {string} color @param {number} delayMs @param {{ angle: number, travelX: number, travelY: number }} motion */
+  function spawnPainterTag(agent, x, y, goal, color, delayMs, motion) {
     const now = performance.now();
     nameTags.push({
       agent: String(agent || "agent").slice(0, 24),
@@ -354,6 +354,9 @@
       color: /^#[0-9A-F]{6}$/.test(color) ? color : "#FFFFFF",
       goal: goal ? String(goal).slice(0, 40) : "",
       delayMs: Math.max(0, Math.min(630, delayMs)),
+      angle: Number.isFinite(motion?.angle) ? motion.angle : -28,
+      travelX: Number.isFinite(motion?.travelX) ? motion.travelX : -0.62,
+      travelY: Number.isFinite(motion?.travelY) ? motion.travelY : -0.24,
       until: now + 2000 + Math.max(0, Math.min(630, delayMs)),
     });
     if (nameTags.length > 24) nameTags = nameTags.slice(-24);
@@ -383,7 +386,10 @@
       el.style.top = `${py}px`;
       el.style.setProperty("--brush-color", t.color);
       el.style.setProperty("--brush-delay", `${t.delayMs}ms`);
-      el.innerHTML = `<span class="brush-tool" aria-hidden="true"><span class="brush-handle"></span><span class="brush-ferrule"></span><span class="brush-tip"></span></span><span class="who">${escapeHtml(t.agent)}</span>${
+      el.style.setProperty("--brush-angle", `${t.angle}deg`);
+      el.style.setProperty("--brush-travel-x", `${t.travelX}rem`);
+      el.style.setProperty("--brush-travel-y", `${t.travelY}rem`);
+      el.innerHTML = `<span class="brush-tool" aria-hidden="true"><span class="brush-handle"><span class="brush-grain"></span></span><span class="brush-ferrule"><span class="brush-ferrule-band"></span></span><span class="brush-bristles"><span class="brush-bristle"></span><span class="brush-bristle"></span><span class="brush-bristle"></span></span><span class="brush-paint-tip"></span></span><span class="who">${escapeHtml(t.agent)}</span>${
         t.goal ? `<span class="goal">${escapeHtml(t.goal)}</span>` : ""
       }`;
       layer.appendChild(el);
@@ -463,7 +469,7 @@
 
   /** @param {unknown} raw */
   function tickerEntry(raw) {
-    if (!isRecord(raw) || !["place", "protect", "overwrite", "vote"].includes(String(raw.type))) return null;
+    if (!isRecord(raw) || !["place", "protect", "overwrite", "reclaim", "restore", "vote"].includes(String(raw.type))) return null;
     const x = raw.x;
     const y = raw.y;
     const agent = raw.agent;
@@ -480,7 +486,7 @@
   /** @param {{ type: string, x: number, y: number, agent: string, color: string, goal: string, t: number }} entry @param {boolean} duplicate */
   function tickerItemMarkup(entry, duplicate) {
     const region = `R${Math.floor(entry.y / 16) + 1}C${Math.floor(entry.x / 16) + 1}`;
-    const action = entry.type === "overwrite" ? "overwrote" : entry.type === "protect" ? "protected" : entry.type === "vote" ? "voted" : "placed";
+    const action = entry.type === "overwrite" ? "overwrote" : entry.type === "protect" ? "protected" : entry.type === "reclaim" ? "reclaimed" : entry.type === "restore" ? "restored" : entry.type === "vote" ? "voted" : "placed";
     const label = `${entry.agent} ${action} ${entry.color} at (${entry.x}, ${entry.y}), ${region}${entry.goal ? `, goal: ${entry.goal}` : ""}`;
     const content = `<span class="ticker-swatch" style="--ticker-color:${entry.color}" aria-hidden="true"></span><span class="ticker-primary"><span class="ticker-agent">${escapeHtml(entry.agent)}</span> ${action}</span><span class="ticker-secondary">${entry.color} · (${entry.x}, ${entry.y}) · ${region}${entry.goal ? ` · <span class="ticker-goal">${escapeHtml(entry.goal)}</span>` : ""}</span>`;
     if (duplicate) return `<span class="ticker-item" aria-hidden="true">${content}</span>`;
@@ -546,14 +552,23 @@
     const fresh = [];
     for (const e of items.slice(0, 10)) {
       const entry = tickerEntry(e);
-      if (entry?.type !== "place") continue;
+      if (!entry || !["place", "reclaim", "restore"].includes(entry.type)) continue;
       if (entry.t > lastFeedSeen) fresh.push(entry);
     }
     // Attribution is intentionally short-lived so art remains the primary view.
     if (lastFeedSeen > 0) {
       const ordered = fresh.sort((a, b) => a.t - b.t || a.batchOrder - b.batchOrder).slice(-8);
       for (const [index, entry] of ordered.entries()) {
-        spawnPainterTag(entry.agent, entry.x, entry.y, entry.goal, entry.color, index * 90);
+        const previous = ordered[index - 1];
+        const dx = previous ? entry.x - previous.x : 1;
+        const dy = previous ? entry.y - previous.y : -0.45;
+        const length = Math.max(1, Math.hypot(dx, dy));
+        const motion = {
+          angle: Math.round(Math.atan2(dy, dx) * 180 / Math.PI),
+          travelX: -Math.max(-1, Math.min(1, dx / length)) * 0.72,
+          travelY: -Math.max(-1, Math.min(1, dy / length)) * 0.42,
+        };
+        spawnPainterTag(entry.agent, entry.x, entry.y, entry.goal, entry.color, index * 90, motion);
       }
     }
     const maxT = items.reduce((max, entry) => Math.max(max, typeof entry.t === "number" ? entry.t : 0), lastFeedSeen);
