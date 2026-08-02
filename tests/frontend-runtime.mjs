@@ -183,6 +183,10 @@ function fakeTimers() {
   let now = 0;
   let nextId = 1;
   const jobs = new Map();
+  class ClockDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  }
   const setTimeout = (callback, delay = 0) => {
     const id = nextId++;
     jobs.set(id, { callback, at: now + Math.max(0, Number(delay) || 0) });
@@ -219,6 +223,7 @@ function fakeTimers() {
     count() { return jobs.size; },
     delays() { return [...jobs.values()].map((job) => job.at - now).sort((a, b) => a - b); },
     now() { return now; },
+    Date: ClockDate,
   };
 }
 
@@ -246,6 +251,82 @@ function delayedFetch() {
 async function flush(ms = 0) {
   await new Promise((resolve) => setTimeout(resolve, ms));
   await Promise.resolve();
+}
+
+{
+  const board = element("board");
+  const wrap = element("canvas-wrap");
+  const harness = browserHarness(new Map([["board", board], ["canvas-wrap", wrap]]));
+  const timers = fakeTimers();
+  const live = fakeWebSockets();
+  harness.window.WebSocket = live.WebSocketMock;
+  const calls = [];
+  const attempts = new Map();
+  const math = Object.create(Math);
+  math.random = () => 0;
+  const fetch = async (url) => {
+    const path = new URL(url).pathname;
+    calls.push({ path, at: timers.now() });
+    const count = (attempts.get(path) || 0) + 1;
+    attempts.set(path, count);
+    if (count === 1 && (path === "/v1/canvas" || path === "/v1/feed")) {
+      const retryAfter = path === "/v1/canvas" ? "45" : "50";
+      return { ok: false, status: 429, headers: { get: () => retryAfter } };
+    }
+    if (path === "/v1/canvas") return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#ffffff"], version: 1 }) };
+    return { ok: true, json: async () => ({ ok: true, feed: [] }) };
+  };
+  const context = vm.createContext({
+    ...harness,
+    fetch,
+    AbortController,
+    URL,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
+    Set,
+    Math: math,
+    JSON,
+    Date: timers.Date,
+    performance,
+    atob,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
+  await timers.tick(0);
+  const socket = live.sockets[0];
+  socket.open();
+  for (let index = 0; index < 6; index++) {
+    socket.message(`{"t":"canvas","v":${index + 1}}`);
+    socket.message(`{"t":"activity","v":${index + 1}}`);
+  }
+  await timers.tick(0);
+  check(
+    "live invalidations cannot bypass canvas or feed Retry-After gates",
+    attempts.get("/v1/canvas") === 1
+      && attempts.get("/v1/feed") === 1
+      && JSON.stringify(timers.delays()) === JSON.stringify([45_000, 50_000]),
+    JSON.stringify({ attempts: Object.fromEntries(attempts), delays: timers.delays(), calls })
+  );
+  await timers.tick(44_999);
+  socket.message('{"t":"canvas","v":99}');
+  socket.message('{"t":"activity","v":99}');
+  await timers.tick(1);
+  check(
+    "canvas resumes only when its retry gate expires",
+    attempts.get("/v1/canvas") === 2 && attempts.get("/v1/feed") === 1,
+    JSON.stringify(calls)
+  );
+  await timers.tick(5_000);
+  check(
+    "feed resumes only when its retry gate expires",
+    attempts.get("/v1/feed") === 2,
+    JSON.stringify(calls)
+  );
+  emit(harness.windowListeners, "pagehide", { persisted: false });
 }
 
 {
@@ -364,7 +445,7 @@ async function flush(ms = 0) {
     Map,
     Math,
     JSON,
-    Date,
+    Date: timers.Date,
     performance,
     atob,
     setTimeout: timers.setTimeout,

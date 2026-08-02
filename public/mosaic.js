@@ -74,6 +74,8 @@
   let feedRetryAfterMs = 0;
   let canvasRetryJitter = false;
   let feedRetryJitter = false;
+  let canvasRetryNotBefore = 0;
+  let feedRetryNotBefore = 0;
   let canvasReadThisVisibility = false;
   let feedReadThisVisibility = false;
   let canvasRefreshQueued = false;
@@ -809,28 +811,42 @@
     if (failures <= 0) return base;
     const exponential = Math.min(POLL_BACKOFF_MAX_MS, base * (2 ** Math.min(failures, 3)));
     if (!jitter) return Math.max(Math.min(POLL_BACKOFF_MAX_MS, serverRetryAfterMs), exponential);
-    const jittered = Math.round(exponential * (0.8 + Math.random() * 0.4));
+    const jittered = Math.min(POLL_BACKOFF_MAX_MS, Math.round(exponential * (0.8 + Math.random() * 0.4)));
     return Math.max(Math.min(POLL_BACKOFF_MAX_MS, serverRetryAfterMs), jittered);
   }
 
   /** @param {number} delay */
   function scheduleCanvasPoll(delay) {
     if (!isPollingActive()) return;
+    const gateDelay = Math.max(0, canvasRetryNotBefore - Date.now());
+    if (gateDelay > 0 && canvasTimer) return;
     clearTimeout(canvasTimer);
     canvasTimer = setTimeout(() => {
       canvasTimer = 0;
+      if (canvasRetryNotBefore > Date.now()) {
+        scheduleCanvasPoll(0);
+        return;
+      }
+      canvasRetryNotBefore = 0;
       void pollCanvas();
-    }, delay);
+    }, Math.max(delay, gateDelay));
   }
 
   /** @param {number} delay */
   function scheduleFeedPoll(delay) {
     if (!isPollingActive()) return;
+    const gateDelay = Math.max(0, feedRetryNotBefore - Date.now());
+    if (gateDelay > 0 && feedTimer) return;
     clearTimeout(feedTimer);
     feedTimer = setTimeout(() => {
       feedTimer = 0;
+      if (feedRetryNotBefore > Date.now()) {
+        scheduleFeedPoll(0);
+        return;
+      }
+      feedRetryNotBefore = 0;
       void pollFeed();
-    }, delay);
+    }, Math.max(delay, gateDelay));
   }
 
   async function pollCanvas() {
@@ -844,6 +860,7 @@
     try {
       await fetchCanvas(controller.signal);
       canvasFailures = 0;
+      canvasRetryNotBefore = 0;
       if (document.title.includes("reconnecting")) document.title = "grok/place · live mosaic";
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
@@ -856,7 +873,9 @@
     } finally {
       if (canvasRequest === controller) canvasRequest = null;
       if (isPollingActive()) {
-        const delay = canvasRefreshQueued ? 0 : backoffDelay(liveCanvasInterval(), canvasFailures, canvasRetryAfterMs, canvasRetryJitter);
+        const failureDelay = backoffDelay(liveCanvasInterval(), canvasFailures, canvasRetryAfterMs, canvasRetryJitter);
+        if (canvasFailures > 0) canvasRetryNotBefore = Math.max(canvasRetryNotBefore, Date.now() + failureDelay);
+        const delay = canvasRefreshQueued ? 0 : failureDelay;
         canvasRefreshQueued = false;
         canvasRetryAfterMs = 0;
         canvasRetryJitter = false;
@@ -876,6 +895,7 @@
     try {
       await fetchFeed(controller.signal);
       feedFailures = 0;
+      feedRetryNotBefore = 0;
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
         feedFailures++;
@@ -886,7 +906,9 @@
     } finally {
       if (feedRequest === controller) feedRequest = null;
       if (isPollingActive()) {
-        const delay = feedRefreshQueued ? 0 : backoffDelay(liveFeedInterval(), feedFailures, feedRetryAfterMs, feedRetryJitter);
+        const failureDelay = backoffDelay(liveFeedInterval(), feedFailures, feedRetryAfterMs, feedRetryJitter);
+        if (feedFailures > 0) feedRetryNotBefore = Math.max(feedRetryNotBefore, Date.now() + failureDelay);
+        const delay = feedRefreshQueued ? 0 : failureDelay;
         feedRefreshQueued = false;
         feedRetryAfterMs = 0;
         feedRetryJitter = false;

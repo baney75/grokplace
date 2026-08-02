@@ -110,9 +110,9 @@ async function place(body) {
 
 try {
   let result = await protect({ agent: "protector", x: 1, y: 1, action: "protect", clientRequestId: "protect-cell-1" });
-  const firstProtection = await storage.get("protection:cell:9");
+  const firstProtection = await storage.get("protection:cell:1:1");
   const firstTurn = await storage.get("turn:protector");
-  const committed = storage.transactionWrites.filter((write) => ["protection:cell:9", "protection:requests:protector", "turn:protector"].includes(write.key));
+  const committed = storage.transactionWrites.filter((write) => ["protection:cell:1:1", "protection:requests:protector", "turn:protector"].includes(write.key));
   check(
     "a successful protection atomically spends exactly three current turn credits",
     result.response.status === 200
@@ -140,7 +140,7 @@ try {
     result.response.status === 409
       && result.data.error === "insufficient_protection_credits"
       && (await storage.get("turn:protector")).left === 2
-      && (await storage.get("protection:cell:10")) === undefined,
+      && (await storage.get("protection:cell:2:1")) === undefined,
     JSON.stringify({ response: result.data, turn: await storage.get("turn:protector") })
   );
 
@@ -172,7 +172,7 @@ try {
     place({ agent: "race-place", goal: "ordinary race", x: 2, y: 1, color: 9 }),
   ]);
   const raceBoard = new Uint8Array(await storage.get("board"));
-  const raceRecord = await storage.get("protection:cell:10");
+  const raceRecord = await storage.get("protection:cell:2:1");
   const placeFinishedFirst = racePlace.response.status === 200
     && raceProtection.response.status === 200
     && raceRecord?.colorIndex != null
@@ -204,7 +204,7 @@ try {
       && result.data.spentCredits === 3
       && (await storage.get("turn:overwriter")).left === 2
       && boardAfterOverwrite[11] === 10
-      && (await storage.get("protection:cell:11")) === undefined,
+      && (await storage.get("protection:cell:3:1")) === undefined,
     JSON.stringify({ response: result.data, turn: await storage.get("turn:overwriter"), board: boardAfterOverwrite[11] })
   );
 
@@ -215,9 +215,9 @@ try {
   check(
     "expired protection is cleared lazily and ordinary placement succeeds after expiry",
     result.response.status === 200
-      && (await storage.get("protection:cell:12")) === undefined
+      && (await storage.get("protection:cell:4:1")) === undefined
       && new Uint8Array(await storage.get("board"))[12] === 11,
-    JSON.stringify({ response: result.data, protection: await storage.get("protection:cell:12") })
+    JSON.stringify({ response: result.data, protection: await storage.get("protection:cell:4:1") })
   );
 
   let boundedOk = true;
@@ -260,10 +260,12 @@ try {
     "turn:capacity": { left: 5, nextTurnAt: 0 },
   };
   for (let index = 0; index < 120; index++) {
-    capacityValues[`protection:cell:${index}`] = {
+    const x = index % capacitySize;
+    const y = Math.floor(index / capacitySize);
+    capacityValues[`protection:cell:${x}:${y}`] = {
       version: 1,
-      x: index % capacitySize,
-      y: Math.floor(index / capacitySize),
+      x,
+      y,
       colorIndex: 1,
       color: "#E4E4E4",
       protector: "capacity",
@@ -287,8 +289,51 @@ try {
     capacityResponse.status === 429
       && capacityData.error === "protection_capacity"
       && (await capacityStorage.get("turn:capacity")).left === 5
-      && (await capacityStorage.get("protection:cell:255")) === undefined,
+      && (await capacityStorage.get("protection:cell:15:15")) === undefined,
     JSON.stringify({ response: capacityData, turn: await capacityStorage.get("turn:capacity") })
+  );
+
+  const growthBoard = new Uint8Array(size * size);
+  growthBoard[1 * size + 1] = 6;
+  const growthStorage = new TransactionalMemoryStorage({
+    board: growthBoard.buffer,
+    scores: new Int16Array(size * size).buffer,
+    size,
+    schema: 4,
+    meta: { version: 1, totalPlacements: 1, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: now },
+    feed: [],
+    history: [],
+    leaders: [],
+    "turn:growth-overwriter": { left: 5, nextTurnAt: 0 },
+    "protection:cell:1:1": {
+      version: 1,
+      x: 1,
+      y: 1,
+      colorIndex: 5,
+      color: "#E50000",
+      protector: "protector",
+      protectedAt: now,
+      expiresAt: now + 60_000,
+    },
+  });
+  const growthCanvas = new GrokPlaceCanvas({ storage: growthStorage, getWebSockets() { return []; } }, {});
+  growthCanvas.rateLimit = async () => ({ ok: true });
+  growthCanvas.consumeProof = async () => ({ ok: true });
+  growthCanvas.requireAgentCapability = async () => ({ ok: true });
+  await growthCanvas.handleCanvas(new URL("https://test/internal/canvas"), 16, "*");
+  const growthResponse = await growthCanvas.handlePlace(new Request("https://test/internal/place", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: "growth-overwriter", goal: "try protected growth tile", x: 1, y: 1, color: 9 }),
+  }), 16, 60_000, "*", "test-ip");
+  const growthData = await growthResponse.json();
+  check(
+    "coordinate-keyed protection remains enforceable after canvas growth",
+    growthResponse.status === 409
+      && growthData.error === "protected_tile"
+      && (await growthStorage.get("protection:cell:1:1"))?.colorIndex === 5
+      && new Uint8Array(await growthStorage.get("board"))[17] === 6,
+    JSON.stringify({ response: growthData, protection: await growthStorage.get("protection:cell:1:1") })
   );
 } finally {
   Date.now = realNow;

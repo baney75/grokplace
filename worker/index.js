@@ -14,7 +14,7 @@ import { publicMaintainer } from "../shared/maintainer.js";
 /** @typedef {{ bpm: number, waveform: string, notes: CompositionNote[], durationMs: number }} Composition */
 /** @typedef {{ id: string, title: string, submittedBy: string, votes: number, voters?: string[], reporters?: string[], addedAt: number, startedAt?: number, endsAt?: number, composition: Composition, license: "CC0-1.0", originalNonInfringingAttested: boolean, advanceToken?: string, fingerprint?: string, reason?: string }} MusicSong */
 /** @typedef {{ now: MusicSong | null, queue: MusicSong[], version: number }} MusicState */
-/** @typedef {{ version: number, totalPlacements: number, totalVotes: number, uniqueAgents: number, lastPlaceAt: number | null, createdAt?: number, resetAt?: number, totalReportsCleared?: number, communityMission?: unknown, mission?: unknown }} CanvasMeta */
+/** @typedef {{ version: number, totalPlacements: number, totalVotes: number, uniqueAgents: number, lastPlaceAt: number | null, createdAt?: number, resetAt?: number, tileEpoch?: string, totalReportsCleared?: number, communityMission?: unknown, mission?: unknown }} CanvasMeta */
 /** @typedef {{ x: number, y: number, c: number, t: number }} AgentLastTile */
 /** @typedef {{ name: string, placements: number, votesCast: number, upvotesReceived: number, downvotesReceived: number, reputation: number, firstAt: number, lastAt: number, lastGoal: string, lastTile: AgentLastTile | null, bonusTiles: number, maintainer: boolean, github: string | null, activePlanId?: string | null, lastPlanId?: string, joinedPlanIds?: string[], avoidedPlanIds?: string[] }} AgentStat */
 /** @typedef {{ left: number, nextTurnAt: number }} TurnState */
@@ -144,6 +144,7 @@ function isCanvasMeta(value) {
     && (value.lastPlaceAt === null || typeof value.lastPlaceAt === "number" && Number.isFinite(value.lastPlaceAt))
     && (value.createdAt === undefined || typeof value.createdAt === "number" && Number.isFinite(value.createdAt))
     && (value.resetAt === undefined || typeof value.resetAt === "number" && Number.isFinite(value.resetAt))
+    && (value.tileEpoch === undefined || typeof value.tileEpoch === "string" && /^[a-f0-9]{16}$/.test(value.tileEpoch))
     && (value.totalReportsCleared === undefined || typeof value.totalReportsCleared === "number" && Number.isSafeInteger(value.totalReportsCleared) && value.totalReportsCleared >= 0);
 }
 
@@ -860,9 +861,9 @@ function isProtectionRequestRecord(value) {
     && isJsonRecord(value.result);
 }
 
-/** @param {number} idx */
-function protectionKey(idx) {
-  return `protection:cell:${idx}`;
+/** @param {number} x @param {number} y */
+function protectionKey(x, y) {
+  return `protection:cell:${x}:${y}`;
 }
 
 /** @param {number} y */
@@ -1550,13 +1551,13 @@ export class GrokPlaceCanvas extends DurableObject {
     return callback(storage);
   }
 
-  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {number} idx @param {number} now @param {Uint8Array | null} [board] */
-  async readActiveProtection(storage, idx, now, board = null) {
-    const key = protectionKey(idx);
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {number} x @param {number} y @param {number} size @param {number} now @param {Uint8Array | null} [board] */
+  async readActiveProtection(storage, x, y, size, now, board = null) {
+    const key = protectionKey(x, y);
     const raw = await storage.get(key);
     if (!isProtectionRecord(raw)) return null;
-    const colorMatches = !board || board[idx] === toStoredColor(raw.colorIndex);
-    if (raw.expiresAt <= now || !colorMatches) {
+    const colorMatches = !board || board[y * size + x] === toStoredColor(raw.colorIndex);
+    if (raw.x !== x || raw.y !== y || raw.expiresAt <= now || !colorMatches) {
       await storage.delete(key);
       return null;
     }
@@ -1572,6 +1573,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const active = [];
     for (const [key, raw] of entries) {
       if (!isProtectionRecord(raw)
+        || key !== protectionKey(raw.x, raw.y)
         || raw.x >= size || raw.y >= size
         || board[raw.y * size + raw.x] !== toStoredColor(raw.colorIndex)
         || raw.expiresAt <= now) {
@@ -1685,11 +1687,11 @@ export class GrokPlaceCanvas extends DurableObject {
   /** @param {string} prefix */
   async deletePrefix(prefix) {
     while (true) {
-      const records = await this.state.storage.list({ prefix, limit: 1000 });
+      const records = await this.state.storage.list({ prefix, limit: 128 });
       const keys = [...records.keys()];
       if (!keys.length) return;
       await this.state.storage.delete(keys);
-      if (keys.length < 1000) return;
+      if (keys.length < 128) return;
     }
   }
 
@@ -2664,7 +2666,7 @@ export class GrokPlaceCanvas extends DurableObject {
       const board = rawBoard instanceof Uint8Array ? new Uint8Array(rawBoard) : new Uint8Array(rawBoard);
       if (board.length !== size * size) return { status: 409, body: { ok: false, error: "board_unavailable" } };
       const idx = y * size + x;
-      const active = await this.readActiveProtection(storage, idx, now, board);
+      const active = await this.readActiveProtection(storage, x, y, size, now, board);
       const turn = this.normalizeTurn(await storage.get(turnKey));
       const agentStat = this.normalizeAgent(await storage.get(agentKey), agent, now);
       if (turn.nextTurnAt > now) {
@@ -2783,7 +2785,7 @@ export class GrokPlaceCanvas extends DurableObject {
           protection: publicProtection(record),
           version: meta.version,
         };
-        put[protectionKey(idx)] = record;
+        put[protectionKey(x, y)] = record;
       } else {
         const previousProtection = /** @type {ProtectionRecord} */ (active);
         board[idx] = toStoredColor(/** @type {number} */ (colorIndex));
@@ -2823,7 +2825,7 @@ export class GrokPlaceCanvas extends DurableObject {
         put.board = this.bufCopy(board);
         put[provenanceRowKey(y)] = provenanceRow;
         put[`owner:${idx}`] = akey;
-        await storage.delete(protectionKey(idx));
+        await storage.delete(protectionKey(x, y));
       }
 
       const storedFeed = await storage.get("feed");
@@ -2990,7 +2992,7 @@ export class GrokPlaceCanvas extends DurableObject {
       const prevStored = board[idx];
       const prevCi = fromStoredColor(prevStored);
       const tileScore = scores[idx] || 0;
-      const protection = await this.readActiveProtection(this.state.storage, idx, now, board);
+      const protection = await this.readActiveProtection(this.state.storage, x, y, size, now, board);
       if (protection) {
         return json({
           ok: false,
@@ -3093,7 +3095,7 @@ export class GrokPlaceCanvas extends DurableObject {
         : board;
       const protectionBoard = latestBoard.length === size * size ? latestBoard : board;
       for (const tile of batch) {
-        const protection = await this.readActiveProtection(storage, tile.y * size + tile.x, now, protectionBoard);
+        const protection = await this.readActiveProtection(storage, tile.x, tile.y, size, now, protectionBoard);
         if (protection) return { x: tile.x, y: tile.y, protection: publicProtection(protection) };
       }
       await storage.put({
@@ -4440,7 +4442,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const index = y * size + x;
     const colorIndex = fromStoredColor(board[index]);
     const score = scores[index] || 0;
-    const activeProtection = await this.readActiveProtection(this.state.storage, index, Date.now(), board);
+    const activeProtection = await this.readActiveProtection(this.state.storage, x, y, size, Date.now(), board);
     const protection = {
       protected: Boolean(activeProtection),
       score,
@@ -4532,12 +4534,13 @@ export class GrokPlaceCanvas extends DurableObject {
       const remainingMs = nextVoteAt - now;
       return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil(remainingMs / 1000)}s`, remainingMs, remainingSec: Math.ceil(remainingMs / 1000) }, 429, origin);
     }
-    const voteKey = `vote:${akey}:${x},${y}`;
+    const { board, scores } = await this.ensureBoard(size);
+    const meta = await this.readCanvasMeta();
+    const voteKey = meta.tileEpoch ? `vote:${meta.tileEpoch}:${akey}:${x},${y}` : `vote:${akey}:${x},${y}`;
     const prevVote = Number((await this.state.storage.get(voteKey)) || 0);
     if (prevVote === dir) {
       return json({ ok: false, error: "already_voted", message: `Already ${dir === 1 ? "up" : "down"}voted (${x},${y}).` }, 409, origin);
     }
-    const { board, scores } = await this.ensureBoard(size);
     const idx = y * size + x;
     let delta = dir;
     if (prevVote !== 0) delta = dir - prevVote;
@@ -4573,7 +4576,6 @@ export class GrokPlaceCanvas extends DurableObject {
       await this.state.storage.put(`agent:${ownerKey}`, ownerStat);
       await this.state.storage.put("leaders", await this.updateLeaders(ownerStat));
     }
-    const meta = await this.readCanvasMeta();
     meta.totalVotes = (meta.totalVotes || 0) + 1;
     meta.version = (meta.version || 0) + 1;
     const tileCi = fromStoredColor(board[idx]);
@@ -4642,7 +4644,9 @@ export class GrokPlaceCanvas extends DurableObject {
     if ((agentStat.placements || 0) < 1) {
       return json({ ok: false, error: "report_locked", message: "Place at least one clean tile before reporting." }, 403, origin);
     }
-    const reportKey = `rpt:${x},${y}`;
+    const { board, scores } = await this.ensureBoard(size);
+    const meta = await this.readCanvasMeta();
+    const reportKey = meta.tileEpoch ? `rpt:${meta.tileEpoch}:${x},${y}` : `rpt:${x},${y}`;
     const storedReporters = await this.state.storage.get(reportKey);
     /** @type {TileReport[]} */
     const reporters = Array.isArray(storedReporters) ? storedReporters.filter(isTileReport) : [];
@@ -4650,7 +4654,6 @@ export class GrokPlaceCanvas extends DurableObject {
       return json({ ok: false, error: "already_reported", message: `Already reported (${x},${y}).`, reports: reporters.length, threshold: REPORT_THRESHOLD }, 409, origin);
     }
     reporters.push({ a: akey, t: now, reason });
-    const { board, scores } = await this.ensureBoard(size);
     const idx = y * size + x;
     let cleared = false;
     if (reporters.length >= REPORT_THRESHOLD) {
@@ -4660,9 +4663,8 @@ export class GrokPlaceCanvas extends DurableObject {
       provenanceRow[x] = null;
       cleared = true;
       await this.state.storage.delete(`owner:${idx}`);
-      await this.state.storage.delete(protectionKey(idx));
+      await this.state.storage.delete(protectionKey(x, y));
       await this.state.storage.delete(reportKey);
-      const meta = await this.readCanvasMeta();
       meta.version = (meta.version || 0) + 1;
       meta.totalReportsCleared = (meta.totalReportsCleared || 0) + 1;
       const entry = { type: "clear", x, y, agent, reason, t: now, v: meta.version, reports: reporters.length };
@@ -5106,7 +5108,7 @@ export class GrokPlaceCanvas extends DurableObject {
       scores: this.scoresCopy(scores),
       size,
       schema: BOARD_SCHEMA,
-      meta: { version: 1, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: now, resetAt: now },
+      meta: { version: 1, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: now, resetAt: now, tileEpoch: randomHex(8) },
       feed: [],
       history: [],
       leaders: [],
@@ -5115,17 +5117,16 @@ export class GrokPlaceCanvas extends DurableObject {
     await this.deletePrefix("provenance:row:");
     await this.deletePrefix("protection:cell:");
     await this.deletePrefix("protection:requests:");
+    await this.deletePrefix("rpt:");
+    await this.deletePrefix("vote:");
+    await this.deletePrefix("owner:");
     await this.state.storage.delete("provenance");
     await this.state.storage.put(put);
     if (clearedMusic) await this.writeMusicAndAlarm(clearedMusic);
     // Drop rate-limit / cooldown / challenge buckets so admin reset fully unsticks ops/tests
     if (body.clearLimits !== false) {
       const prefixes = ["rl:", "pow:", "reviewauth:", "cd:", "vcd:", "mscd:", "mvcd:", "rcd:"];
-      for (const prefix of prefixes) {
-        const listed = await this.state.storage.list({ prefix, limit: 1000 });
-        const keys = [...listed.keys()];
-        if (keys.length) await this.state.storage.delete(keys);
-      }
+      for (const prefix of prefixes) await this.deletePrefix(prefix);
     }
     this.broadcastLive(["canvas", "activity", "music"], put.meta.version);
     return json({ ok: true, message: "Mosaic reset.", size, resetAt: now }, 200, origin);

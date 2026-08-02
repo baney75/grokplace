@@ -54,6 +54,10 @@ function fakeTimers() {
   let now = 0;
   let nextId = 1;
   const jobs = new Map();
+  class ClockDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  }
   const setTimeout = (callback, delay = 0) => {
     const id = nextId++;
     jobs.set(id, { callback, at: now + Math.max(0, Number(delay) || 0) });
@@ -86,6 +90,7 @@ function fakeTimers() {
     tick,
     count() { return jobs.size; },
     delays() { return [...jobs.values()].map((job) => job.at - now).sort((a, b) => a - b); },
+    Date: ClockDate,
   };
 }
 
@@ -150,7 +155,7 @@ function response(status, retryAfter = "") {
     Set,
     Math: math,
     JSON,
-    Date,
+    Date: timers.Date,
     performance,
     atob,
     setTimeout: timers.setTimeout,
@@ -189,11 +194,57 @@ class MemoryStorage {
     if (key && typeof key === "object") for (const [name, item] of Object.entries(key)) this.values.set(name, item);
     else this.values.set(key, value);
   }
-  async delete(key) { this.values.delete(key); }
+  async delete(key) {
+    if (Array.isArray(key)) for (const name of key) this.values.delete(name);
+    else this.values.delete(key);
+  }
   async list({ prefix = "", limit = 1_000 } = {}) {
     this.listCalls.push({ prefix, limit });
     return new Map([...this.values].filter(([key]) => key.startsWith(prefix)).slice(0, limit));
   }
+}
+
+{
+  const storage = new MemoryStorage({
+    board: new Uint8Array([0, 0, 0, 1]).buffer,
+    scores: new Int16Array(4).buffer,
+    size: 2,
+    schema: 4,
+    "rpt:1,1": [{ a: "alice", t: 1, reason: "unsafe" }, { a: "bob", t: 2, reason: "unsafe" }],
+    "vote:alice:1,1": 1,
+    "owner:3": "old-owner",
+    "agent:alice": { name: "alice", placements: 1 },
+  });
+  const room = new GrokPlaceCanvas({ storage, getWebSockets() { return []; } }, { CANVAS_SIZE: "2", RESET_SECRET: "test-reset" });
+  const response = await room.handleReset(new Request("https://test/internal/reset", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-reset", "Content-Type": "application/json" },
+    body: JSON.stringify({ clearMusic: false, clearLimits: false }),
+  }), "*");
+  const body = await response.json();
+  const resetMeta = await storage.get("meta");
+  await storage.put("rpt:1,1", [{ a: "alice", t: 1, reason: "unsafe" }, { a: "bob", t: 2, reason: "unsafe" }]);
+  room.rateLimit = async () => ({ ok: true });
+  room.consumeProof = async () => ({ ok: true });
+  room.requireAgentCapability = async () => ({ ok: true });
+  const reportResponse = await room.handleReport(new Request("https://test/internal/report", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: "alice", x: 1, y: 1, reason: "unsafe" }),
+  }), 2, "*", "test-ip");
+  check(
+    "reset removes tile state and atomically epochs new reports away from orphaned records",
+    response.status === 200
+      && body.ok === true
+      && /^[a-f0-9]{16}$/.test(resetMeta.tileEpoch)
+      && (await storage.get("vote:alice:1,1")) === undefined
+      && (await storage.get("owner:3")) === undefined
+      && (await storage.get("agent:alice")) !== undefined
+      && reportResponse.status === 200
+      && (await storage.get("rpt:1,1"))?.length === 2
+      && (await storage.get(`rpt:${resetMeta.tileEpoch}:1,1`))?.length === 1,
+    JSON.stringify({ body, resetMeta, report: await reportResponse.json(), keys: [...storage.values.keys()] })
+  );
 }
 
 {
@@ -237,10 +288,12 @@ class MemoryStorage {
     schema: 4,
   };
   for (let index = 0; index < 121; index++) {
-    values[`protection:cell:${index}`] = {
+    const x = index % size;
+    const y = Math.floor(index / size);
+    values[`protection:cell:${x}:${y}`] = {
       version: 1,
-      x: index % size,
-      y: Math.floor(index / size),
+      x,
+      y,
       colorIndex: 0,
       color: "#FFFFFF",
       protector: "protector",
