@@ -93,16 +93,16 @@ check(
     && mosaicStyles.includes("@keyframes paint-particle"),
   "bounded coordination effects or local follow contract missing"
 );
+const radioSource = readFileSync(new URL("public/radio.js", root), "utf8");
 check(
-  "music coordination status reuses the existing music response without plan-preview polling",
-  /id="music-status"/.test(mosaicHtml)
-    && /id="music-status-goal"/.test(mosaicHtml)
-    && /id="music-status-progress"/.test(mosaicHtml)
-    && /id="music-status-collaborators"/.test(mosaicHtml)
-    && /id="music-status-queue"/.test(mosaicHtml)
-    && /function renderMusicStatus/.test(readFileSync(new URL("public/radio.js", root), "utf8"))
-    && !/fetch\([^\n]*\/v1\/music\/plan/.test(readFileSync(new URL("public/radio.js", root), "utf8")),
-  "music status fields or no-extra-poll contract missing"
+  "compact now-playing status shows only the active title and agent without another polling route",
+  /id="music-status"[^>]*hidden/.test(mosaicHtml)
+    && /id="music-status-now"/.test(mosaicHtml)
+    && !/id="music-status-(?:goal|progress|collaborators|queue)"/.test(mosaicHtml)
+    && radioSource.includes("musicStatus.hidden = !title")
+    && radioSource.includes("`${title}${artist ? ` · ${artist}` : \"\"}`")
+    && !/fetch\([^\n]*\/v1\/music\/plan/.test(radioSource),
+  "compact now-playing or no-extra-poll contract missing"
 );
 
 function element(id = "") {

@@ -89,12 +89,8 @@
     <span class="sound-label">Music</span>
   </button>
 
-  <aside class="music-status" id="music-status" aria-label="Agent music coordination" aria-live="polite">
-    <div class="music-status-head"><strong>Agent music</strong><span id="music-status-now">Loading queue</span></div>
-    <p class="music-status-goal" id="music-status-goal"></p>
-    <p class="music-status-progress" id="music-status-progress"></p>
-    <p class="music-status-collaborators" id="music-status-collaborators"></p>
-    <p class="music-status-queue" id="music-status-queue"></p>
+  <aside class="music-status" id="music-status" aria-label="Now playing" aria-live="polite" hidden>
+    <span id="music-status-now"></span>
   </aside>
 
   <div class="toast" id="toast" hidden role="status"></div>

@@ -12,10 +12,6 @@
   const soundBtn = document.getElementById("sound-btn");
   const musicStatus = document.getElementById("music-status");
   const musicStatusNow = document.getElementById("music-status-now");
-  const musicStatusGoal = document.getElementById("music-status-goal");
-  const musicStatusProgress = document.getElementById("music-status-progress");
-  const musicStatusCollaborators = document.getElementById("music-status-collaborators");
-  const musicStatusQueue = document.getElementById("music-status-queue");
   const NOTE_RE = /^[A-G](?:#|b)?[0-8]$/;
   /** @type {Set<string>} */
   const WAVEFORMS = new Set(["sine", "square", "triangle", "sawtooth"]);
@@ -64,45 +60,10 @@
     if (!musicStatus) return;
     const data = isRecord(raw) ? raw : {};
     const now = isRecord(data.now) ? data.now : null;
-    const queue = Array.isArray(data.queue) ? data.queue.filter(isRecord).slice(0, 24) : [];
-    const plans = Array.isArray(data.plans) ? data.plans.filter(isRecord).slice(0, 8) : [];
-    const nowPlanId = now && boundedText(now.musicPlanId, 24);
-    const plan = plans.find((item) => boundedText(item.id, 24) === nowPlanId) || plans[0] || null;
-    musicStatus.hidden = false;
-    if (musicStatusNow) {
-      const title = boundedText(now?.title, 80);
-      const artist = boundedText(now?.submittedBy, 32);
-      musicStatusNow.textContent = title ? `Now: ${title}${artist ? ` · ${artist}` : ""}` : "Now: quiet";
-    }
-    if (plan) {
-      const goal = boundedText(plan.goal, 200);
-      const progress = isRecord(plan.progress) ? plan.progress : {};
-      const sections = isRecord(progress.sections) ? progress.sections : {};
-      const notes = isRecord(progress.notes) ? progress.notes : {};
-      const approved = Number.isSafeInteger(sections.approved) ? sections.approved : 0;
-      const total = Number.isSafeInteger(sections.total) ? sections.total : 0;
-      const used = Number.isSafeInteger(notes.used) ? notes.used : 0;
-      const budget = Number.isSafeInteger(notes.budget) ? notes.budget : 0;
-      const collaborators = Array.isArray(plan.collaborators) ? plan.collaborators.filter(isRecord).slice(0, 8) : [];
-      if (musicStatusGoal) musicStatusGoal.textContent = goal ? `Goal: ${goal}` : "Goal: none";
-      if (musicStatusProgress) musicStatusProgress.textContent = `Progress: ${approved}/${total} owner-approved sections · ${used}/${budget} notes`;
-      if (musicStatusCollaborators) {
-        const names = collaborators.map((entry) => {
-          const agent = boundedText(entry.agent, 32);
-          const role = boundedText(entry.role, 16);
-          return agent && role ? `${agent} (${role})` : agent;
-        }).filter(Boolean);
-        musicStatusCollaborators.textContent = names.length ? `Collaborators: ${names.join(", ")}` : "Collaborators: waiting for sections";
-      }
-    } else {
-      if (musicStatusGoal) musicStatusGoal.textContent = "Goal: agents can open a bounded CC0 music plan";
-      if (musicStatusProgress) musicStatusProgress.textContent = "Progress: no active plan";
-      if (musicStatusCollaborators) musicStatusCollaborators.textContent = "Collaborators: none";
-    }
-    if (musicStatusQueue) {
-      const names = queue.map((entry) => boundedText(entry.title, 80)).filter(Boolean);
-      musicStatusQueue.textContent = names.length ? `Queue (${names.length}/24): ${names.join(" · ")}` : "Queue: empty";
-    }
+    const title = boundedText(now?.title, 80);
+    const artist = boundedText(now?.submittedBy, 32);
+    musicStatus.hidden = !title;
+    if (musicStatusNow) musicStatusNow.textContent = title ? `${title}${artist ? ` · ${artist}` : ""}` : "";
   }
 
   /** @param {unknown} waveform @returns {waveform is OscillatorType} */
