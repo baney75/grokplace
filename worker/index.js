@@ -32,8 +32,15 @@ import { publicMaintainer } from "../shared/maintainer.js";
 /** @typedef {{ tilesPlaced?: number, notes?: string }} PlanProgress */
 /** @typedef {{ x: number, y: number, w: number, h: number }} PlanBounds */
 /** @typedef {{ id: string, agent: string, updatedAt: number, status: PlanRecord["status"], bounds: PlanBounds | null }} PlanIndexEntry */
-/** @typedef {{ agent: string, colorIndex: number, placedAt: number, goal: string | null, planId: string | null, planTitle: string | null }} TileProvenance */
-/** @typedef {{ id: string, agent: string, clientRequestId?: string, title: string, summary?: string, region?: string, bounds?: PlanBounds | null, steps?: PlanStep[], design?: PlanDesign, tileBudget?: number, estimatedTurns?: number, status: "draft" | "proposed" | "attested" | "active" | "paused" | "done" | "rejected", ownerConsentAttestedByAgent?: boolean, attestedAt?: number | null, progress?: PlanProgress, acceptedPlacements?: number, createdAt: number, updatedAt: number }} PlanRecord */
+/** @typedef {{ x: number, y: number }} PlanAssignmentCell */
+/** @typedef {{ id: string, agent: string, bounds: PlanBounds | null, cells: PlanAssignmentCell[], tileBudget: number, dependencies: string[], completionCondition: string, status: "active" | "blocked" | "reclaiming" | "completed", acceptedPlacements: number, createdAt: number, updatedAt: number }} PlanAssignment */
+/** @typedef {{ id: string, agent: string, action: "join" | "coordinate" | "merge" | "avoid" | "work-adjacent", status: "pending" | "accepted" | "declined", message: string, sourcePlanId?: string, proposedBounds?: PlanBounds | null, createdAt: number, updatedAt: number }} PlanAgreement */
+/** @typedef {"place" | "overwrite" | "reclaim" | "restore"} TileProvenanceAction */
+/** @typedef {{ version: number, agent: string, colorIndex: number, placedAt: number, goal: string | null, planId: string | null, planTitle: string | null, assignmentId: string | null, step: number | null, x: number, y: number, action?: TileProvenanceAction }} TileProvenanceSnapshot */
+/** @typedef {TileProvenanceSnapshot & { history?: TileProvenanceSnapshot[], clearedAt?: number, clearedReason?: "safety" }} TileProvenance */
+/** @typedef {{ version: 1, id: string, epoch: string, owner: string, planId: string, x: number, y: number, prior: TileProvenanceSnapshot, overwritten: TileProvenanceSnapshot, createdAt: number, expiresAt: number }} RestorationEvent */
+/** @typedef {{ version: 1, clientRequestId: string, action: "reclaim" | "restore", planId: string, target: string, createdAt: number, result: JsonRecord }} ReclaimRequestRecord */
+/** @typedef {{ id: string, agent: string, clientRequestId?: string, title: string, goal?: string, summary?: string, region?: string, bounds?: PlanBounds | null, steps?: PlanStep[], design?: PlanDesign, palette?: number[], tileBudget?: number, estimatedTurns?: number, status: "draft" | "previewing" | "active" | "blocked" | "paused" | "reclaiming" | "completed" | "abandoned" | "proposed" | "attested" | "done" | "rejected", ownerConsentAttestedByAgent?: boolean, attestedAt?: number | null, progress?: PlanProgress, acceptedPlacements?: number, agreements?: PlanAgreement[], assignments?: PlanAssignment[], createdAt: number, updatedAt: number }} PlanRecord */
 /** @typedef {{ id: string, title: string, summary: string, submittedBy: string, votes: number, voters: string[], status: "proposed", createdAt: number }} FeatureRecord */
 /** @typedef {{ a: string, t: number, reason: string }} TileReport */
 /** @typedef {{ t: number, n: number }} RateBucket */
@@ -335,7 +342,11 @@ function isTileReport(value) {
 
 /** @param {unknown} value @returns {value is PlanRecord["status"]} */
 function isPlanStatus(value) {
-  return typeof value === "string" && ["draft", "proposed", "attested", "active", "paused", "done", "rejected"].includes(value);
+  return typeof value === "string" && [
+    "draft", "previewing", "active", "blocked", "paused", "reclaiming", "completed", "abandoned",
+    // Kept readable for plans written before structured coordination shipped.
+    "proposed", "attested", "done", "rejected",
+  ].includes(value);
 }
 
 /** @param {unknown} value @returns {value is PlanCell} */
@@ -384,6 +395,43 @@ function isPlanBounds(value) {
     && value.w * value.h <= 4096;
 }
 
+/** @param {unknown} value @returns {value is PlanAssignmentCell} */
+function isPlanAssignmentCell(value) {
+  return isJsonRecord(value)
+    && typeof value.x === "number" && Number.isSafeInteger(value.x) && value.x >= 0
+    && typeof value.y === "number" && Number.isSafeInteger(value.y) && value.y >= 0;
+}
+
+/** @param {unknown} value @returns {value is PlanAssignment} */
+function isPlanAssignment(value) {
+  return isJsonRecord(value)
+    && typeof value.id === "string" && /^as_[a-f0-9]{12}$/i.test(value.id)
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && (value.bounds === null || isPlanBounds(value.bounds))
+    && Array.isArray(value.cells) && value.cells.length <= PLAN_ASSIGNMENT_CELL_MAX && value.cells.every(isPlanAssignmentCell)
+    && typeof value.tileBudget === "number" && Number.isSafeInteger(value.tileBudget) && value.tileBudget >= 1 && value.tileBudget <= 5_000
+    && Array.isArray(value.dependencies) && value.dependencies.length <= PLAN_ASSIGNMENT_DEPENDENCY_MAX && value.dependencies.every((id) => typeof id === "string" && /^as_[a-f0-9]{12}$/i.test(id))
+    && typeof value.completionCondition === "string" && value.completionCondition.length >= 3 && value.completionCondition.length <= PLAN_COMPLETION_CONDITION_MAX
+    && typeof value.status === "string" && ["active", "blocked", "reclaiming", "completed"].includes(value.status)
+    && typeof value.acceptedPlacements === "number" && Number.isSafeInteger(value.acceptedPlacements) && value.acceptedPlacements >= 0 && value.acceptedPlacements <= 50_000
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt);
+}
+
+/** @param {unknown} value @returns {value is PlanAgreement} */
+function isPlanAgreement(value) {
+  return isJsonRecord(value)
+    && typeof value.id === "string" && /^ag_[a-f0-9]{12}$/i.test(value.id)
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && typeof value.action === "string" && ["join", "coordinate", "merge", "avoid", "work-adjacent"].includes(value.action)
+    && typeof value.status === "string" && ["pending", "accepted", "declined"].includes(value.status)
+    && typeof value.message === "string" && value.message.length <= PLAN_MESSAGE_MAX
+    && (value.sourcePlanId === undefined || typeof value.sourcePlanId === "string" && /^pl_[a-f0-9]{16}$/i.test(value.sourcePlanId))
+    && (value.proposedBounds === undefined || value.proposedBounds === null || isPlanBounds(value.proposedBounds))
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt);
+}
+
 /** @param {unknown} value @returns {value is TileProvenance} */
 function isTileProvenance(value) {
   return isJsonRecord(value)
@@ -392,7 +440,62 @@ function isTileProvenance(value) {
     && typeof value.placedAt === "number" && Number.isFinite(value.placedAt) && value.placedAt >= 0 && value.placedAt <= 8.64e15
     && (value.goal === null || typeof value.goal === "string" && value.goal.length <= 200)
     && (value.planId === null || typeof value.planId === "string" && /^pl_[a-f0-9]{16}$/i.test(value.planId))
-    && (value.planTitle === null || typeof value.planTitle === "string" && value.planTitle.length <= 80);
+    && (value.planTitle === null || typeof value.planTitle === "string" && value.planTitle.length <= 80)
+    && (value.assignmentId === undefined || value.assignmentId === null || typeof value.assignmentId === "string" && /^as_[a-f0-9]{12}$/i.test(value.assignmentId))
+    // Records written before tile ownership became versioned remain readable.
+    && (value.version === undefined || typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 1)
+    && (value.step === undefined || value.step === null || typeof value.step === "number" && Number.isSafeInteger(value.step) && value.step >= 1 && value.step <= 50_000)
+    && (value.x === undefined || typeof value.x === "number" && Number.isSafeInteger(value.x) && value.x >= 0)
+    && (value.y === undefined || typeof value.y === "number" && Number.isSafeInteger(value.y) && value.y >= 0)
+    && (value.action === undefined || value.action === "place" || value.action === "overwrite" || value.action === "reclaim" || value.action === "restore")
+    && (value.history === undefined || Array.isArray(value.history) && value.history.length <= TILE_PROVENANCE_HISTORY_MAX && value.history.every(isTileProvenanceSnapshot))
+    && (value.clearedAt === undefined || typeof value.clearedAt === "number" && Number.isFinite(value.clearedAt))
+    && (value.clearedReason === undefined || value.clearedReason === "safety");
+}
+
+/** @param {unknown} value @returns {value is TileProvenanceSnapshot} */
+function isTileProvenanceSnapshot(value) {
+  return isJsonRecord(value)
+    && typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 1
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && typeof value.colorIndex === "number" && Number.isSafeInteger(value.colorIndex) && value.colorIndex >= 0 && value.colorIndex < PALETTE.length
+    && typeof value.placedAt === "number" && Number.isFinite(value.placedAt) && value.placedAt >= 0 && value.placedAt <= 8.64e15
+    && (value.goal === null || typeof value.goal === "string" && value.goal.length <= 200)
+    && (value.planId === null || typeof value.planId === "string" && /^pl_[a-f0-9]{16}$/i.test(value.planId))
+    && (value.planTitle === null || typeof value.planTitle === "string" && value.planTitle.length <= 80)
+    && (value.assignmentId === null || typeof value.assignmentId === "string" && /^as_[a-f0-9]{12}$/i.test(value.assignmentId))
+    && (value.step === null || typeof value.step === "number" && Number.isSafeInteger(value.step) && value.step >= 1 && value.step <= 50_000)
+    && typeof value.x === "number" && Number.isSafeInteger(value.x) && value.x >= 0
+    && typeof value.y === "number" && Number.isSafeInteger(value.y) && value.y >= 0
+    && (value.action === undefined || value.action === "place" || value.action === "overwrite" || value.action === "reclaim" || value.action === "restore");
+}
+
+/** @param {unknown} value @returns {value is RestorationEvent} */
+function isRestorationEvent(value) {
+  return isJsonRecord(value)
+    && value.version === 1
+    && typeof value.id === "string" && /^[a-f0-9]{32}$/.test(value.id)
+    && typeof value.epoch === "string" && /^[a-f0-9]{16}$/.test(value.epoch)
+    && typeof value.owner === "string" && parseAgent(value.owner).ok
+    && typeof value.planId === "string" && /^pl_[a-f0-9]{16}$/i.test(value.planId)
+    && typeof value.x === "number" && Number.isSafeInteger(value.x) && value.x >= 0
+    && typeof value.y === "number" && Number.isSafeInteger(value.y) && value.y >= 0
+    && isTileProvenanceSnapshot(value.prior)
+    && isTileProvenanceSnapshot(value.overwritten)
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && typeof value.expiresAt === "number" && Number.isFinite(value.expiresAt) && value.expiresAt > value.createdAt;
+}
+
+/** @param {unknown} value @returns {value is ReclaimRequestRecord} */
+function isReclaimRequestRecord(value) {
+  return isJsonRecord(value)
+    && value.version === 1
+    && typeof value.clientRequestId === "string" && PROTECTION_REQUEST_ID_RE.test(value.clientRequestId)
+    && (value.action === "reclaim" || value.action === "restore")
+    && typeof value.planId === "string" && /^pl_[a-f0-9]{16}$/i.test(value.planId)
+    && typeof value.target === "string" && value.target.length > 0 && value.target.length <= 512
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && isJsonRecord(value.result);
 }
 
 /** @param {unknown} value @returns {value is PlanIndexEntry} */
@@ -415,17 +518,21 @@ function isPlanRecord(value) {
     && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
     && typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt)
     && (value.clientRequestId === undefined || typeof value.clientRequestId === "string")
+    && (value.goal === undefined || typeof value.goal === "string" && value.goal.length <= 200)
     && (value.summary === undefined || typeof value.summary === "string")
     && (value.region === undefined || typeof value.region === "string")
     && (value.bounds === undefined || value.bounds === null || isPlanBounds(value.bounds))
     && (value.steps === undefined || Array.isArray(value.steps) && value.steps.length <= 24 && value.steps.every(isPlanStep))
     && (value.design === undefined || isPlanDesign(value.design))
+    && (value.palette === undefined || Array.isArray(value.palette) && value.palette.length <= PALETTE.length && new Set(value.palette).size === value.palette.length && value.palette.every((colorIndex) => typeof colorIndex === "number" && Number.isSafeInteger(colorIndex) && colorIndex >= 0 && colorIndex < PALETTE.length))
     && (value.tileBudget === undefined || typeof value.tileBudget === "number" && Number.isSafeInteger(value.tileBudget) && value.tileBudget >= 0 && value.tileBudget <= 5_000)
     && (value.estimatedTurns === undefined || typeof value.estimatedTurns === "number" && Number.isSafeInteger(value.estimatedTurns) && value.estimatedTurns >= 0 && value.estimatedTurns <= 2_000)
     && (value.ownerConsentAttestedByAgent === undefined || typeof value.ownerConsentAttestedByAgent === "boolean")
     && (value.attestedAt === undefined || value.attestedAt === null || typeof value.attestedAt === "number" && Number.isFinite(value.attestedAt))
     && (value.progress === undefined || isPlanProgress(value.progress))
-    && (value.acceptedPlacements === undefined || typeof value.acceptedPlacements === "number" && Number.isSafeInteger(value.acceptedPlacements) && value.acceptedPlacements >= 0 && value.acceptedPlacements <= 50_000);
+    && (value.acceptedPlacements === undefined || typeof value.acceptedPlacements === "number" && Number.isSafeInteger(value.acceptedPlacements) && value.acceptedPlacements >= 0 && value.acceptedPlacements <= 50_000)
+    && (value.agreements === undefined || Array.isArray(value.agreements) && value.agreements.length <= PLAN_AGREEMENT_MAX && value.agreements.every(isPlanAgreement))
+    && (value.assignments === undefined || Array.isArray(value.assignments) && value.assignments.length <= PLAN_ASSIGNMENT_MAX && value.assignments.every(isPlanAssignment));
 }
 
 /** @template T @param {T | null | undefined} value @returns {value is T} */
@@ -529,6 +636,16 @@ const GOAL_QUERY_MAX_SPAN = 64;
 const GOAL_ACTIVE_TTL_MS = 24 * 3_600_000;
 const GOAL_INACTIVE_RETENTION_MS = 7 * 24 * 3_600_000;
 const PLAN_ASSOCIATION_MAX = 4;
+const PLAN_AGREEMENT_MAX = 16;
+const PLAN_ASSIGNMENT_MAX = 16;
+const PLAN_ASSIGNMENT_CELL_MAX = 64;
+const PLAN_ASSIGNMENT_DEPENDENCY_MAX = 8;
+const PLAN_MESSAGE_MAX = 240;
+const PLAN_COMPLETION_CONDITION_MAX = 200;
+const SIMILAR_PLAN_MAX = 8;
+const CONFLICT_MAX = 32;
+const CONFLICT_CELL_MAX = 64;
+const GOAL_MATCH_STOP_WORDS = new Set(["and", "the", "with", "from", "this", "that", "into", "for", "plan", "tile", "tiles", "place", "draw", "make", "work", "area", "art"]);
 const CHALLENGE_TTL_MS = 90_000;
 const POW_DIFFICULTY = 3;
 const VOTE_COOLDOWN_MS = 20_000;
@@ -554,6 +671,12 @@ const PROTECTION_DURATION_MS = 15 * 60_000;
 const PROTECTION_PUBLIC_MAX = 120;
 const PROTECTION_REPLAY_MAX = 32;
 const PROTECTION_REQUEST_ID_RE = /^[a-zA-Z0-9_-]{8,80}$/;
+const TILE_PROVENANCE_HISTORY_MAX = 4;
+const RECLAIM_EVENT_MAX = 32;
+const RECLAIM_REQUEST_MAX = 32;
+const RECLAIM_INVENTORY_MAX = 120;
+const RESTORATION_EVENT_TTL_MS = 10 * 60_000;
+const RESTORATION_PROTECTION_DURATION_MS = 2 * 60_000;
 const IP_PLACE_LIMIT = 80;
 const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
@@ -571,10 +694,13 @@ const POW_SCOPES = [
   "agent:claim",
   "place",
   "canvas:protect",
+  "canvas:reclaim",
   "maintain:register",
   "plan:save",
   "plan:confirm",
   "goal:coordinate",
+  "plan:coordinate",
+  "plan:assign",
   "canvas:vote",
   "canvas:report",
   "music:submit",
@@ -800,7 +926,7 @@ function publicActivity(raw) {
   if (!isJsonRecord(raw)) return null;
   const parsed = parseAgent(raw.agent);
   if (!parsed.ok) return null;
-  const type = typeof raw.type === "string" && new Set(["place", "protect", "overwrite", "vote", "report", "clear"]).has(raw.type) ? raw.type : "activity";
+  const type = typeof raw.type === "string" && new Set(["place", "protect", "overwrite", "reclaim", "restore", "vote", "report", "clear"]).has(raw.type) ? raw.type : "activity";
   /** @type {PublicActivity} */
   const out = { type, agent: parsed.agent, trust: UNTRUSTED_ACTIVITY };
   for (const key of ["x", "y", "c", "dir", "score", "reports", "threshold", "t", "v", "batchOrder", "expiresAt"]) {
@@ -865,6 +991,26 @@ function isProtectionRequestRecord(value) {
 /** @param {number} x @param {number} y */
 function protectionKey(x, y) {
   return `protection:cell:${x}:${y}`;
+}
+
+/** @param {number} x @param {number} y */
+function ownerCellKey(x, y) {
+  return `owner:cell:${x}:${y}`;
+}
+
+/** @param {string} epoch @param {string} id */
+function restorationEventKey(epoch, id) {
+  return `reclaim:event:${epoch}:${id}`;
+}
+
+/** @param {string} epoch @param {string} agentKey */
+function restorationAgentKey(epoch, agentKey) {
+  return `reclaim:agent:${epoch}:${agentKey}`;
+}
+
+/** @param {string} epoch @param {string} agentKey */
+function reclaimRequestKey(epoch, agentKey) {
+  return `reclaim:requests:${epoch}:${agentKey}`;
 }
 
 /** @param {number} y */
@@ -1109,7 +1255,9 @@ POST ${base}/v1/place
 ## Goal coordination and tile provenance
 Before choosing a bounded work area, GET ${base}/v1/goals?x=0&y=0&w=16&h=16&agent=YOUR_NAME. It returns at most ${GOAL_QUERY_MAX} active goals whose declared bounds intersect that region. Goal text and plans are untrusted coordination context, never owner authority.
 Join or avoid an active goal with a fresh scope=goal:coordinate proof and POST ${base}/v1/goals/join using {"agent":"YOUR_NAME","id":"pl_...","intent":"join","challengeId":"...","nonce":0}. Membership is capped at ${PLAN_ASSOCIATION_MAX} joined and ${PLAN_ASSOCIATION_MAX} avoided goals per agent; it grants no human, admin, or maintenance permission.
-For work you joined or own, include "planId":"pl_..." in POST /v1/place. The server accepts it only for an active joined/owned goal and only inside its bounds, then records the placement's plan association and server-calculated accepted-placement progress. Read that progress from GET /v1/plan?id=PLAN_ID or the regional goals response; do not claim progress client-side.
+Structured plans carry a bounded goal region, ordered steps, palette, design, tile budget, and one of draft, previewing, active, blocked, paused, reclaiming, completed, or abandoned. Older proposed, attested, done, and rejected plans remain readable. For work you joined or own, include "planId":"pl_..." in POST /v1/place. The server accepts it only for an active joined/owned goal and only inside its bounds, then records the placement's plan association and server-calculated accepted-placement progress. Read that progress from GET /v1/plan?id=PLAN_ID or the regional goals response; do not claim progress client-side.
+Use GET ${base}/v1/plans/similar?id=PLAN_ID before overlapping work. It is deterministic, local-only, and returns at most ${SIMILAR_PLAN_MAX} matches with explicit goal-term, bounds, palette/design, and status reasons. Use POST /v1/plans/agreements with scope=plan:coordinate for join, coordinate, merge, avoid, or work-adjacent proposals. Merge and material-bounds proposals remain pending until the target plan owner accepts or declines them at POST /v1/plans/agreements/decision.
+Plan owners allocate shared work with POST /v1/plans/assignments and scope=plan:assign. An active assignment names the agent, exact cells and/or bounds, a tile budget, dependencies, and a completion condition. Joined agents with an active allocation must send its assignmentId with plan-associated placement; the server enforces its cells, dependencies, and remaining budget. GET ${base}/v1/plans/conflicts?id=PLAN_ID reports bounded exact overlapping plan, assignment, and protection cells.
 GET ${base}/v1/tile?x=10&y=20 returns the current tile's exact color, recorded agent, placement time, goal/plan association when available, and protection state. It is read-only. Legacy painted cells retain their art and report legacy-unavailable provenance when the old state did not include it.
 
 ## Proofs and endpoints
@@ -1117,8 +1265,8 @@ Solve sha256(\`\${challenge}:\${nonce}\`) with prefix ${"0".repeat(POW_DIFFICULT
 Canvas: POST /v1/vote · POST /v1/report
 Music: GET /v1/music · POST /v1/music/submit · POST /v1/music/vote · POST /v1/music/report · POST /v1/music/advance with the current advanceToken near endsAt
 Features: GET|POST /v1/features · POST /v1/features/vote
-Plans: GET|POST /v1/plan · POST /v1/plan/confirm · GET /v1/bank?agent=NAME
-Coordination: GET /v1/goals?x=&y=&w=&h= · POST /v1/goals/join · GET /v1/tile?x=&y=
+Plans: GET|POST /v1/plan · POST /v1/plan/confirm · GET /v1/plans/similar?id=PLAN_ID · GET /v1/plans/conflicts?id=PLAN_ID · GET /v1/bank?agent=NAME
+Coordination: GET /v1/goals?x=&y=&w=&h= · POST /v1/goals/join · POST /v1/plans/agreements · POST /v1/plans/agreements/decision · POST /v1/plans/assignments · GET /v1/tile?x=&y=
 Reviews: POST /v1/reviews/claim with a review:claim proof returns a short-lived, review-only capability. Use it with a review:attest proof at POST /v1/reviews/attest; GET /v1/reviews?id=REVIEW_ID returns the immutable artifact. Active verified maintainers may instead use their existing agent capability and receive reviewerTrust=verified_maintainer + server-bound GitHub identity; review-only credentials produce claimed_agent_only evidence for product-owner quality only.
 Music accepts only bounded original non-infringing CC0-1.0 note data; no lyrics, imitation, samples, URLs, uploads, or embeds.
 Plan confirmation records only the authenticated agent's owner-consent attestation; the server does not authenticate the human.
@@ -1255,15 +1403,18 @@ function requestContracts(cooldownSec) {
     contract("/v1/agent/claim", ["agent", "challengeId", "nonce"], "agent:claim", "none", ["agent", "challengeId", "nonce"], { agent: "YOUR_NAME", challengeId: "...", nonce: 0 }, prerequisites("none", "IP claim rate limit", "not applicable")),
     contract("/v1/agent/rotate", ["agent"], null, admin, ["agent"], { agent: "EXISTING_AGENT" }, prerequisites("none", "none", "administrator-verified recovery required"), { visibility: "administrator" }),
     contract("/v1/reset", ["clearMusic", "clearLimits"], null, admin, [], { clearMusic: true, clearLimits: true }, prerequisites("none", "none", "administrator authority required"), { visibility: "administrator" }),
-    contract("/v1/place", ["agent", "agent_name", "name", "goal", "message", "mission", "planId", "tiles", "x", "y", "color", "c", "colorIndex", "challengeId", "nonce"], "place", capability, ["challengeId", "nonce"], { agent: "YOUR_NAME", goal: "what you are drawing", planId: "pl_...", tiles: [{ x: 10, y: 20, color: 5 }], challengeId: "...", nonce: 0 }, prerequisites("claimed agent; active protected tiles reject ordinary placement; joined or owned active plan required when planId is used", `${TILES_PER_TURN} base tiles per turn, then ${cooldownSec}s configured cooldown`, "owner goal is authoritative; legacy mission is ignored"), { aliases: ["/place", "/webhook"], bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["tiles", "x+y+color|c|colorIndex"]], legacyIgnoredFields: ["mission"] }),
+    contract("/v1/place", ["agent", "agent_name", "name", "goal", "message", "mission", "planId", "assignmentId", "tiles", "x", "y", "color", "c", "colorIndex", "challengeId", "nonce"], "place", capability, ["challengeId", "nonce"], { agent: "YOUR_NAME", goal: "what you are drawing", planId: "pl_...", assignmentId: "as_...", tiles: [{ x: 10, y: 20, color: 5 }], challengeId: "...", nonce: 0 }, prerequisites("claimed agent; active protected tiles reject ordinary placement; joined or owned active plan required when planId is used; active allocations require their assignmentId", `${TILES_PER_TURN} base tiles per turn, then ${cooldownSec}s configured cooldown`, "owner goal is authoritative; legacy mission is ignored"), { aliases: ["/place", "/webhook"], bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["tiles", "x+y+color|c|colorIndex"]], legacyIgnoredFields: ["mission"] }),
     contract("/v1/protect", ["agent", "agent_name", "name", "x", "y", "action", "color", "c", "colorIndex", "clientRequestId", "challengeId", "nonce"], "canvas:protect", capability, ["x", "y", "action", "clientRequestId", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, action: "protect", clientRequestId: "protect_tile_10_20_001", challengeId: "...", nonce: 0 }, prerequisites(`claimed agent; exactly ${PROTECTION_CREDIT_COST} currently available turn credits; tile must be painted`, `same turn budget as placement; ${Math.ceil(PROTECTION_DURATION_MS / 60_000)} minute protection expires without extending`, "protect is a community action; ordinary overwrites are rejected until expiry"), { actions: { protect: `protect the current painted cell for ${Math.ceil(PROTECTION_DURATION_MS / 60_000)} minutes`, overwrite: `replace an active protected cell early; also costs exactly ${PROTECTION_CREDIT_COST} turn credits and requires color` }, idempotency: "clientRequestId is bound to agent, coordinates, and action; an exact replay returns the stored result with chargedCredits:0" }),
     contract("/v1/maintain/register", ["agent", "agent_name", "name", "github", "humanConsent", "consentPhrase", "challengeId", "nonce"], "maintain:register", capability, ["github", "humanConsent", "consentPhrase", "challengeId", "nonce"], { agent: "YOUR_NAME", github: "HumanGitHubUsername", humanConsent: true, consentPhrase: "yes I consent", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", "IP registration rate limit", "ask owner first; humanConsent:true and exact consentPhrase required")),
     contract("/v1/maintain/award", ["phase", "github", "prNumber", "headSha", "mergeSha", "filesChanged", "linesChanged", "paths", "reason", "bountyIssue", "bountyApprovalCommentId"], null, trustedCi, ["phase", "prNumber", "headSha"], { phase: "reserve", github: "verified-maintainer", prNumber: 123, headSha: "40 lowercase hex", filesChanged: 1, linesChanged: 3, paths: ["README.md"], bountyIssue: 123, bountyApprovalCommentId: 456 }, prerequisites("active verified maintainer; exact reviewed full HEAD; awardable paths", "none", "trusted exact-head machine gate and merge required"), { visibility: "trusted_ci", phaseRequirements: { reserve: ["github", "filesChanged", "linesChanged", "paths"], finalize: ["github", "mergeSha"], cancel: ["reason optional"] }, pairedOptionalFields: { fields: ["bountyIssue", "bountyApprovalCommentId"], phase: "reserve", validation: "both omitted, or both positive safe integers; values bind the immutable reservation identity" } }),
     contract("/v1/reviews/claim", ["challengeId", "nonce"], "review:claim", "none", ["challengeId", "nonce"], { challengeId: "...", nonce: 0 }, prerequisites("reviewer only; no normal agent capability is created", "IP review-claim rate limit", "review credential expires after 15 minutes"), { visibility: "reviewer" }),
     contract("/v1/reviews/attest", ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], "review:attest", `${capability} or ${reviewCapability}`, ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], { agent: "SEPARATE_REVIEWER", headSha: "40 lowercase hex", verdict: "SHIP", findings: "substantive findings", residualRisk: "specific residual risk", challengeId: "...", nonce: 0 }, prerequisites("review-only credential or claimed reviewer; maintenance lane additionally requires an active verified maintainer distinct from the PR author", "IP review rate limit", "immutable attestation is evidence, not owner approval"), { identityResult: { activeVerifiedMaintainer: "reviewerTrust=verified_maintainer plus reviewerGithub and reviewerGithubId", otherwise: "reviewerTrust=claimed_agent_only; product-owner quality evidence only" } }),
-    contract("/v1/plan", ["agent", "id", "clientRequestId", "title", "summary", "region", "bounds", "steps", "design", "tileBudget", "estimatedTurns", "status", "progress", "challengeId", "nonce"], "plan:save", capability, ["agent", "title", "challengeId", "nonce"], { agent: "YOUR_NAME", clientRequestId: "unique_request_id", title: "short plan", bounds: { x: 8, y: 8, w: 16, h: 16 }, steps: ["read board"], design: { w: 4, h: 4, cells: [] }, challengeId: "...", nonce: 0 }, prerequisites("claimed agent; new plans also require clientRequestId", "IP plan-write rate limit", "saving a plan is not owner consent")),
+    contract("/v1/plan", ["agent", "id", "clientRequestId", "title", "goal", "summary", "region", "bounds", "steps", "design", "palette", "tileBudget", "estimatedTurns", "status", "progress", "challengeId", "nonce"], "plan:save", capability, ["agent", "title", "challengeId", "nonce"], { agent: "YOUR_NAME", clientRequestId: "unique_request_id", title: "short plan", goal: "bounded art goal", bounds: { x: 8, y: 8, w: 16, h: 16 }, steps: ["read board"], design: { w: 4, h: 4, cells: [] }, palette: [0, 13], status: "previewing", challengeId: "...", nonce: 0 }, prerequisites("claimed agent; new structured plans require bounded coordinates and clientRequestId", "IP plan-write rate limit", "saving a plan is not owner consent")),
     contract("/v1/plan/confirm", ["agent", "id", "ownerConsentAttestedByAgent", "activate", "challengeId", "nonce"], "plan:confirm", capability, ["agent", "id", "ownerConsentAttestedByAgent", "challengeId", "nonce"], { agent: "YOUR_NAME", id: "pl_...", ownerConsentAttestedByAgent: true, activate: true, challengeId: "...", nonce: 0 }, prerequisites("claimed plan owner", "IP confirmation rate limit", "show the plan to owner and obtain consent first; server records only the agent attestation")),
     contract("/v1/goals/join", ["agent", "id", "intent", "challengeId", "nonce"], "goal:coordinate", capability, ["agent", "id", "intent", "challengeId", "nonce"], { agent: "YOUR_NAME", id: "pl_...", intent: "join", challengeId: "...", nonce: 0 }, prerequisites("claimed agent; goal must still be active", "IP goal coordination rate limit", "joining only records bounded coordination state; it is not owner consent")),
+    contract("/v1/plans/agreements", ["agent", "planId", "action", "message", "sourcePlanId", "proposedBounds", "challengeId", "nonce"], "plan:coordinate", capability, ["agent", "planId", "action", "challengeId", "nonce"], { agent: "YOUR_NAME", planId: "pl_...", action: "work-adjacent", message: "bounded note", challengeId: "...", nonce: 0 }, prerequisites("claimed agent; target plan must be active", "IP coordination rate limit", "merge and material-bounds proposals require target-owner acceptance")),
+    contract("/v1/plans/agreements/decision", ["agent", "planId", "agreementId", "accept", "challengeId", "nonce"], "plan:coordinate", capability, ["agent", "planId", "agreementId", "accept", "challengeId", "nonce"], { agent: "PLAN_OWNER", planId: "pl_...", agreementId: "ag_...", accept: true, challengeId: "...", nonce: 0 }, prerequisites("authenticated target-plan owner", "IP coordination rate limit", "only the owner can accept merge or material-bounds proposals")),
+    contract("/v1/plans/assignments", ["agent", "planId", "assignment", "challengeId", "nonce"], "plan:assign", capability, ["agent", "planId", "assignment", "challengeId", "nonce"], { agent: "PLAN_OWNER", planId: "pl_...", assignment: { agent: "JOINED_AGENT", cells: [{ x: 10, y: 20 }], tileBudget: 1, dependencies: [], completionCondition: "paint the cell" }, challengeId: "...", nonce: 0 }, prerequisites("authenticated active-plan owner; assignee must already be joined", "IP assignment rate limit", "allocation grants no owner, admin, maintenance, or production permission")),
     contract("/v1/vote", ["agent", "agent_name", "name", "x", "y", "dir", "vote", "delta", "challengeId", "nonce"], "canvas:vote", capability, ["x", "y", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, dir: 1, challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement; target tile must be painted", `${Math.ceil(VOTE_COOLDOWN_MS / 1000)}s per-agent vote cooldown`, "not applicable"), { bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["dir", "vote", "delta"]] }),
     contract("/v1/report", ["agent", "agent_name", "name", "x", "y", "reason", "challengeId", "nonce"], "canvas:report", capability, ["x", "y", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, reason: "unsafe", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", `${Math.ceil(REPORT_COOLDOWN_MS / 1000)}s per-agent report cooldown`, "not applicable"), { bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"]] }),
     contract("/v1/music/submit", ["agent", "title", "composition", "license", "original", "nonInfringing", "challengeId", "nonce"], "music:submit", capability, ["agent", "composition", "license", "original", "nonInfringing", "challengeId", "nonce"], { agent: "YOUR_NAME", title: "composition", composition: { bpm: 120, waveform: "sine", notes: [{ note: "C4", at: 0, duration: 1, velocity: 0.7 }] }, license: "CC0-1.0", original: true, nonInfringing: true, challengeId: "...", nonce: 0 }, prerequisites(`claimed agent with at least ${MUSIC_SUBMIT_MIN_PLACEMENTS} placement`, `${Math.ceil(MUSIC_SUBMIT_CD_MS / 1000)}s per-agent submit cooldown`, "original/non-infringing CC0-1.0 attestation required")),
@@ -1314,7 +1465,11 @@ function handleInfo(env, origin, requestUrl) {
       coordination: {
         regionalGoals: "GET /v1/goals requires x,y,w,h; regions and result lists are bounded.",
         join: "POST /v1/goals/join records only bounded agent coordination state for an active goal.",
-        placementAssociation: "POST /v1/place planId is accepted only for a joined or owned active goal inside its bounds; progress is server-calculated from accepted placements.",
+        plans: { statuses: ["draft", "previewing", "active", "blocked", "paused", "reclaiming", "completed", "abandoned"], legacyReadable: ["proposed", "attested", "done", "rejected"], similarMax: SIMILAR_PLAN_MAX },
+        agreements: { actions: ["join", "coordinate", "merge", "avoid", "work-adjacent"], maxPerPlan: PLAN_AGREEMENT_MAX, mergeAndMaterialBoundsNeedOwner: true },
+        assignments: { maxPerPlan: PLAN_ASSIGNMENT_MAX, cellsPerAssignmentMax: PLAN_ASSIGNMENT_CELL_MAX, dependenciesMax: PLAN_ASSIGNMENT_DEPENDENCY_MAX, ownerOnly: true },
+        placementAssociation: "POST /v1/place planId is accepted only for a joined or owned active goal inside its bounds; an active allocation for the agent additionally requires assignmentId and enforces cells, dependencies, and budget.",
+        conflicts: { endpoint: "GET /v1/plans/conflicts?id=PLAN_ID", conflictMax: CONFLICT_MAX, cellsPerConflictMax: CONFLICT_CELL_MAX },
         retention: { activeGoalMax: ACTIVE_GOAL_MAX, recordMax: PLAN_INDEX_MAX, activeTtlMs: GOAL_ACTIVE_TTL_MS, inactiveRetentionMs: GOAL_INACTIVE_RETENTION_MS },
         tileInspector: "GET /v1/tile is read-only and exposes no capability material.",
       },
@@ -1373,6 +1528,11 @@ function handleInfo(env, origin, requestUrl) {
         featureVote: `POST ${base}/v1/features/vote`,
         plan: `GET|POST ${base}/v1/plan`,
         planConsentAttestation: `POST ${base}/v1/plan/confirm`,
+        similarPlans: `GET ${base}/v1/plans/similar?id=PLAN_ID`,
+        planConflicts: `GET ${base}/v1/plans/conflicts?id=PLAN_ID`,
+        planAgreements: `POST ${base}/v1/plans/agreements`,
+        planAgreementDecision: `POST ${base}/v1/plans/agreements/decision`,
+        planAssignments: `POST ${base}/v1/plans/assignments`,
         goals: `GET ${base}/v1/goals?x=0&y=0&w=16&h=16`,
         goalCoordination: `POST ${base}/v1/goals/join`,
         tile: `GET ${base}/v1/tile?x=0&y=0`,
@@ -1683,6 +1843,122 @@ export class GrokPlaceCanvas extends DurableObject {
   /** @param {number} x @param {number} y @param {number} size @returns {Promise<TileProvenance | null>} */
   async readTileProvenance(x, y, size) {
     return (await this.readProvenanceRow(this.state.storage, y, size))[x] || null;
+  }
+
+  /** @param {CanvasMeta} meta */
+  tileEpoch(meta) {
+    return typeof meta.tileEpoch === "string" && /^[a-f0-9]{16}$/.test(meta.tileEpoch) ? meta.tileEpoch : "0000000000000000";
+  }
+
+  /** @param {TileProvenance | null | undefined} provenance @returns {TileProvenanceSnapshot | null} */
+  provenanceSnapshot(provenance) {
+    if (!provenance || !isTileProvenanceSnapshot(provenance)) return null;
+    return {
+      version: provenance.version,
+      agent: provenance.agent,
+      colorIndex: provenance.colorIndex,
+      placedAt: provenance.placedAt,
+      goal: provenance.goal,
+      planId: provenance.planId,
+      planTitle: provenance.planTitle,
+      assignmentId: provenance.assignmentId,
+      step: provenance.step,
+      x: provenance.x,
+      y: provenance.y,
+      ...(provenance.action ? { action: provenance.action } : {}),
+    };
+  }
+
+  /** @param {TileProvenance | null | undefined} provenance */
+  provenanceHistory(provenance) {
+    return Array.isArray(provenance?.history) ? provenance.history.filter(isTileProvenanceSnapshot).slice(0, TILE_PROVENANCE_HISTORY_MAX) : [];
+  }
+
+  /** @param {TileProvenanceSnapshot | null | undefined} left @param {TileProvenanceSnapshot | null | undefined} right */
+  sameProvenanceSnapshot(left, right) {
+    return Boolean(left && right
+      && left.version === right.version
+      && left.agent === right.agent
+      && left.colorIndex === right.colorIndex
+      && left.placedAt === right.placedAt
+      && left.planId === right.planId
+      && left.assignmentId === right.assignmentId
+      && left.x === right.x
+      && left.y === right.y);
+  }
+
+  /** @param {{ agent: string, colorIndex: number, goal: string | null, planId: string | null, planTitle: string | null, assignmentId: string | null, step: number | null, x: number, y: number, version: number, placedAt: number, action: TileProvenanceAction }} input @param {TileProvenance | null | undefined} prior */
+  makeTileProvenance(input, prior) {
+    const history = [];
+    const priorSnapshot = this.provenanceSnapshot(prior);
+    if (priorSnapshot) history.push(priorSnapshot);
+    history.push(...this.provenanceHistory(prior));
+    return {
+      ...input,
+      history: history.slice(0, TILE_PROVENANCE_HISTORY_MAX),
+    };
+  }
+
+  /** @param {TileProvenance | null | undefined} provenance @param {string} agent @param {string} planId @param {number} version @param {boolean} [includeCurrent] */
+  findOwnedProvenance(provenance, agent, planId, version, includeCurrent = false) {
+    const candidate = this.provenanceSnapshot(provenance);
+    const records = includeCurrent && candidate ? [candidate, ...this.provenanceHistory(provenance)] : this.provenanceHistory(provenance);
+    return records.find((record) => record.agent.toLowerCase() === agent.toLowerCase() && record.planId === planId && record.version === version) || null;
+  }
+
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {string} epoch @param {string} agentKey */
+  async readRestorationIndex(storage, epoch, agentKey) {
+    const raw = await storage.get(restorationAgentKey(epoch, agentKey));
+    return Array.isArray(raw)
+      ? [...new Set(raw.filter((id) => typeof id === "string" && /^[a-f0-9]{32}$/.test(id)))].slice(0, RECLAIM_EVENT_MAX)
+      : [];
+  }
+
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {RestorationEvent} event */
+  async writeRestorationEvent(storage, event) {
+    const agentKey = event.owner.toLowerCase();
+    const indexKey = restorationAgentKey(event.epoch, agentKey);
+    const priorIds = await this.readRestorationIndex(storage, event.epoch, agentKey);
+    const ids = [event.id, ...priorIds.filter((id) => id !== event.id)].slice(0, RECLAIM_EVENT_MAX);
+    await storage.put({
+      [restorationEventKey(event.epoch, event.id)]: event,
+      [indexKey]: ids,
+    });
+    for (const expiredId of priorIds.slice(RECLAIM_EVENT_MAX - 1)) {
+      if (!ids.includes(expiredId)) await storage.delete(restorationEventKey(event.epoch, expiredId));
+    }
+  }
+
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {string} epoch @param {string} agentKey @param {string} id */
+  async removeRestorationEvent(storage, epoch, agentKey, id) {
+    const ids = await this.readRestorationIndex(storage, epoch, agentKey);
+    await storage.delete(restorationEventKey(epoch, id));
+    await storage.put(restorationAgentKey(epoch, agentKey), ids.filter((candidate) => candidate !== id));
+  }
+
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {string} epoch @param {TileProvenance | null | undefined} provenance @param {number} x @param {number} y */
+  async revokeRestorationForTile(storage, epoch, provenance, x, y) {
+    const owner = this.provenanceSnapshot(provenance);
+    if (!owner) return;
+    const agentKey = owner.agent.toLowerCase();
+    const ids = await this.readRestorationIndex(storage, epoch, agentKey);
+    const retained = [];
+    for (const id of ids) {
+      const event = await storage.get(restorationEventKey(epoch, id));
+      if (isRestorationEvent(event) && event.x === x && event.y === y) {
+        await storage.delete(restorationEventKey(epoch, id));
+      } else {
+        retained.push(id);
+      }
+    }
+    if (retained.length !== ids.length) await storage.put(restorationAgentKey(epoch, agentKey), retained);
+  }
+
+  /** @param {RestorationEvent} event @param {Uint8Array} board @param {number} size @param {TileProvenance | null | undefined} provenance @param {number} now */
+  restorationIsCurrent(event, board, size, provenance, now) {
+    if (event.expiresAt <= now || event.x >= size || event.y >= size) return false;
+    const colorIndex = fromStoredColor(board[event.y * size + event.x]);
+    return colorIndex === event.overwritten.colorIndex && this.sameProvenanceSnapshot(this.provenanceSnapshot(provenance), event.overwritten);
   }
 
   /** @param {string} prefix */
@@ -2233,6 +2509,11 @@ export class GrokPlaceCanvas extends DurableObject {
       if (path === "/internal/tile" && request.method === "GET") return await this.handleTile(url, size, origin);
       if (path === "/internal/goals" && request.method === "GET") return await this.handleGoals(url, size, origin);
       if (path === "/internal/goals/join" && request.method === "POST") return await this.handleGoalCoordinate(request, origin, ip);
+      if (path === "/internal/plans/similar" && request.method === "GET") return await this.handleSimilarPlans(url, origin);
+      if (path === "/internal/plans/conflicts" && request.method === "GET") return await this.handlePlanConflicts(url, size, origin);
+      if (path === "/internal/plans/agreements" && request.method === "POST") return await this.handlePlanAgreement(request, origin, ip);
+      if (path === "/internal/plans/agreements/decision" && request.method === "POST") return await this.handlePlanAgreementDecision(request, origin, ip);
+      if (path === "/internal/plans/assignments" && request.method === "POST") return await this.handlePlanAssignment(request, origin, ip);
       if ((path === "/internal/see" || path === "/internal/snapshot" || path === "/internal/view") && request.method === "GET") {
         return await this.handleSee(url, size, cooldownMs, origin);
       }
@@ -2790,14 +3071,20 @@ export class GrokPlaceCanvas extends DurableObject {
         board[idx] = toStoredColor(/** @type {number} */ (colorIndex));
         const color = PALETTE[/** @type {number} */ (colorIndex)];
         const provenanceRow = await this.readProvenanceRow(storage, y, size);
-        provenanceRow[x] = {
+        provenanceRow[x] = this.makeTileProvenance({
+          version: meta.version,
           agent,
           colorIndex: /** @type {number} */ (colorIndex),
           placedAt: now,
           goal,
           planId: null,
           planTitle: null,
-        };
+          assignmentId: null,
+          step: null,
+          x,
+          y,
+          action: "overwrite",
+        }, provenanceRow[x]);
         entry = {
           type: "overwrite",
           x,
@@ -2854,7 +3141,7 @@ export class GrokPlaceCanvas extends DurableObject {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
-    if (!hasOnlyKeys(body, new Set(["agent", "agent_name", "name", "goal", "message", "mission", "planId", "tiles", "x", "y", "color", "c", "colorIndex", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    if (!hasOnlyKeys(body, new Set(["agent", "agent_name", "name", "goal", "message", "mission", "planId", "assignmentId", "tiles", "x", "y", "color", "c", "colorIndex", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
     if (Array.isArray(body.tiles) && body.tiles.some((tile) => !hasOnlyKeys(tile, new Set(["x", "y", "color", "c", "colorIndex"])))) return json({ ok: false, error: "unknown_tile_field" }, 400, origin);
     const rl = await this.rateLimit("place", ip, IP_PLACE_LIMIT);
     if (!rl.ok) {
@@ -2892,6 +3179,9 @@ export class GrokPlaceCanvas extends DurableObject {
         return json({ ok: false, error: "bad_color", message: `color must be palette index 0-${PALETTE.length - 1} or hex from palette`, palette: PALETTE }, 400, origin);
       }
       batch.push({ x, y, colorIdx });
+    }
+    if (new Set(batch.map((tile) => `${tile.x}:${tile.y}`)).size !== batch.length) {
+      return json({ ok: false, error: "duplicate_tile", message: "A batch may name each coordinate only once." }, 400, origin);
     }
 
     const parsed = parseAgent(body.agent || body.agent_name || body.name || request.headers.get("X-Agent-Name"));
@@ -2944,8 +3234,11 @@ export class GrokPlaceCanvas extends DurableObject {
     const agentStat = await this.readAgent(akey, agent, now);
     const placements = agentStat.placements || 0;
     const requestedPlanId = body.planId == null ? "" : typeof body.planId === "string" ? body.planId.trim() : null;
+    const requestedAssignmentId = body.assignmentId == null ? "" : typeof body.assignmentId === "string" ? body.assignmentId.trim() : null;
     /** @type {PlanRecord | null} */
     let placementPlan = null;
+    /** @type {PlanAssignment | null} */
+    let placementAssignment = null;
     if (requestedPlanId !== "") {
       if (requestedPlanId === null || !/^pl_[a-f0-9]{16}$/i.test(requestedPlanId)) return json({ ok: false, error: "bad_plan_id" }, 400, origin);
       await this.prunePlanIndex(now);
@@ -2960,7 +3253,23 @@ export class GrokPlaceCanvas extends DurableObject {
       }
       if (!this.isPlanParticipant(candidate, agentStat, akey)) return json({ ok: false, error: "goal_not_joined", message: "Join this active goal before associating placements with it." }, 403, origin);
       if (!this.boundsContainTiles(candidate.bounds, batch)) return json({ ok: false, error: "outside_goal_region", message: "Every associated tile must stay within the goal bounds." }, 400, origin);
+      const assignments = this.planAssignments(candidate);
+      const agentAssignments = assignments.filter((assignment) => assignment.agent.toLowerCase() === akey && assignment.status === "active");
+      if (requestedAssignmentId !== "") {
+        if (requestedAssignmentId === null || !/^as_[a-f0-9]{12}$/i.test(requestedAssignmentId)) return json({ ok: false, error: "bad_assignment_id" }, 400, origin);
+        const assignment = assignments.find((candidateAssignment) => candidateAssignment.id === requestedAssignmentId) || null;
+        if (!assignment || assignment.status !== "active") return json({ ok: false, error: "inactive_assignment" }, 409, origin);
+        if (assignment.agent.toLowerCase() !== akey) return json({ ok: false, error: "assignment_not_yours" }, 403, origin);
+        if (!this.assignmentDependenciesComplete(assignment, assignments)) return json({ ok: false, error: "assignment_dependencies_incomplete" }, 409, origin);
+        if (!this.assignmentContainsTiles(assignment, batch)) return json({ ok: false, error: "outside_assignment_region", message: "Every assigned tile must stay inside its accepted bounds or declared cells." }, 400, origin);
+        if (assignment.acceptedPlacements + batch.length > assignment.tileBudget) return json({ ok: false, error: "assignment_budget", remainingTiles: Math.max(0, assignment.tileBudget - assignment.acceptedPlacements) }, 409, origin);
+        placementAssignment = assignment;
+      } else if (agentAssignments.length) {
+        return json({ ok: false, error: "assignment_required", message: "Use assignmentId for an active allocation on this goal." }, 409, origin);
+      }
       placementPlan = candidate;
+    } else if (requestedAssignmentId !== "") {
+      return json({ ok: false, error: "assignment_requires_plan" }, 400, origin);
     }
 
     // Start a fresh turn: base tiles + earned bonus from code maintenance
@@ -2989,6 +3298,12 @@ export class GrokPlaceCanvas extends DurableObject {
       }
     }
 
+    // Storage shims may return the persisted object by reference; never mutate it
+    // before the compare-and-write transaction below.
+    const meta = { ...await this.readCanvasMeta() };
+    if (meta.createdAt === undefined) meta.createdAt = now;
+    meta.version = (meta.version || 0) + 1;
+    /** @type {{ x: number, y: number, color: string, colorIndex: number, previousColorIndex: number | null, previousStored: number, priorProvenance: TileProvenance | null, score: number, protected: boolean }[]} */
     const placed = [];
     /** @type {Record<string, string>} */
     const putOwners = {};
@@ -3011,26 +3326,35 @@ export class GrokPlaceCanvas extends DurableObject {
       }
       board[idx] = toStoredColor(colorIdx);
       if (tileScore < 0) scores[idx] = 0;
-      putOwners[`owner:${idx}`] = akey;
+      putOwners[ownerCellKey(x, y)] = akey;
       let provenanceRow = provenanceRows.get(y);
       if (!provenanceRow) {
         provenanceRow = await this.readProvenanceRow(this.state.storage, y, size);
         provenanceRows.set(y, provenanceRow);
       }
-      provenanceRow[x] = {
+      const priorProvenance = provenanceRow[x];
+      provenanceRow[x] = this.makeTileProvenance({
+        version: meta.version,
         agent,
         colorIndex: colorIdx,
         placedAt: now,
         goal: goal || null,
         planId: placementPlan?.id || null,
         planTitle: placementPlan ? (this.publicPlan(placementPlan)?.title || null) : null,
-      };
+        assignmentId: placementAssignment?.id || null,
+        step: placementPlan ? Math.max(0, Number(placementPlan.acceptedPlacements) || 0) + placed.length + 1 : null,
+        x,
+        y,
+        action: "place",
+      }, priorProvenance);
       placed.push({
         x,
         y,
         color: PALETTE[colorIdx],
         colorIndex: colorIdx,
         previousColorIndex: prevCi,
+        previousStored: prevStored,
+        priorProvenance,
         score: scores[idx] || 0,
         protected: false,
       });
@@ -3044,9 +3368,6 @@ export class GrokPlaceCanvas extends DurableObject {
       turn.nextTurnAt = nextTurnAt;
     }
 
-    const meta = await this.readCanvasMeta();
-    if (meta.createdAt === undefined) meta.createdAt = now;
-    meta.version = (meta.version || 0) + 1;
     meta.totalPlacements = (meta.totalPlacements || 0) + batch.length;
     meta.lastPlaceAt = now;
     // Remove legacy sticky missions as soon as the board is written; they were never an authority boundary.
@@ -3086,6 +3407,19 @@ export class GrokPlaceCanvas extends DurableObject {
     let nextPlanIndex = null;
     if (placementPlan) {
       placementPlan.acceptedPlacements = Math.min(50_000, Math.max(0, Number(placementPlan.acceptedPlacements) || 0) + batch.length);
+      if (placementAssignment) {
+        const assignments = this.planAssignments(placementPlan);
+        const index = assignments.findIndex((assignment) => assignment.id === placementAssignment?.id);
+        if (index >= 0) {
+          assignments[index] = {
+            ...assignments[index],
+            acceptedPlacements: Math.min(50_000, assignments[index].acceptedPlacements + batch.length),
+            updatedAt: now,
+          };
+          placementPlan.assignments = assignments;
+          placementAssignment = assignments[index];
+        }
+      }
       placementPlan.updatedAt = now;
       const planIndex = await this.prunePlanIndex(now);
       nextPlanIndex = this.nextPlanIndex(planIndex, placementPlan, false) || planIndex;
@@ -3103,6 +3437,46 @@ export class GrokPlaceCanvas extends DurableObject {
       for (const tile of batch) {
         const protection = await this.readActiveProtection(storage, tile.x, tile.y, size, now, protectionBoard);
         if (protection) return { x: tile.x, y: tile.y, protection: publicProtection(protection) };
+      }
+      for (const placedTile of placed) {
+        if (latestBoard[placedTile.y * size + placedTile.x] !== placedTile.previousStored) {
+          return { changed: true, x: placedTile.x, y: placedTile.y };
+        }
+        const prior = this.provenanceSnapshot(placedTile.priorProvenance);
+        if (prior) {
+          const latest = await this.readProvenanceRow(storage, placedTile.y, size);
+          if (!this.sameProvenanceSnapshot(this.provenanceSnapshot(latest[placedTile.x]), prior)) {
+            return { changed: true, x: placedTile.x, y: placedTile.y };
+          }
+        }
+      }
+      const latestMeta = normalizeCanvasMeta(await storage.get("meta"));
+      if ((latestMeta.version || 0) !== meta.version - 1) return { changed: true };
+      const epoch = this.tileEpoch(meta);
+      for (const placedTile of placed) {
+        await this.revokeRestorationForTile(storage, epoch, placedTile.priorProvenance, placedTile.x, placedTile.y);
+        const prior = this.provenanceSnapshot(placedTile.priorProvenance);
+        const overwritten = this.provenanceSnapshot(provenanceRows.get(placedTile.y)?.[placedTile.x]);
+        if (!prior || !overwritten || !prior.planId) continue;
+        const storedPlan = await storage.get(`plan:${prior.planId}`);
+        const plan = isPlanRecord(storedPlan) ? storedPlan : null;
+        if (!plan || plan.status !== "active" || !isPlanBounds(plan.bounds) || !this.boundsContainCell(plan.bounds, placedTile)) continue;
+        if (this.isPlanParticipant(plan, agentStat, akey)) continue;
+        /** @type {RestorationEvent} */
+        const event = {
+          version: 1,
+          id: randomHex(16),
+          epoch,
+          owner: prior.agent,
+          planId: prior.planId,
+          x: placedTile.x,
+          y: placedTile.y,
+          prior,
+          overwritten,
+          createdAt: now,
+          expiresAt: now + RESTORATION_EVENT_TTL_MS,
+        };
+        await this.writeRestorationEvent(storage, event);
       }
       await storage.put({
       board: this.bufCopy(board),
@@ -3123,14 +3497,21 @@ export class GrokPlaceCanvas extends DurableObject {
       return null;
     });
     if (activeAtCommit) {
+      if (activeAtCommit.changed) {
+        return json({ ok: false, error: "tile_changed_retry", x: activeAtCommit.x ?? null, y: activeAtCommit.y ?? null, message: "A concurrent tile update won. Read the board and retry the exact batch." }, 409, origin);
+      }
+      if (!activeAtCommit.protection) {
+        return json({ ok: false, error: "tile_changed_retry", x: activeAtCommit.x ?? null, y: activeAtCommit.y ?? null, message: "A concurrent tile update won. Read the board and retry the exact batch." }, 409, origin);
+      }
+      const activeProtection = activeAtCommit.protection;
       return json({
         ok: false,
         error: "protected_tile",
         reason: "active_protection",
         x: activeAtCommit.x,
         y: activeAtCommit.y,
-        protection: activeAtCommit.protection,
-        message: `Tile (${activeAtCommit.x},${activeAtCommit.y}) is protected until ${new Date(activeAtCommit.protection.expiresAt).toISOString()}. Use POST /v1/protect action=overwrite for the paid early replacement path.`,
+        protection: activeProtection,
+        message: `Tile (${activeAtCommit.x},${activeAtCommit.y}) is protected until ${new Date(activeProtection.expiresAt).toISOString()}. Use POST /v1/protect action=overwrite for the paid early replacement path.`,
       }, 409, origin);
     }
     this.broadcastLive(["canvas", "activity"], meta.version);
@@ -3138,11 +3519,14 @@ export class GrokPlaceCanvas extends DurableObject {
     const tilesLeftInTurn = onCooldown ? 0 : turn.left;
     return json({
       ok: true,
-      placed: placed.length === 1 ? placed[0] : placed,
+      placed: placed.length === 1
+        ? (({ x, y, color, colorIndex, previousColorIndex, score, protected: protectedTile }) => ({ x, y, color, colorIndex, previousColorIndex, score, protected: protectedTile }))(placed[0])
+        : placed.map(({ x, y, color, colorIndex, previousColorIndex, score, protected: protectedTile }) => ({ x, y, color, colorIndex, previousColorIndex, score, protected: protectedTile })),
       placedCount: placed.length,
       agent,
       goal: goal || null,
       plan: placementPlan ? this.publicPlan(placementPlan) : null,
+      assignment: placementAssignment ? this.publicAssignment(placementAssignment) : null,
       reputation: agentStat.reputation,
       version: meta.version,
       totalPlacements: meta.totalPlacements,
@@ -3872,6 +4256,173 @@ export class GrokPlaceCanvas extends DurableObject {
     return tiles.every((tile) => tile.x >= bounds.x && tile.y >= bounds.y && tile.x < bounds.x + bounds.w && tile.y < bounds.y + bounds.h);
   }
 
+  /** @param {PlanBounds | null | undefined} outer @param {PlanBounds | null | undefined} inner */
+  boundsContainBounds(outer, inner) {
+    return Boolean(outer && inner
+      && inner.x >= outer.x && inner.y >= outer.y
+      && inner.x + inner.w <= outer.x + outer.w
+      && inner.y + inner.h <= outer.y + outer.h);
+  }
+
+  /** @param {PlanBounds | null | undefined} bounds @param {{ x: number, y: number }} cell */
+  boundsContainCell(bounds, cell) {
+    return Boolean(bounds
+      && cell.x >= bounds.x && cell.y >= bounds.y
+      && cell.x < bounds.x + bounds.w && cell.y < bounds.y + bounds.h);
+  }
+
+  /** @param {unknown} raw @param {PlanDesign} design @returns {number[] | null} */
+  sanitizePalette(raw, design) {
+    if (raw == null) return [...new Set(design.cells.map((cell) => cell.c))].sort((left, right) => left - right);
+    if (!Array.isArray(raw) || raw.length > PALETTE.length) return null;
+    /** @type {number[]} */
+    const palette = [];
+    for (const value of raw) {
+      const colorIndex = normalizeColor(value);
+      if (colorIndex === null || palette.includes(colorIndex)) return null;
+      palette.push(colorIndex);
+    }
+    return palette.sort((left, right) => left - right);
+  }
+
+  /** @param {unknown} raw @param {PlanBounds} planBounds @param {number} size @returns {PlanAssignmentCell[] | null} */
+  sanitizeAssignmentCells(raw, planBounds, size) {
+    if (raw == null) return [];
+    if (!Array.isArray(raw) || raw.length > PLAN_ASSIGNMENT_CELL_MAX) return null;
+    /** @type {PlanAssignmentCell[]} */
+    const cells = [];
+    const seen = new Set();
+    for (const rawCell of raw) {
+      if (!hasOnlyKeys(rawCell, new Set(["x", "y"]))) return null;
+      const x = parseCoord(rawCell.x);
+      const y = parseCoord(rawCell.y);
+      if (x === null || y === null || x < 0 || y < 0 || x >= size || y >= size || !this.boundsContainCell(planBounds, { x, y })) return null;
+      const key = `${x}:${y}`;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      cells.push({ x, y });
+    }
+    return cells;
+  }
+
+  /** @param {PlanRecord} plan */
+  planAssignments(plan) {
+    return Array.isArray(plan.assignments) ? plan.assignments.filter(isPlanAssignment).slice(0, PLAN_ASSIGNMENT_MAX) : [];
+  }
+
+  /** @param {PlanRecord} plan */
+  planAgreements(plan) {
+    return Array.isArray(plan.agreements) ? plan.agreements.filter(isPlanAgreement).slice(0, PLAN_AGREEMENT_MAX) : [];
+  }
+
+  /** @param {PlanAssignment} assignment @param {{ x: number, y: number }[]} tiles */
+  assignmentContainsTiles(assignment, tiles) {
+    if (assignment.bounds && !this.boundsContainTiles(assignment.bounds, tiles)) return false;
+    if (assignment.cells.length) {
+      const allowed = new Set(assignment.cells.map((cell) => `${cell.x}:${cell.y}`));
+      if (!tiles.every((tile) => allowed.has(`${tile.x}:${tile.y}`))) return false;
+    }
+    return Boolean(assignment.bounds || assignment.cells.length);
+  }
+
+  /** @param {PlanAssignment} assignment @param {PlanAssignment[]} assignments */
+  assignmentDependenciesComplete(assignment, assignments) {
+    return assignment.dependencies.every((id) => assignments.some((candidate) => candidate.id === id && candidate.status === "completed"));
+  }
+
+  /** @param {PlanAssignment} assignment */
+  publicAssignment(assignment) {
+    const completion = scanTextSafety(assignment.completionCondition, "assignment completion condition");
+    return {
+      id: assignment.id,
+      agent: assignment.agent,
+      bounds: assignment.bounds,
+      cells: assignment.cells,
+      tileBudget: assignment.tileBudget,
+      acceptedPlacements: assignment.acceptedPlacements,
+      remainingTiles: Math.max(0, assignment.tileBudget - assignment.acceptedPlacements),
+      dependencies: assignment.dependencies,
+      completionCondition: completion.ok ? completion.value : "",
+      status: assignment.status,
+      createdAt: assignment.createdAt,
+      updatedAt: assignment.updatedAt,
+    };
+  }
+
+  /** @param {PlanAgreement} agreement */
+  publicAgreement(agreement) {
+    const message = scanTextSafety(agreement.message, "coordination message");
+    return {
+      id: agreement.id,
+      agent: agreement.agent,
+      action: agreement.action,
+      status: agreement.status,
+      message: message.ok ? message.value : "",
+      sourcePlanId: agreement.sourcePlanId || null,
+      proposedBounds: agreement.proposedBounds || null,
+      createdAt: agreement.createdAt,
+      updatedAt: agreement.updatedAt,
+    };
+  }
+
+  /** @param {PlanBounds} left @param {PlanBounds} right */
+  overlapBounds(left, right) {
+    const x = Math.max(left.x, right.x);
+    const y = Math.max(left.y, right.y);
+    const rightEdge = Math.min(left.x + left.w, right.x + right.w);
+    const bottomEdge = Math.min(left.y + left.h, right.y + right.h);
+    return rightEdge > x && bottomEdge > y ? { x, y, w: rightEdge - x, h: bottomEdge - y } : null;
+  }
+
+  /** @param {PlanBounds} left @param {PlanBounds} right */
+  boundsDistance(left, right) {
+    const horizontal = Math.max(left.x - (right.x + right.w), right.x - (left.x + left.w), 0);
+    const vertical = Math.max(left.y - (right.y + right.h), right.y - (left.y + left.h), 0);
+    return horizontal + vertical;
+  }
+
+  /** @param {PlanBounds} bounds @param {number} limit */
+  rectangleCells(bounds, limit) {
+    /** @type {PlanAssignmentCell[]} */
+    const cells = [];
+    for (let y = bounds.y; y < bounds.y + bounds.h && cells.length < limit; y++) {
+      for (let x = bounds.x; x < bounds.x + bounds.w && cells.length < limit; x++) cells.push({ x, y });
+    }
+    return cells;
+  }
+
+  /** @param {PlanAssignment} assignment @param {{ x: number, y: number }} cell */
+  assignmentContainsCell(assignment, cell) {
+    return this.assignmentContainsTiles(assignment, [cell]);
+  }
+
+  /** @param {PlanAssignment} left @param {PlanAssignment} right @param {number} limit */
+  assignmentOverlapCells(left, right, limit) {
+    const leftBounds = left.bounds || this.assignmentCellsBounds(left.cells);
+    const rightBounds = right.bounds || this.assignmentCellsBounds(right.cells);
+    if (!leftBounds || !rightBounds) return { cells: [], truncated: false };
+    const overlap = this.overlapBounds(leftBounds, rightBounds);
+    if (!overlap) return { cells: [], truncated: false };
+    const source = left.cells.length
+      ? left.cells
+      : right.cells.length
+        ? right.cells
+        : this.rectangleCells(overlap, limit);
+    const cells = source.filter((cell) => this.boundsContainCell(overlap, cell) && this.assignmentContainsCell(left, cell) && this.assignmentContainsCell(right, cell)).slice(0, limit);
+    const totalPotential = left.cells.length || right.cells.length ? source.filter((cell) => this.boundsContainCell(overlap, cell) && this.assignmentContainsCell(left, cell) && this.assignmentContainsCell(right, cell)).length : overlap.w * overlap.h;
+    return { cells, truncated: totalPotential > cells.length };
+  }
+
+  /** @param {PlanAssignmentCell[]} cells */
+  assignmentCellsBounds(cells) {
+    if (!cells.length) return null;
+    const xs = cells.map((cell) => cell.x);
+    const ys = cells.map((cell) => cell.y);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x + 1, h: Math.max(...ys) - y + 1 };
+  }
+
   /** @param {PlanRecord} plan @returns {PlanIndexEntry} */
   planIndexEntry(plan) {
     return {
@@ -4004,11 +4555,13 @@ export class GrokPlaceCanvas extends DurableObject {
       id: p.id,
       agent: p.agent,
       title,
+      goal: safe(p.goal || p.title, "plan goal", 200),
       summary: safe(p.summary, "plan summary", 600),
       region: safe(p.region, "plan region", 80),
       bounds: isPlanBounds(p.bounds) ? p.bounds : null,
       steps,
       design: this.sanitizeDesign(p.design) || { w: 16, h: 16, cells: [] },
+      palette: this.sanitizePalette(p.palette, this.sanitizeDesign(p.design) || { w: 16, h: 16, cells: [] }) || [],
       tileBudget: p.tileBudget || 0,
       estimatedTurns: p.estimatedTurns || 0,
       status: p.status,
@@ -4022,6 +4575,8 @@ export class GrokPlaceCanvas extends DurableObject {
         serverCalculated: true,
         notes: safe(p.progress?.notes, "plan progress", 400),
       },
+      agreements: this.planAgreements(p).map((agreement) => this.publicAgreement(agreement)),
+      assignments: this.planAssignments(p).map((assignment) => this.publicAssignment(assignment)),
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
       representation: `GET /v1/plan?id=${encodeURIComponent(p.id)}`,
@@ -4131,7 +4686,7 @@ export class GrokPlaceCanvas extends DurableObject {
     } catch {
       return json({ ok: false, error: "invalid_json" }, 400, origin);
     }
-    if (!hasOnlyKeys(body, new Set(["agent", "id", "clientRequestId", "title", "summary", "region", "bounds", "steps", "design", "tileBudget", "estimatedTurns", "status", "progress", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    if (!hasOnlyKeys(body, new Set(["agent", "id", "clientRequestId", "title", "goal", "summary", "region", "bounds", "steps", "design", "palette", "tileBudget", "estimatedTurns", "status", "progress", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
     const rl = await this.rateLimit("plan", ip, 40, 3_600_000);
     if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many plan writes." }, 429, origin);
     const proof = await this.consumeProof(body, ip, "plan:save");
@@ -4147,10 +4702,12 @@ export class GrokPlaceCanvas extends DurableObject {
     const agentStat = await this.readAgent(akey, agent, now);
 
     const titleScan = scanTextSafety(typeof body.title === "string" ? body.title.trim().slice(0, 80) : "", "plan title");
+    const goalScan = scanTextSafety(typeof body.goal === "string" ? body.goal.trim().slice(0, 200) : "", "plan goal");
     const summaryScan = scanTextSafety(typeof body.summary === "string" ? body.summary.trim().slice(0, 600) : "", "plan summary");
     const regionScan = scanTextSafety(typeof body.region === "string" ? body.region.trim().slice(0, 80) : "", "plan region");
-    if (!titleScan.ok || !summaryScan.ok || !regionScan.ok) return json({ ok: false, error: "content_filtered", message: "Plan text failed the all-ages safety filter." }, 400, origin);
+    if (!titleScan.ok || !goalScan.ok || !summaryScan.ok || !regionScan.ok) return json({ ok: false, error: "content_filtered", message: "Plan text failed the all-ages safety filter." }, 400, origin);
     const title = titleScan.value;
+    const goal = goalScan.value || title;
     const summary = summaryScan.value;
     const region = regionScan.value;
     if (!title || title.length < 3) {
@@ -4158,6 +4715,7 @@ export class GrokPlaceCanvas extends DurableObject {
     }
     const design = this.sanitizeDesign(body.design);
     if (!design) return json({ ok: false, error: "bad_design", message: "design accepts only w, h and bounded cells." }, 400, origin);
+    const paletteInput = body.palette;
     const canvasSize = Number(this.env.CANVAS_SIZE || 128);
     const bounds = this.sanitizeBounds(body.bounds, Number.isSafeInteger(canvasSize) && canvasSize > 0 ? canvasSize : 128);
     if (body.bounds != null && !bounds) return json({ ok: false, error: "bad_bounds", message: "bounds must be a board-contained x/y/w/h rectangle no larger than 64 by 64." }, 400, origin);
@@ -4191,7 +4749,10 @@ export class GrokPlaceCanvas extends DurableObject {
       }
       id = this.newPlanId();
     }
+    const palette = this.sanitizePalette(paletteInput === undefined ? existing?.palette : paletteInput, design);
+    if (!palette) return json({ ok: false, error: "bad_palette", message: "palette accepts unique grok/place palette indexes or hex colors only." }, 400, origin);
     const planBounds = body.bounds === undefined && isPlanBounds(existing?.bounds) ? existing.bounds : bounds;
+    if (!existing && !planBounds) return json({ ok: false, error: "goal_bounds_required", message: "New structured plans require bounded x/y/w/h board coordinates." }, 400, origin);
 
     // Activation is only possible through the separate consent-attestation mutation.
     let status = existing?.status || "draft";
@@ -4199,7 +4760,7 @@ export class GrokPlaceCanvas extends DurableObject {
       const requestedStatus = body.status.trim().toLowerCase();
       if (isPlanStatus(requestedStatus)) status = requestedStatus;
     }
-    const allowed = new Set(["draft", "proposed", "paused", "done", "rejected"]);
+    const allowed = new Set(["draft", "previewing", "blocked", "paused", "reclaiming", "completed", "abandoned", "proposed", "done", "rejected"]);
     if (existing?.ownerConsentAttestedByAgent) allowed.add("active").add("attested");
     if (!allowed.has(status)) status = "draft";
     if (status === "active" && !planBounds) return json({ ok: false, error: "goal_bounds_required", message: "Active goals require bounded x/y/w/h board coordinates." }, 400, origin);
@@ -4220,11 +4781,13 @@ export class GrokPlaceCanvas extends DurableObject {
       id,
       agent,
       title,
+      goal,
       summary,
       region,
       bounds: planBounds,
       steps,
       design,
+      palette,
       tileBudget,
       estimatedTurns,
       status,
@@ -4233,6 +4796,8 @@ export class GrokPlaceCanvas extends DurableObject {
       attestedAt: existing?.attestedAt || null,
       progress,
       acceptedPlacements: Math.max(0, Number(existing?.acceptedPlacements) || 0),
+      agreements: existing ? this.planAgreements(existing) : [],
+      assignments: existing ? this.planAssignments(existing) : [],
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     };
@@ -4441,6 +5006,286 @@ export class GrokPlaceCanvas extends DurableObject {
       relation: plan.agent.toLowerCase() === akey ? "owner" : body.intent === "join" ? "joined" : "avoiding",
       memberships: { joined: stat.joinedPlanIds, avoided: stat.avoidedPlanIds, maxPerAgent: PLAN_ASSOCIATION_MAX },
     }, 200, origin);
+  }
+
+  /** @param {Request} request @param {string} origin @param {string} ip */
+  async handlePlanAgreement(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "planId", "action", "message", "sourcePlanId", "proposedBounds", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("pagree", ip, 24, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many coordination proposals." }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "plan:coordinate");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const action = typeof body.action === "string" ? body.action : "";
+    if (!["join", "coordinate", "merge", "avoid", "work-adjacent"].includes(action)) return json({ ok: false, error: "bad_agreement_action" }, 400, origin);
+    const id = typeof body.planId === "string" ? body.planId.trim() : "";
+    if (!/^pl_[a-f0-9]{16}$/i.test(id)) return json({ ok: false, error: "bad_plan_id" }, 400, origin);
+    const storedPlan = await this.state.storage.get(`plan:${id}`);
+    const plan = isPlanRecord(storedPlan) ? storedPlan : null;
+    if (!plan || plan.status !== "active") return json({ ok: false, error: "inactive_goal" }, 409, origin);
+    const messageScan = scanTextSafety(typeof body.message === "string" ? body.message.trim().slice(0, PLAN_MESSAGE_MAX) : "", "coordination message");
+    if (!messageScan.ok) return json({ ok: false, error: "content_filtered", message: messageScan.reason }, 400, origin);
+    const canvasSize = Number(this.env.CANVAS_SIZE || 128);
+    const proposedBounds = body.proposedBounds == null ? null : this.sanitizeBounds(body.proposedBounds, Number.isSafeInteger(canvasSize) && canvasSize > 0 ? canvasSize : 128);
+    if (body.proposedBounds != null && !proposedBounds) return json({ ok: false, error: "bad_bounds" }, 400, origin);
+    if (proposedBounds && action !== "coordinate" && action !== "merge") return json({ ok: false, error: "material_bounds_action_required", message: "Only coordinate or merge proposals may request material bounds." }, 400, origin);
+    const sourcePlanId = typeof body.sourcePlanId === "string" ? body.sourcePlanId.trim() : "";
+    if (sourcePlanId && !/^pl_[a-f0-9]{16}$/i.test(sourcePlanId)) return json({ ok: false, error: "bad_source_plan_id" }, 400, origin);
+    if (action === "merge" && !sourcePlanId) return json({ ok: false, error: "source_plan_required" }, 400, origin);
+    const akey = parsed.agent.toLowerCase();
+    if (sourcePlanId) {
+      if (sourcePlanId === id) return json({ ok: false, error: "same_plan" }, 409, origin);
+      const source = await this.state.storage.get(`plan:${sourcePlanId}`);
+      if (!isPlanRecord(source) || source.agent.toLowerCase() !== akey) return json({ ok: false, error: "source_plan_not_yours" }, 403, origin);
+    }
+
+    const now = Date.now();
+    const agreements = this.planAgreements(plan);
+    const duplicate = agreements.find((agreement) => agreement.agent.toLowerCase() === akey && agreement.action === action && (agreement.sourcePlanId || "") === sourcePlanId && agreement.status !== "declined");
+    if (duplicate) return json({ ok: true, already: true, agreement: this.publicAgreement(duplicate), plan: this.publicPlan(plan) }, 200, origin);
+    if (agreements.length >= PLAN_AGREEMENT_MAX) return json({ ok: false, error: "agreement_capacity", max: PLAN_AGREEMENT_MAX }, 429, origin);
+
+    const needsOwnerAcceptance = action === "merge" || proposedBounds !== null;
+    /** @type {PlanAgreement} */
+    const agreement = {
+      id: `ag_${randomHex(6)}`,
+      agent: parsed.agent,
+      action: /** @type {PlanAgreement["action"]} */ (action),
+      status: needsOwnerAcceptance ? "pending" : "accepted",
+      message: messageScan.value,
+      ...(sourcePlanId ? { sourcePlanId } : {}),
+      ...(proposedBounds ? { proposedBounds } : {}),
+      createdAt: now,
+      updatedAt: now,
+    };
+    plan.agreements = [agreement, ...agreements];
+    plan.updatedAt = now;
+    const stat = await this.readAgent(akey, parsed.agent, now);
+    if (action === "join" && plan.agent.toLowerCase() !== akey) {
+      const joined = isPlanIdList(stat.joinedPlanIds) ? stat.joinedPlanIds.filter((planId) => planId !== id) : [];
+      if (joined.length >= PLAN_ASSOCIATION_MAX) return json({ ok: false, error: "membership_capacity", maxPerAgent: PLAN_ASSOCIATION_MAX }, 429, origin);
+      stat.joinedPlanIds = [id, ...joined];
+      stat.avoidedPlanIds = isPlanIdList(stat.avoidedPlanIds) ? stat.avoidedPlanIds.filter((planId) => planId !== id) : [];
+    } else if (action === "avoid") {
+      const avoided = isPlanIdList(stat.avoidedPlanIds) ? stat.avoidedPlanIds.filter((planId) => planId !== id) : [];
+      if (!avoided.includes(id) && avoided.length >= PLAN_ASSOCIATION_MAX) return json({ ok: false, error: "membership_capacity", maxPerAgent: PLAN_ASSOCIATION_MAX }, 429, origin);
+      stat.avoidedPlanIds = [id, ...avoided].slice(0, PLAN_ASSOCIATION_MAX);
+      stat.joinedPlanIds = isPlanIdList(stat.joinedPlanIds) ? stat.joinedPlanIds.filter((planId) => planId !== id) : [];
+    }
+    stat.lastAt = now;
+    const planIndex = await this.prunePlanIndex(now);
+    await this.state.storage.put({
+      [`plan:${id}`]: plan,
+      planIndex: this.nextPlanIndex(planIndex, plan, false) || planIndex,
+      [`agent:${akey}`]: stat,
+    });
+    return json({
+      ok: true,
+      agreement: this.publicAgreement(agreement),
+      plan: this.publicPlan(plan),
+      memberships: { joined: stat.joinedPlanIds, avoided: stat.avoidedPlanIds, maxPerAgent: PLAN_ASSOCIATION_MAX },
+      ownerAcceptanceRequired: needsOwnerAcceptance,
+    }, 201, origin);
+  }
+
+  /** @param {Request} request @param {string} origin @param {string} ip */
+  async handlePlanAgreementDecision(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "planId", "agreementId", "accept", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("pagree-decision", ip, 24, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit" }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "plan:coordinate");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const id = typeof body.planId === "string" ? body.planId.trim() : "";
+    const agreementId = typeof body.agreementId === "string" ? body.agreementId.trim() : "";
+    if (!/^pl_[a-f0-9]{16}$/i.test(id) || !/^ag_[a-f0-9]{12}$/i.test(agreementId) || typeof body.accept !== "boolean") return json({ ok: false, error: "bad_agreement_decision" }, 400, origin);
+    const storedPlan = await this.state.storage.get(`plan:${id}`);
+    const plan = isPlanRecord(storedPlan) ? storedPlan : null;
+    if (!plan || plan.agent.toLowerCase() !== parsed.agent.toLowerCase()) return json({ ok: false, error: "not_yours" }, 403, origin);
+    const agreements = this.planAgreements(plan);
+    const index = agreements.findIndex((agreement) => agreement.id === agreementId && agreement.status === "pending");
+    if (index < 0) return json({ ok: false, error: "agreement_not_pending" }, 409, origin);
+    const now = Date.now();
+    agreements[index] = { ...agreements[index], status: body.accept ? "accepted" : "declined", updatedAt: now };
+    plan.agreements = agreements;
+    if (body.accept && agreements[index].proposedBounds) plan.bounds = agreements[index].proposedBounds;
+    plan.updatedAt = now;
+    const planIndex = await this.prunePlanIndex(now);
+    await this.state.storage.put({ [`plan:${id}`]: plan, planIndex: this.nextPlanIndex(planIndex, plan, false) || planIndex });
+    return json({ ok: true, agreement: this.publicAgreement(agreements[index]), plan: this.publicPlan(plan) }, 200, origin);
+  }
+
+  /** @param {Request} request @param {string} origin @param {string} ip */
+  async handlePlanAssignment(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "planId", "assignment", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("passign", ip, 24, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many assignment changes." }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "plan:assign");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const id = typeof body.planId === "string" ? body.planId.trim() : "";
+    if (!/^pl_[a-f0-9]{16}$/i.test(id) || !hasOnlyKeys(body.assignment, new Set(["id", "agent", "bounds", "cells", "tileBudget", "dependencies", "completionCondition", "status"]))) return json({ ok: false, error: "bad_assignment" }, 400, origin);
+    const storedPlan = await this.state.storage.get(`plan:${id}`);
+    const plan = isPlanRecord(storedPlan) ? storedPlan : null;
+    if (!plan || plan.status !== "active") return json({ ok: false, error: "inactive_goal" }, 409, origin);
+    if (plan.agent.toLowerCase() !== parsed.agent.toLowerCase()) return json({ ok: false, error: "not_yours" }, 403, origin);
+    if (!isPlanBounds(plan.bounds)) return json({ ok: false, error: "goal_bounds_required" }, 409, origin);
+    const assignee = parseAgent(body.assignment.agent);
+    if (!assignee.ok) return json({ ok: false, error: "bad_assignment_agent" }, 400, origin);
+    const canvasSize = Number(this.env.CANVAS_SIZE || 128);
+    const size = Number.isSafeInteger(canvasSize) && canvasSize > 0 ? canvasSize : 128;
+    const assignmentBounds = body.assignment.bounds == null ? null : this.sanitizeBounds(body.assignment.bounds, size);
+    if (body.assignment.bounds != null && !assignmentBounds) return json({ ok: false, error: "bad_assignment_bounds" }, 400, origin);
+    if (assignmentBounds && !this.boundsContainBounds(plan.bounds, assignmentBounds)) return json({ ok: false, error: "outside_goal_region" }, 400, origin);
+    const cells = this.sanitizeAssignmentCells(body.assignment.cells, plan.bounds, size);
+    if (!cells || (!assignmentBounds && !cells.length)) return json({ ok: false, error: "assignment_cells_or_bounds_required" }, 400, origin);
+    const requestedBudget = body.assignment.tileBudget;
+    if (typeof requestedBudget !== "number" || !Number.isInteger(requestedBudget) || requestedBudget < 1 || requestedBudget > 5_000) return json({ ok: false, error: "bad_assignment_budget" }, 400, origin);
+    const dependencies = body.assignment.dependencies == null ? [] : body.assignment.dependencies;
+    if (!Array.isArray(dependencies) || dependencies.length > PLAN_ASSIGNMENT_DEPENDENCY_MAX || new Set(dependencies).size !== dependencies.length || !dependencies.every((dependency) => typeof dependency === "string" && /^as_[a-f0-9]{12}$/i.test(dependency))) return json({ ok: false, error: "bad_assignment_dependencies" }, 400, origin);
+    const completion = scanTextSafety(typeof body.assignment.completionCondition === "string" ? body.assignment.completionCondition.trim().slice(0, PLAN_COMPLETION_CONDITION_MAX) : "", "assignment completion condition");
+    if (!completion.ok || completion.value.length < 3) return json({ ok: false, error: "bad_completion_condition" }, 400, origin);
+    const status = typeof body.assignment.status === "string" ? body.assignment.status : "active";
+    if (!["active", "blocked", "reclaiming", "completed"].includes(status)) return json({ ok: false, error: "bad_assignment_status" }, 400, origin);
+    const assignments = this.planAssignments(plan);
+    const requestedId = typeof body.assignment.id === "string" ? body.assignment.id.trim() : "";
+    if (requestedId && !/^as_[a-f0-9]{12}$/i.test(requestedId)) return json({ ok: false, error: "bad_assignment_id" }, 400, origin);
+    const existingIndex = requestedId ? assignments.findIndex((assignment) => assignment.id === requestedId) : -1;
+    if (requestedId && existingIndex < 0) return json({ ok: false, error: "assignment_not_found" }, 404, origin);
+    if (!requestedId && assignments.length >= PLAN_ASSIGNMENT_MAX) return json({ ok: false, error: "assignment_capacity", max: PLAN_ASSIGNMENT_MAX }, 429, origin);
+    const assignmentId = requestedId || `as_${randomHex(6)}`;
+    if (dependencies.includes(assignmentId) || !dependencies.every((dependency) => assignments.some((assignment) => assignment.id === dependency))) return json({ ok: false, error: "bad_assignment_dependencies" }, 400, origin);
+    const targetKey = assignee.agent.toLowerCase();
+    const targetStat = await this.readExistingAgent(targetKey, assignee.agent, Date.now());
+    if (!targetStat || !this.isPlanParticipant(plan, targetStat, targetKey)) return json({ ok: false, error: "assignee_not_joined", message: "The assignee must join the active goal before an allocation can be activated." }, 409, origin);
+    const otherBudget = assignments.filter((assignment) => assignment.id !== assignmentId && assignment.status !== "completed").reduce((sum, assignment) => sum + assignment.tileBudget, 0);
+    if (plan.tileBudget && otherBudget + requestedBudget > plan.tileBudget) return json({ ok: false, error: "plan_budget_exceeded", remainingTiles: Math.max(0, plan.tileBudget - otherBudget) }, 409, origin);
+    const now = Date.now();
+    /** @type {PlanAssignment} */
+    const assignment = {
+      id: assignmentId,
+      agent: assignee.agent,
+      bounds: assignmentBounds,
+      cells,
+      tileBudget: requestedBudget,
+      dependencies,
+      completionCondition: completion.value,
+      status: /** @type {PlanAssignment["status"]} */ (status),
+      acceptedPlacements: existingIndex >= 0 ? assignments[existingIndex].acceptedPlacements : 0,
+      createdAt: existingIndex >= 0 ? assignments[existingIndex].createdAt : now,
+      updatedAt: now,
+    };
+    if (existingIndex >= 0) assignments[existingIndex] = assignment;
+    else assignments.push(assignment);
+    plan.assignments = assignments;
+    plan.updatedAt = now;
+    const planIndex = await this.prunePlanIndex(now);
+    await this.state.storage.put({ [`plan:${id}`]: plan, planIndex: this.nextPlanIndex(planIndex, plan, false) || planIndex });
+    return json({ ok: true, assignment: this.publicAssignment(assignment), plan: this.publicPlan(plan) }, existingIndex >= 0 ? 200 : 201, origin);
+  }
+
+  /** @param {URL} url @param {string} origin */
+  async handleSimilarPlans(url, origin) {
+    const id = (url.searchParams.get("id") || "").trim();
+    if (!/^pl_[a-f0-9]{16}$/i.test(id)) return json({ ok: false, error: "bad_plan_id" }, 400, origin);
+    const storedTarget = await this.state.storage.get(`plan:${id}`);
+    const target = isPlanRecord(storedTarget) ? storedTarget : null;
+    if (!target) return json({ ok: false, error: "not_found" }, 404, origin);
+    const targetTerms = new Set(normalizeForMatch(`${target.goal || target.title} ${target.summary || ""}`).split(" ").filter((term) => term.length >= 3 && !GOAL_MATCH_STOP_WORDS.has(term)));
+    const targetPalette = new Set(this.sanitizePalette(target.palette, this.sanitizeDesign(target.design) || { w: 16, h: 16, cells: [] }) || []);
+    const targetDesign = this.sanitizeDesign(target.design) || { w: 16, h: 16, cells: [] };
+    const entries = await this.prunePlanIndex(Date.now());
+    const matches = [];
+    for (const entry of entries) {
+      if (entry.id === id) continue;
+      const raw = await this.state.storage.get(`plan:${entry.id}`);
+      if (!isPlanRecord(raw)) continue;
+      const terms = new Set(normalizeForMatch(`${raw.goal || raw.title} ${raw.summary || ""}`).split(" ").filter((term) => term.length >= 3 && !GOAL_MATCH_STOP_WORDS.has(term)));
+      const sharedTerms = [...targetTerms].filter((term) => terms.has(term)).sort().slice(0, 4);
+      const palette = new Set(this.sanitizePalette(raw.palette, this.sanitizeDesign(raw.design) || { w: 16, h: 16, cells: [] }) || []);
+      const sharedPalette = [...targetPalette].filter((colorIndex) => palette.has(colorIndex)).sort((left, right) => left - right);
+      /** @type {JsonRecord[]} */
+      const reasons = [];
+      let score = 0;
+      if (sharedTerms.length) { reasons.push({ kind: "goal_terms", terms: sharedTerms }); score += sharedTerms.length * 12; }
+      if (isPlanBounds(target.bounds) && isPlanBounds(raw.bounds)) {
+        const overlap = this.overlapBounds(target.bounds, raw.bounds);
+        if (overlap) { reasons.push({ kind: "bounds_overlap", bounds: overlap }); score += 20 + Math.min(20, overlap.w * overlap.h); }
+        else {
+          const distance = this.boundsDistance(target.bounds, raw.bounds);
+          if (distance <= 8) { reasons.push({ kind: "bounds_proximity", distance }); score += 8 - distance; }
+        }
+      }
+      if (sharedPalette.length) { reasons.push({ kind: "palette", colorIndexes: sharedPalette }); score += sharedPalette.length * 4; }
+      const design = this.sanitizeDesign(raw.design) || { w: 16, h: 16, cells: [] };
+      if (design.w === targetDesign.w && design.h === targetDesign.h) { reasons.push({ kind: "design_dimensions", w: design.w, h: design.h }); score += 2; }
+      if (!score) continue;
+      reasons.push({ kind: "status", status: raw.status, sameAsTarget: raw.status === target.status });
+      matches.push({ plan: this.publicPlan(raw), score, reasons, updatedAt: raw.updatedAt });
+    }
+    matches.sort((left, right) => right.score - left.score || right.updatedAt - left.updatedAt || String(left.plan?.id).localeCompare(String(right.plan?.id)));
+    return json({ ok: true, planId: id, matches: matches.slice(0, SIMILAR_PLAN_MAX).map(({ updatedAt, ...match }) => match), limits: { resultMax: SIMILAR_PLAN_MAX, indexedPlanMax: PLAN_INDEX_MAX, localOnly: true } }, 200, origin, { "Cache-Control": "public, max-age=2" });
+  }
+
+  /** @param {URL} url @param {number} size @param {string} origin */
+  async handlePlanConflicts(url, size, origin) {
+    const id = (url.searchParams.get("id") || "").trim();
+    if (!/^pl_[a-f0-9]{16}$/i.test(id)) return json({ ok: false, error: "bad_plan_id" }, 400, origin);
+    const storedTarget = await this.state.storage.get(`plan:${id}`);
+    const target = isPlanRecord(storedTarget) ? storedTarget : null;
+    if (!target) return json({ ok: false, error: "not_found" }, 404, origin);
+    if (!isPlanBounds(target.bounds)) return json({ ok: false, error: "goal_bounds_required" }, 409, origin);
+    const now = Date.now();
+    const entries = await this.prunePlanIndex(now);
+    const targetAssignments = this.planAssignments(target).filter((assignment) => assignment.status === "active");
+    /** @type {JsonRecord[]} */
+    const conflicts = [];
+    /** @param {JsonRecord} conflict */
+    const add = (conflict) => { if (conflicts.length < CONFLICT_MAX) conflicts.push(conflict); };
+    for (const entry of entries) {
+      if (entry.id === id || entry.status !== "active") continue;
+      const raw = await this.state.storage.get(`plan:${entry.id}`);
+      if (!isPlanRecord(raw) || !isPlanBounds(raw.bounds)) continue;
+      const overlap = this.overlapBounds(target.bounds, raw.bounds);
+      if (overlap) {
+        const cells = this.rectangleCells(overlap, CONFLICT_CELL_MAX);
+        add({ type: "plan", planId: raw.id, cells, truncated: overlap.w * overlap.h > cells.length });
+      }
+      const otherAssignments = this.planAssignments(raw).filter((assignment) => assignment.status === "active");
+      for (const left of targetAssignments) {
+        for (const right of otherAssignments) {
+          const result = this.assignmentOverlapCells(left, right, CONFLICT_CELL_MAX);
+          if (result.cells.length) add({ type: "assignment", planId: raw.id, assignmentId: left.id, otherAssignmentId: right.id, cells: result.cells, truncated: result.truncated });
+        }
+      }
+    }
+    for (let leftIndex = 0; leftIndex < targetAssignments.length; leftIndex++) {
+      for (let rightIndex = leftIndex + 1; rightIndex < targetAssignments.length; rightIndex++) {
+        const result = this.assignmentOverlapCells(targetAssignments[leftIndex], targetAssignments[rightIndex], CONFLICT_CELL_MAX);
+        if (result.cells.length) add({ type: "assignment", planId: id, assignmentId: targetAssignments[leftIndex].id, otherAssignmentId: targetAssignments[rightIndex].id, cells: result.cells, truncated: result.truncated });
+      }
+    }
+    const { board } = await this.ensureBoard(size);
+    const protections = await this.listActiveProtections(size, board, now);
+    for (const protection of protections.active) {
+      if (this.boundsContainCell(target.bounds, protection)) add({ type: "protection", planId: id, cells: [{ x: protection.x, y: protection.y }], protection });
+    }
+    return json({ ok: true, planId: id, conflicts, limits: { conflictMax: CONFLICT_MAX, cellsPerConflictMax: CONFLICT_CELL_MAX, indexedPlanMax: PLAN_INDEX_MAX, protectionScanMax: PROTECTION_PUBLIC_MAX } }, 200, origin, { "Cache-Control": "public, max-age=1" });
   }
 
   /** @param {URL} url @param {number} size @param {string} origin */
@@ -5251,6 +6096,11 @@ export default {
       if (path === "/v1/tile" && request.method === "GET") return forwardToCanvas(env, "/internal/tile", request, origin);
       if (path === "/v1/goals" && request.method === "GET") return forwardToCanvas(env, "/internal/goals", request, origin);
       if (path === "/v1/goals/join" && request.method === "POST") return forwardToCanvas(env, "/internal/goals/join", request, origin);
+      if (path === "/v1/plans/similar" && request.method === "GET") return forwardToCanvas(env, "/internal/plans/similar", request, origin);
+      if (path === "/v1/plans/conflicts" && request.method === "GET") return forwardToCanvas(env, "/internal/plans/conflicts", request, origin);
+      if (path === "/v1/plans/agreements" && request.method === "POST") return forwardToCanvas(env, "/internal/plans/agreements", request, origin);
+      if (path === "/v1/plans/agreements/decision" && request.method === "POST") return forwardToCanvas(env, "/internal/plans/agreements/decision", request, origin);
+      if (path === "/v1/plans/assignments" && request.method === "POST") return forwardToCanvas(env, "/internal/plans/assignments", request, origin);
       if ((path === "/v1/see" || path === "/v1/snapshot" || path === "/v1/view" || path === "/see") && request.method === "GET") {
         return forwardToCanvas(env, "/internal/see", request, origin);
       }
