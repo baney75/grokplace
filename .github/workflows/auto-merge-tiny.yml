@@ -295,12 +295,23 @@ jobs:
           HEAD: ${{ steps.candidate.outputs.head }}
         run: |
           set -euo pipefail
+          observe_exact_merge() {
+            gh api "repos/$REPO/pulls/$PR" > /tmp/merged.json
+            jq -e --arg head "$HEAD" '.merged == true and .head.sha == $head and (.merge_commit_sha | test("^[a-f0-9]{40}$"))' /tmp/merged.json >/dev/null
+          }
           CURRENT=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
           [ "$CURRENT" = "$HEAD" ] || { echo "PR head changed after trusted validation."; exit 1; }
-          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD" --auto
+          if observe_exact_merge; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD" --auto; then
+            observe_exact_merge || { echo "Exact-head auto-merge request failed before the PR merged."; exit 1; }
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           for attempt in {1..20}; do
-            gh api "repos/$REPO/pulls/$PR" > /tmp/merged.json
-            if jq -e --arg head "$HEAD" '.merged == true and .head.sha == $head and (.merge_commit_sha | test("^[a-f0-9]{40}$"))' /tmp/merged.json >/dev/null; then
+            if observe_exact_merge; then
               echo "merged=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
