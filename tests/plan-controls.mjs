@@ -61,7 +61,7 @@ const plan = {
   acceptedPlacements: 1,
   version: 2,
   activatedVersion: 2,
-  acceptedReviewId: null,
+  acceptedReviewId: "pvr_aaaaaaaaaaaaaaaa",
   createdAt: now,
   updatedAt: now,
 };
@@ -234,6 +234,72 @@ response = await canvas.handlePlanConfirm(new Request("https://test/internal/pla
 data = await response.json();
 check("activation rejects a stale plan version before changing the active revision", response.status === 409 && data.error === "stale_plan_version" && (await storage.get(`plan:${planId}`))?.activatedVersion === null, JSON.stringify(data));
 
+response = await canvas.handlePlanConfirm(new Request("https://test/internal/plan/confirm", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ agent: owner, id: planId, version: 3, ownerConsentAttestedByAgent: true, challengeId: "test", nonce: 0 }),
+}), "*", "test-ip");
+data = await response.json();
+check("versioned activation fails closed without an immutable ACCEPT review", response.status === 409 && data.error === "accepted_review_required" && (await storage.get(`plan:${planId}`))?.status === "proposed", JSON.stringify(data));
+
+response = await canvas.handlePlanConfirm(new Request("https://test/internal/plan/confirm", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ agent: owner, id: planId, version: 3, acceptedReviewId: reviewId, ownerConsentAttestedByAgent: true, challengeId: "test", nonce: 0 }),
+}), "*", "test-ip");
+data = await response.json();
+check("versioned activation rejects an ACCEPT review for another plan revision", response.status === 409 && data.error === "accepted_review_mismatch" && (await storage.get(`plan:${planId}`))?.activatedVersion === null, JSON.stringify(data));
+
+const staleReviewBody = { ...reviewBody, planVersion: 3, previewCacheKey: `grokplace-plan-${planId}-v3-board7`, clientRequestId: "vision-review-003-stale" };
+response = await canvas.handlePlanReview(new Request("https://test/internal/plan/review", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${guest}-cap` },
+  body: JSON.stringify(staleReviewBody),
+}), "*", "test-ip");
+data = await response.json();
+const staleReviewId = data.review?.id;
+storage.values.set("meta", { ...(await storage.get("meta")), version: 8 });
+response = await canvas.handlePlanConfirm(new Request("https://test/internal/plan/confirm", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ agent: owner, id: planId, version: 3, acceptedReviewId: staleReviewId, ownerConsentAttestedByAgent: true, challengeId: "test", nonce: 0 }),
+}), "*", "test-ip");
+data = await response.json();
+check("versioned activation rejects an ACCEPT review whose board and cache identity are stale", response.status === 409 && data.error === "accepted_review_stale" && data.currentBoardVersion === 8 && (await storage.get(`plan:${planId}`))?.activatedVersion === null, JSON.stringify(data));
+
+const currentReviewBody = { ...staleReviewBody, previewBoardVersion: 8, previewCacheKey: `grokplace-plan-${planId}-v3-board8`, clientRequestId: "vision-review-003-current" };
+response = await canvas.handlePlanReview(new Request("https://test/internal/plan/review", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${guest}-cap` },
+  body: JSON.stringify(currentReviewBody),
+}), "*", "test-ip");
+data = await response.json();
+const currentReviewId = data.review?.id;
+response = await canvas.handlePlanConfirm(new Request("https://test/internal/plan/confirm", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ agent: owner, id: planId, version: 3, acceptedReviewId: currentReviewId, ownerConsentAttestedByAgent: true, challengeId: "test", nonce: 0 }),
+}), "*", "test-ip");
+data = await response.json();
+const activatedPlan = await storage.get(`plan:${planId}`);
+check("only the immutable ACCEPT review for the current preview activates the revised plan", response.ok && data.plan?.version === 3 && activatedPlan?.activatedVersion === 3 && activatedPlan?.acceptedReviewId === currentReviewId, JSON.stringify(data));
+
+response = await canvas.handlePlace(new Request("https://test/internal/place", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ agent: owner, goal: "exact preview fixture", planId, x: 3, y: 3, color: 5, challengeId: "test", nonce: 0 }),
+}), 8, 60_000, "*", "test-ip");
+data = await response.json();
+check(
+  "only the reviewed active revision permits placement with matching immutable provenance",
+  response.ok
+    && data.plan?.version === 3
+    && (await storage.get("provenance:row:3"))?.[3]?.planId === planId
+    && (await storage.get("provenance:row:3"))?.[3]?.planVersion === 3,
+  JSON.stringify(data)
+);
+const boardBeforeReset = new Uint8Array(await storage.get("board"));
+
 const resetRequest = { agent: owner, id: planId, version: 3, dryRun: true, clientRequestId: "owner-reset-001", challengeId: "test", nonce: 0 };
 response = await canvas.handlePlanReset(new Request("https://test/internal/plan/reset", {
   method: "POST",
@@ -268,7 +334,7 @@ check(
   response.ok
     && replay.already === true
     && data.boardChanges === 0
-    && afterBoard[0] === 6 && afterBoard[9] === 14
+    && afterBoard[0] === boardBeforeReset[0] && afterBoard[9] === boardBeforeReset[9]
     && (await storage.get(`plan:${planId}`))?.status === "draft"
     && (await storage.get(`agent:${owner}`))?.activePlanId === null
     && (await storage.get(`plan:${otherPlanId}`))?.status === "active"

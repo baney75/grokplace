@@ -49,6 +49,7 @@ function plan(id, agent, overrides = {}) {
     acceptedPlacements: 0,
     version: 1,
     activatedVersion: 1,
+    acceptedReviewId: "pvr_aaaaaaaaaaaaaaaa",
     createdAt: now,
     updatedAt: now,
     ...overrides,

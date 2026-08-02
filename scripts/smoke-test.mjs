@@ -321,6 +321,7 @@ check("legacy mission input is accepted but never authoritative or published", p
 }
 
 const validMusic = {
+  clientRequestId: `music-valid-${stamp}`,
   title: `quiet-check-${stamp}`,
   composition: composition("C4", 200),
   license: "CC0-1.0",
@@ -424,6 +425,7 @@ const firstSongId = songA.data.now?.id;
 
 const songB = await mutate("/v1/music/submit", "music:submit", b, {
   ...validMusic,
+  clientRequestId: `music-second-${stamp}`,
   title: `second-check-${stamp}`,
   composition: composition("E4", 220),
 });
@@ -469,24 +471,27 @@ for (const [songId, label] of [[firstSongId, "playing"], [secondSongId, "queued"
 
 const nearEndSong = await mutate("/v1/music/submit", "music:submit", d, {
   ...validMusic,
+  clientRequestId: `music-near-end-${stamp}`,
   title: `near-end-check-${stamp}`,
-  composition: { bpm: 180, waveform: "sine", notes: [{ note: "A4", at: 0, duration: 16, velocity: 0.5 }] },
+  composition: { bpm: 180, waveform: "sine", notes: [{ note: "A4", at: 0, duration: 1, velocity: 0.5 }] },
 });
 const nearEndId = nearEndSong.data.now?.id;
 const nearEndToken = nearEndSong.data.now?.advanceToken;
 check("short original composition starts with an advance token", nearEndSong.response.ok && /^[a-f0-9]{32}$/.test(nearEndToken || ""), nearEndSong.data);
 if (nearEndId && nearEndToken) {
-  const ended = await json("/v1/music/advance", {
+  const early = await json("/v1/music/advance", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...clientHeaders },
     body: JSON.stringify({ compositionId: nearEndId, advanceToken: nearEndToken }),
   });
-  check("valid token advances inside the near-end window", ended.response.ok && ended.data.advanced === true && ended.data.now === null, ended.data);
+  check("public music cannot skip a short track before its deterministic end", early.response.status === 429 && early.data.error === "too_early", early.data);
+  await new Promise((resolve) => setTimeout(resolve, 100));
 }
 
 if (e && resetSecret) {
   const forcedSong = await mutate("/v1/music/submit", "music:submit", e, {
     ...validMusic,
+    clientRequestId: `music-force-${stamp}`,
     title: `admin-force-check-${stamp}`,
     composition: { bpm: 60, waveform: "square", notes: [{ note: "G4", at: 0, duration: 16, velocity: 0.4 }] },
   });
