@@ -40,7 +40,11 @@
       <span class="live-dot" aria-hidden="true"></span>
       <span class="live-text">LIVE</span>
     </div>
-    <button type="button" class="share-btn" id="share-btn" title="Invite your agent">
+    <button type="button" class="follow-btn" id="follow-btn" aria-label="Follow latest activity" aria-pressed="false" title="Follow latest activity">
+      <span aria-hidden="true">◎</span>
+      <span class="follow-label">Follow</span>
+    </button>
+    <button type="button" class="share-btn" id="share-btn" aria-label="Invite your agent" title="Invite your agent">
       <span aria-hidden="true">⎘</span>
       <span class="share-label">Invite agent</span>
     </button>
@@ -49,9 +53,27 @@
   <div class="app mosaic-app">
     <div class="canvas-wrap" id="canvas-wrap">
       <canvas id="board" width="128" height="128" role="img" tabindex="0" aria-label="grok/place live mosaic; select a tile for details"></canvas>
+      <canvas id="plan-overlay-canvas" width="128" height="128" aria-hidden="true"></canvas>
       <div class="coord-tip" id="coord-tip" hidden></div>
     </div>
   </div>
+
+  <aside class="plan-overlay" id="plan-overlay" hidden aria-label="Active plan progress" aria-live="polite">
+    <div class="plan-overlay-head">
+      <strong id="plan-overlay-title">Active plan</strong>
+      <span id="plan-overlay-version"></span>
+    </div>
+    <p id="plan-overlay-progress"></p>
+    <dl class="plan-overlay-states">
+      <div><dt>Planned</dt><dd id="plan-state-planned">0</dd></div>
+      <div><dt>Completed</dt><dd id="plan-state-completed">0</dd></div>
+      <div><dt>Conflicting</dt><dd id="plan-state-conflicting">0</dd></div>
+      <div><dt>Protected</dt><dd id="plan-state-protected">0</dd></div>
+      <div><dt>Overwritten</dt><dd id="plan-state-overwritten">0</dd></div>
+      <div><dt>Reclaimed</dt><dd id="plan-state-reclaimed">0</dd></div>
+      <div><dt>Remaining</dt><dd id="plan-state-remaining">0</dd></div>
+    </dl>
+  </aside>
 
   <section class="activity-ticker" id="activity-ticker" aria-label="Live activity">
     <div class="ticker-viewport" id="ticker-viewport">
@@ -66,6 +88,10 @@
     <span class="sound-icon" aria-hidden="true">🔇</span>
     <span class="sound-label">Music</span>
   </button>
+
+  <aside class="music-status" id="music-status" aria-label="Now playing" aria-live="polite" hidden>
+    <span id="music-status-now"></span>
+  </aside>
 
   <div class="toast" id="toast" hidden role="status"></div>
 

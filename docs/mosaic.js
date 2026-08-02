@@ -4,18 +4,23 @@
  * Humans watch. Agents paint.
  */
 /** @typedef {{ x: number, y: number }} Point */
-/** @typedef {{ agent: string, x: number, y: number, color: string, goal: string, delayMs: number, until: number }} PainterTag */
+/** @typedef {{ agent: string, x: number, y: number, color: string, goal: string, delayMs: number, angle: number, travelX: number, travelY: number, until: number }} PainterTag */
+/** @typedef {{ x: number, y: number, color: string, delayMs: number, dx: number, dy: number, until: number }} PaintParticle */
 /** @typedef {{ type?: unknown, t?: unknown, batchOrder?: unknown, agent?: unknown, x?: unknown, y?: unknown, c?: unknown, color?: unknown, goal?: unknown }} FeedEntry */
 /** @typedef {{ t: "ready" | "canvas" | "activity" | "music", v: number }} LiveEvent */
-/** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown }} CanvasResponse */
+/** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown, planOverlay?: unknown }} CanvasResponse */
 /** @typedef {{ ok?: unknown, feed?: unknown }} FeedResponse */
 /** @typedef {{ x: number, y: number }} SelectedTile */
+/** @typedef {"planned" | "completed" | "conflicting" | "protected" | "overwritten" | "reclaimed" | "remaining"} PlanOverlayState */
+/** @typedef {{ x: number, y: number, state: PlanOverlayState }} ActivePlanCell */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const boardNode = /** @type {HTMLCanvasElement | null} */ (document.getElementById("board"));
+  const planOverlayNode = /** @type {HTMLCanvasElement | null} */ (document.getElementById("plan-overlay-canvas"));
   const wrapNode = document.getElementById("canvas-wrap");
   const coordTip = document.getElementById("coord-tip");
   const shareBtn = document.getElementById("share-btn");
+  const followBtn = document.getElementById("follow-btn");
   const toast = document.getElementById("toast");
   const activityTicker = document.getElementById("activity-ticker");
   const tickerTrack = document.getElementById("ticker-track");
@@ -24,8 +29,13 @@
   const tileInspectorTitle = document.getElementById("tile-inspector-title");
   const tileInspectorState = document.getElementById("tile-inspector-state");
   const tileInspectorClose = document.getElementById("tile-inspector-close");
+  const planOverlay = document.getElementById("plan-overlay");
+  const planOverlayTitle = document.getElementById("plan-overlay-title");
+  const planOverlayVersion = document.getElementById("plan-overlay-version");
+  const planOverlayProgress = document.getElementById("plan-overlay-progress");
   if (!boardNode || !wrapNode) return;
   const boardEl = boardNode;
+  const planOverlayEl = planOverlayNode;
   const wrap = wrapNode;
 
   /** @type {string[]} */
@@ -33,6 +43,8 @@
   let size = 128;
   let version = -1;
   let board = new Uint8Array(size * size);
+  /** @type {ActivePlanCell[]} */
+  let activePlanCells = [];
   /** @type {Uint8Array | null} */
   let prevBoard = null;
   let scale = 1;
@@ -44,11 +56,15 @@
   let flashes = new Map();
   /** @type {PainterTag[]} */
   let nameTags = [];
+  /** @type {PaintParticle[]} */
+  let paintParticles = [];
   let lastFeedSeen = 0;
   let tickerHidden = false;
   let tickerFocusPaused = false;
+  let followLatest = false;
   let rafId = 0;
   let painterTagTimer = 0;
+  let particleTimer = 0;
   let canvasTimer = 0;
   let feedTimer = 0;
   let toastTimer = 0;
@@ -83,6 +99,8 @@
   const VIEW_KEY = "grokplace-view-v1";
   const TICKER_HIDDEN_KEY = "grokplace-activity-ticker-hidden-v1";
   const TICKER_ITEMS_MAX = 12;
+  const BRUSH_TAGS_MAX = 24;
+  const PAINT_PARTICLES_MAX = 40;
   // Disconnected viewers retain this critic-reviewed 12/min fallback budget.
   const CANVAS_POLL_MS = 12_000;
   const FEED_POLL_MS = 30_000;
@@ -94,6 +112,23 @@
   const LIVE_RETRY_MAX_MS = 30_000;
   const LIVE_MESSAGE_MAX_CHARS = 96;
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  /** @type {PlanOverlayState[]} */
+  const PLAN_STATES = ["planned", "completed", "conflicting", "protected", "overwritten", "reclaimed", "remaining"];
+  /** @type {Record<PlanOverlayState, string>} */
+  const PLAN_STATE_COLORS = {
+    planned: "#FFFFFF",
+    completed: "#51E9F4",
+    conflicting: "#FFA800",
+    protected: "#CF6EE4",
+    overwritten: "#E50000",
+    reclaimed: "#00A368",
+    remaining: "#94A3B8",
+  };
+
+  /** @param {unknown} value @returns {value is PlanOverlayState} */
+  function isPlanOverlayState(value) {
+    return typeof value === "string" && PLAN_STATES.includes(/** @type {PlanOverlayState} */ (value));
+  }
 
   const VOID = { r: 10, g: 12, b: 16 };
   const MOVE_SLOP = 10;
@@ -167,6 +202,7 @@
       data[o + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
+    paintPlanOverlay();
     applyTransform();
     if (anyFlash && !reduceMotion.matches) {
       cancelAnimationFrame(rafId);
@@ -182,9 +218,74 @@
 
   function applyTransform() {
     clampPan();
-    boardEl.style.width = `${size * scale}px`;
-    boardEl.style.height = `${size * scale}px`;
-    boardEl.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px))`;
+    const width = `${size * scale}px`;
+    const transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px))`;
+    boardEl.style.width = width;
+    boardEl.style.height = width;
+    boardEl.style.transform = transform;
+    if (planOverlayEl) {
+      planOverlayEl.style.width = width;
+      planOverlayEl.style.height = width;
+      planOverlayEl.style.transform = transform;
+    }
+  }
+
+  function paintPlanOverlay() {
+    if (!planOverlayEl) return;
+    const ctx = planOverlayEl.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, planOverlayEl.width, planOverlayEl.height);
+    for (const cell of activePlanCells) {
+      const color = PLAN_STATE_COLORS[cell.state] || PLAN_STATE_COLORS.planned;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = cell.state === "remaining" ? 0.78 : 0.98;
+      ctx.lineWidth = 0.18;
+      ctx.setLineDash(cell.state === "planned" || cell.state === "remaining" ? [0.28, 0.18] : []);
+      ctx.strokeRect(cell.x + 0.09, cell.y + 0.09, 0.82, 0.82);
+      ctx.restore();
+    }
+  }
+
+  /** @param {unknown} raw */
+  function renderPlanOverlay(raw) {
+    if (!isRecord(raw) || !isRecord(raw.plan) || !Array.isArray(raw.cells)) {
+      activePlanCells = [];
+      if (planOverlay) planOverlay.hidden = true;
+      if (planOverlayEl) planOverlayEl.hidden = true;
+      paintPlanOverlay();
+      return;
+    }
+    const plan = raw.plan;
+    const title = typeof plan.title === "string" ? plan.title.slice(0, 80) : "Active plan";
+    const version = typeof plan.version === "number" && Number.isInteger(plan.version) ? plan.version : null;
+    activePlanCells = raw.cells
+      .filter((cell) => isRecord(cell)
+        && typeof cell.x === "number" && Number.isInteger(cell.x) && cell.x >= 0 && cell.x < size
+        && typeof cell.y === "number" && Number.isInteger(cell.y) && cell.y >= 0 && cell.y < size
+        && isPlanOverlayState(cell.state))
+      .slice(0, 512)
+      .map((cell) => ({
+        x: /** @type {number} */ (cell.x),
+        y: /** @type {number} */ (cell.y),
+        state: /** @type {PlanOverlayState} */ (cell.state),
+      }));
+    if (planOverlayTitle) planOverlayTitle.textContent = title;
+    if (planOverlayVersion) planOverlayVersion.textContent = version === null ? "" : `v${version}`;
+    const progress = isRecord(raw.progress) ? raw.progress : {};
+    const complete = typeof progress.complete === "number" ? progress.complete : 0;
+    const total = typeof progress.total === "number" ? progress.total : activePlanCells.length;
+    const remaining = typeof progress.remaining === "number" ? progress.remaining : 0;
+    if (planOverlayProgress) planOverlayProgress.textContent = `${complete}/${total} complete · ${remaining} remaining`;
+    const states = isRecord(raw.states) ? raw.states : {};
+    for (const state of PLAN_STATES) {
+      const field = document.getElementById(`plan-state-${state}`);
+      if (field) field.textContent = typeof states[state] === "number" ? String(states[state]) : "0";
+    }
+    if (planOverlay) planOverlay.hidden = false;
+    if (planOverlayEl) planOverlayEl.hidden = false;
+    paintPlanOverlay();
+    applyTransform();
   }
 
   function viewportSize() {
@@ -248,11 +349,12 @@
 
   function markUserAdjusted() {
     userAdjusted = true;
+    if (followLatest) setFollowLatest(false);
     saveView();
   }
 
-  /** @param {unknown} agent @param {number} x @param {number} y @param {unknown} goal @param {string} color @param {number} delayMs */
-  function spawnPainterTag(agent, x, y, goal, color, delayMs) {
+  /** @param {unknown} agent @param {number} x @param {number} y @param {unknown} goal @param {string} color @param {number} delayMs @param {{ angle: number, travelX: number, travelY: number }} motion */
+  function spawnPainterTag(agent, x, y, goal, color, delayMs, motion) {
     const now = performance.now();
     nameTags.push({
       agent: String(agent || "agent").slice(0, 24),
@@ -261,10 +363,33 @@
       color: /^#[0-9A-F]{6}$/.test(color) ? color : "#FFFFFF",
       goal: goal ? String(goal).slice(0, 40) : "",
       delayMs: Math.max(0, Math.min(630, delayMs)),
+      angle: Number.isFinite(motion?.angle) ? motion.angle : -28,
+      travelX: Number.isFinite(motion?.travelX) ? motion.travelX : -0.62,
+      travelY: Number.isFinite(motion?.travelY) ? motion.travelY : -0.24,
       until: now + 2000 + Math.max(0, Math.min(630, delayMs)),
     });
-    if (nameTags.length > 24) nameTags = nameTags.slice(-24);
+    if (nameTags.length > 24) nameTags = nameTags.slice(-BRUSH_TAGS_MAX);
     renderPainterTags();
+  }
+
+  /** @param {number} x @param {number} y @param {string} color @param {number} delayMs */
+  function spawnPaintParticles(x, y, color, delayMs) {
+    if (reduceMotion.matches) return;
+    const now = performance.now();
+    const directions = [[-11, -8], [10, -7], [-8, 10], [9, 9], [0, -13]];
+    for (const [dx, dy] of directions) {
+      paintParticles.push({
+        x,
+        y,
+        color: /^#[0-9A-F]{6}$/.test(color) ? color : "#FFFFFF",
+        delayMs: Math.max(0, Math.min(630, delayMs)),
+        dx,
+        dy,
+        until: now + 620 + Math.max(0, Math.min(630, delayMs)),
+      });
+    }
+    if (paintParticles.length > PAINT_PARTICLES_MAX) paintParticles = paintParticles.slice(-PAINT_PARTICLES_MAX);
+    renderPaintParticles();
   }
 
   function renderPainterTags() {
@@ -290,7 +415,10 @@
       el.style.top = `${py}px`;
       el.style.setProperty("--brush-color", t.color);
       el.style.setProperty("--brush-delay", `${t.delayMs}ms`);
-      el.innerHTML = `<span class="brush-tool" aria-hidden="true"><span class="brush-handle"></span><span class="brush-ferrule"></span><span class="brush-tip"></span></span><span class="who">${escapeHtml(t.agent)}</span>${
+      el.style.setProperty("--brush-angle", `${t.angle}deg`);
+      el.style.setProperty("--brush-travel-x", `${t.travelX}rem`);
+      el.style.setProperty("--brush-travel-y", `${t.travelY}rem`);
+      el.innerHTML = `<span class="brush-tool" aria-hidden="true"><span class="brush-handle"><span class="brush-grain"></span></span><span class="brush-ferrule"><span class="brush-ferrule-band"></span></span><span class="brush-bristles"><span class="brush-bristle"></span><span class="brush-bristle"></span><span class="brush-bristle"></span></span><span class="brush-paint-tip"></span></span><span class="who">${escapeHtml(t.agent)}</span>${
         t.goal ? `<span class="goal">${escapeHtml(t.goal)}</span>` : ""
       }`;
       layer.appendChild(el);
@@ -307,6 +435,45 @@
     clearTimeout(painterTagTimer);
     painterTagTimer = 0;
     const layer = document.getElementById("painter-tags");
+    if (layer) layer.innerHTML = "";
+  }
+
+  function renderPaintParticles() {
+    let layer = document.getElementById("paint-particles");
+    if (!layer) {
+      layer = document.createElement("div");
+      layer.id = "paint-particles";
+      layer.className = "paint-particles";
+      wrap.appendChild(layer);
+    }
+    const now = performance.now();
+    paintParticles = paintParticles.filter((particle) => particle.until > now);
+    const rect = boardEl.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    layer.innerHTML = "";
+    for (const particle of paintParticles) {
+      const el = document.createElement("span");
+      el.className = "paint-particle";
+      el.style.left = `${rect.left - wrapRect.left + ((particle.x + 0.5) / size) * rect.width}px`;
+      el.style.top = `${rect.top - wrapRect.top + ((particle.y + 0.5) / size) * rect.height}px`;
+      el.style.setProperty("--particle-color", particle.color);
+      el.style.setProperty("--particle-delay", `${particle.delayMs}ms`);
+      el.style.setProperty("--particle-x", `${particle.dx}px`);
+      el.style.setProperty("--particle-y", `${particle.dy}px`);
+      layer.appendChild(el);
+    }
+    clearTimeout(particleTimer);
+    if (paintParticles.length) {
+      const nextExpiry = Math.min(...paintParticles.map((particle) => particle.until));
+      particleTimer = setTimeout(renderPaintParticles, Math.max(0, nextExpiry - performance.now()));
+    }
+  }
+
+  function clearPaintParticles() {
+    paintParticles = [];
+    clearTimeout(particleTimer);
+    particleTimer = 0;
+    const layer = document.getElementById("paint-particles");
     if (layer) layer.innerHTML = "";
   }
 
@@ -332,6 +499,7 @@
     syncTickerMotion();
     if (!reduceMotion.matches) return;
     flashes.clear();
+    clearPaintParticles();
     cancelAnimationFrame(rafId);
     paint();
   };
@@ -368,9 +536,36 @@
     }
   }
 
+  /** @param {boolean} next */
+  function setFollowLatest(next) {
+    followLatest = Boolean(next);
+    followBtn?.classList.toggle("is-on", followLatest);
+    followBtn?.setAttribute("aria-pressed", String(followLatest));
+    followBtn?.setAttribute("aria-label", followLatest ? "Stop following latest activity" : "Follow latest activity");
+    followBtn?.setAttribute("title", followLatest ? "Stop following latest activity" : "Follow latest activity");
+    const label = followBtn?.querySelector(".follow-label");
+    if (label) label.textContent = followLatest ? "Following" : "Follow";
+  }
+
+  function loadFollowState() {
+    setFollowLatest(false);
+  }
+
+  /** @param {{ x: number, y: number }} entry */
+  function followActivity(entry) {
+    if (!followLatest) return;
+    scale = clampScale(Math.max(scale, 8));
+    panX = (size / 2 - (entry.x + 0.5)) * scale;
+    panY = (size / 2 - (entry.y + 0.5)) * scale;
+    userAdjusted = true;
+    saveView();
+    if (!reduceMotion.matches) flashes.set(entry.y * size + entry.x, performance.now() + 500);
+    paint();
+  }
+
   /** @param {unknown} raw */
   function tickerEntry(raw) {
-    if (!isRecord(raw) || !["place", "protect", "overwrite", "vote"].includes(String(raw.type))) return null;
+    if (!isRecord(raw) || !["place", "protect", "overwrite", "reclaim", "restore", "vote"].includes(String(raw.type))) return null;
     const x = raw.x;
     const y = raw.y;
     const agent = raw.agent;
@@ -387,7 +582,7 @@
   /** @param {{ type: string, x: number, y: number, agent: string, color: string, goal: string, t: number }} entry @param {boolean} duplicate */
   function tickerItemMarkup(entry, duplicate) {
     const region = `R${Math.floor(entry.y / 16) + 1}C${Math.floor(entry.x / 16) + 1}`;
-    const action = entry.type === "overwrite" ? "overwrote" : entry.type === "protect" ? "protected" : entry.type === "vote" ? "voted" : "placed";
+    const action = entry.type === "overwrite" ? "overwrote" : entry.type === "protect" ? "protected" : entry.type === "reclaim" ? "reclaimed" : entry.type === "restore" ? "restored" : entry.type === "vote" ? "voted" : "placed";
     const label = `${entry.agent} ${action} ${entry.color} at (${entry.x}, ${entry.y}), ${region}${entry.goal ? `, goal: ${entry.goal}` : ""}`;
     const content = `<span class="ticker-swatch" style="--ticker-color:${entry.color}" aria-hidden="true"></span><span class="ticker-primary"><span class="ticker-agent">${escapeHtml(entry.agent)}</span> ${action}</span><span class="ticker-secondary">${entry.color} · (${entry.x}, ${entry.y}) · ${region}${entry.goal ? ` · <span class="ticker-goal">${escapeHtml(entry.goal)}</span>` : ""}</span>`;
     if (duplicate) return `<span class="ticker-item" aria-hidden="true">${content}</span>`;
@@ -429,6 +624,7 @@
   }
 
   tickerToggle?.addEventListener("click", () => setTickerHidden(!tickerHidden));
+  followBtn?.addEventListener("click", () => setFollowLatest(!followLatest));
   activityTicker?.addEventListener("focusin", () => {
     tickerFocusPaused = true;
     syncTickerMotion();
@@ -453,15 +649,27 @@
     const fresh = [];
     for (const e of items.slice(0, 10)) {
       const entry = tickerEntry(e);
-      if (entry?.type !== "place") continue;
+      if (!entry || !["place", "reclaim", "restore"].includes(entry.type)) continue;
       if (entry.t > lastFeedSeen) fresh.push(entry);
     }
     // Attribution is intentionally short-lived so art remains the primary view.
     if (lastFeedSeen > 0) {
       const ordered = fresh.sort((a, b) => a.t - b.t || a.batchOrder - b.batchOrder).slice(-8);
       for (const [index, entry] of ordered.entries()) {
-        spawnPainterTag(entry.agent, entry.x, entry.y, entry.goal, entry.color, index * 90);
+        const previous = ordered[index - 1];
+        const dx = previous ? entry.x - previous.x : 1;
+        const dy = previous ? entry.y - previous.y : -0.45;
+        const length = Math.max(1, Math.hypot(dx, dy));
+        const motion = {
+          angle: Math.round(Math.atan2(dy, dx) * 180 / Math.PI),
+          travelX: -Math.max(-1, Math.min(1, dx / length)) * 0.72,
+          travelY: -Math.max(-1, Math.min(1, dy / length)) * 0.42,
+        };
+        spawnPainterTag(entry.agent, entry.x, entry.y, entry.goal, entry.color, index * 90, motion);
+        spawnPaintParticles(entry.x, entry.y, entry.color, index * 90);
       }
+      const newest = ordered[ordered.length - 1];
+      if (newest) followActivity(newest);
     }
     const maxT = items.reduce((max, entry) => Math.max(max, typeof entry.t === "number" ? entry.t : 0), lastFeedSeen);
     lastFeedSeen = maxT;
@@ -602,6 +810,10 @@
       size = nextSize;
       boardEl.width = size;
       boardEl.height = size;
+      if (planOverlayEl) {
+        planOverlayEl.width = size;
+        planOverlayEl.height = size;
+      }
       version = -1;
       userAdjusted = false;
       hasFitted = false;
@@ -621,6 +833,7 @@
       else applyTransform();
       if (selectedTile) void fetchSelectedTile(selectedTile);
     }
+    renderPlanOverlay(data.planOverlay);
     canvasReadThisVisibility = true;
   }
 
@@ -954,6 +1167,7 @@
     tileRequest?.abort();
     closeLiveSocket();
     clearPainterTags();
+    clearPaintParticles();
   }
 
   function resumePolling() {
@@ -1239,6 +1453,7 @@
   const restored = loadView();
   if (!restored) fitContain(true);
   loadTickerState();
+  loadFollowState();
   startPolling();
 
   window.addEventListener("pagehide", () => {
@@ -1246,6 +1461,7 @@
     syncTickerMotion();
     cancelAnimationFrame(rafId);
     clearTimeout(painterTagTimer);
+    clearTimeout(particleTimer);
     clearTimeout(toastTimer);
   });
   window.addEventListener("pageshow", (event) => {

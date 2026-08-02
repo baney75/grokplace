@@ -6,10 +6,12 @@
 /** @typedef {{ bpm: number, waveform: OscillatorType, notes: Note[] }} Composition */
 /** @typedef {{ id?: unknown, startedAt?: unknown, endsAt?: unknown, composition?: unknown }} Track */
 /** @typedef {{ oscillator: OscillatorNode, envelope: GainNode }} Voice */
-/** @typedef {{ ok?: unknown, now?: unknown }} MusicResponse */
+/** @typedef {{ ok?: unknown, now?: unknown, queue?: unknown, plans?: unknown }} MusicResponse */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const soundBtn = document.getElementById("sound-btn");
+  const musicStatus = document.getElementById("music-status");
+  const musicStatusNow = document.getElementById("music-status-now");
   const NOTE_RE = /^[A-G](?:#|b)?[0-8]$/;
   /** @type {Set<string>} */
   const WAVEFORMS = new Set(["sine", "square", "triangle", "sawtooth"]);
@@ -46,6 +48,22 @@
   /** @param {unknown} value @returns {value is Record<string, unknown>} */
   function isRecord(value) {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+
+  /** @param {unknown} value @param {number} max */
+  function boundedText(value, max) {
+    return typeof value === "string" ? value.slice(0, max) : "";
+  }
+
+  /** @param {unknown} raw */
+  function renderMusicStatus(raw) {
+    if (!musicStatus) return;
+    const data = isRecord(raw) ? raw : {};
+    const now = isRecord(data.now) ? data.now : null;
+    const title = boundedText(now?.title, 80);
+    const artist = boundedText(now?.submittedBy, 32);
+    musicStatus.hidden = !title;
+    if (musicStatusNow) musicStatusNow.textContent = title ? `${title}${artist ? ` · ${artist}` : ""}` : "";
   }
 
   /** @param {unknown} waveform @returns {waveform is OscillatorType} */
@@ -173,6 +191,7 @@
     /** @type {MusicResponse} */
     const data = raw;
     if (data.ok !== true) return;
+    renderMusicStatus(data);
     const next = isRecord(data.now) ? data.now : null;
     const changed = next?.id !== nowTrack?.id || next?.startedAt !== nowTrack?.startedAt;
     nowTrack = next;

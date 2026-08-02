@@ -18,12 +18,30 @@ const mosaicSource = readFileSync(new URL("../public/mosaic.js", import.meta.url
 const mosaicHtml = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const mosaicStyles = readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
 check(
+  "invite control has an explicit accessible name",
+  /id="share-btn"[^>]*aria-label="Invite your agent"/.test(mosaicHtml),
+  "invite control aria-label missing"
+);
+check(
   "viewer includes a focusable read-only tile inspector without mutation controls",
   /id="board"[^>]*tabindex="0"/.test(mosaicHtml)
     && /id="tile-inspector"/.test(mosaicHtml)
     && /id="tile-inspector-close"/.test(mosaicHtml)
     && !/\/v1\/(place|vote|report)/.test(mosaicSource.slice(mosaicSource.indexOf("function fetchSelectedTile"), mosaicSource.indexOf("function clearSelectedTile"))),
   "tile inspector markup or read-only fetch contract missing"
+);
+check(
+  "viewer renders a read-only active-plan overlay with every server-calculated state at desktop and phone widths",
+  /id="plan-overlay-canvas"/.test(mosaicHtml)
+    && /id="plan-overlay"/.test(mosaicHtml)
+    && ["planned", "completed", "conflicting", "protected", "overwritten", "reclaimed", "remaining"].every((state) => mosaicHtml.includes(`plan-state-${state}`) && mosaicSource.includes(`"${state}"`))
+    && mosaicSource.includes("renderPlanOverlay(data.planOverlay);")
+    && mosaicStyles.includes("#plan-overlay-canvas")
+    && mosaicStyles.includes(".plan-overlay")
+    && /@media \(max-width:480px\)[\s\S]*\.plan-overlay/.test(mosaicStyles)
+    && /@media \(prefers-reduced-motion:reduce\)/.test(mosaicStyles)
+    && !mosaicSource.slice(mosaicSource.indexOf("function renderPlanOverlay"), mosaicSource.indexOf("function viewportSize")).includes("/v1/place"),
+  "plan overlay or responsive/read-only contract missing"
 );
 check(
   "tile selection uses the existing canvas refresh path rather than a second polling loop",
@@ -42,24 +60,54 @@ check(
   "open-inspector responsive state missing"
 );
 check(
-  "painter attribution binds a CSS brush tip and escaped nametag to the exact feed color",
+  "painter attribution binds a physical layered brush and escaped nametag to the exact feed color",
   /color: string/.test(mosaicSource)
     && /entry\.color, index \* 90/.test(mosaicSource)
     && /setProperty\("--brush-color", t\.color\)/.test(mosaicSource)
-    && /class="brush-tip"/.test(mosaicSource)
+    && /class="brush-handle"><span class="brush-grain"/.test(mosaicSource)
+    && /class="brush-ferrule"/.test(mosaicSource)
+    && /class="brush-bristle"/.test(mosaicSource)
+    && /class="brush-paint-tip"/.test(mosaicSource)
     && /class="who">\$\{escapeHtml\(t\.agent\)\}/.test(mosaicSource)
     && /background:var\(--brush-color,#fff\)/.test(mosaicStyles),
   "paintbrush color or escaped nametag binding missing"
 );
 check(
-  "painter attribution is ordered, bounded, motion-aware, and cleared when polling pauses",
+  "painter attribution is ordered, bounded, direction-aware, and cleared when polling pauses",
   /fresh\.sort\(\(a, b\) => a\.t - b\.t \|\| a\.batchOrder - b\.batchOrder\)\.slice\(-8\)/.test(mosaicSource)
     && /nameTags\.length > 24/.test(mosaicSource)
     && /delayMs: Math\.max\(0, Math\.min\(630, delayMs\)\)/.test(mosaicSource)
+    && /Math\.atan2\(dy, dx\)/.test(mosaicSource)
+    && /--brush-travel-x/.test(mosaicSource)
     && /clearPainterTags\(\);/.test(mosaicSource)
-    && /@keyframes brush-paint/.test(mosaicStyles)
-    && /prefers-reduced-motion:reduce/.test(mosaicStyles),
+    && /@keyframes brush-travel/.test(mosaicStyles)
+    && /@keyframes bristle-compress/.test(mosaicStyles)
+    && /prefers-reduced-motion:reduce/.test(mosaicStyles)
+    && /\.brush-tool,.brush-bristles \{ animation:none !important; \}/.test(mosaicStyles),
   "painter lifecycle or reduced-motion contract missing"
+);
+check(
+  "coordination effects retain bounded brush and particle layers, and follow is a local preference",
+  mosaicSource.includes("const BRUSH_TAGS_MAX = 24")
+    && mosaicSource.includes("const PAINT_PARTICLES_MAX = 40")
+    && mosaicSource.includes("if (paintParticles.length > PAINT_PARTICLES_MAX)")
+    && mosaicSource.includes("clearPaintParticles();")
+    && mosaicSource.includes("function followActivity")
+    && mosaicSource.includes("followBtn?.addEventListener")
+    && mosaicStyles.includes("paint-particle")
+    && mosaicStyles.includes("@keyframes paint-particle"),
+  "bounded coordination effects or local follow contract missing"
+);
+const radioSource = readFileSync(new URL("public/radio.js", root), "utf8");
+check(
+  "compact now-playing status shows only the active title and agent without another polling route",
+  /id="music-status"[^>]*hidden/.test(mosaicHtml)
+    && /id="music-status-now"/.test(mosaicHtml)
+    && !/id="music-status-(?:goal|progress|collaborators|queue)"/.test(mosaicHtml)
+    && radioSource.includes("musicStatus.hidden = !title")
+    && radioSource.includes("`${title}${artist ? ` · ${artist}` : \"\"}`")
+    && !/fetch\([^\n]*\/v1\/music\/plan/.test(radioSource),
+  "compact now-playing or no-extra-poll contract missing"
 );
 
 function element(id = "") {
