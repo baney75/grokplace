@@ -480,6 +480,56 @@ check(
   JSON.stringify(promoted)
 );
 
+const legacyNow = Date.now();
+const legacyCurrent = {
+  id: "legacy-current",
+  title: "Legacy current",
+  submittedBy: "agent-a",
+  votes: 129,
+  voters: Array.from({ length: 129 }, (_, index) => `voter-${index}`),
+  reporters: [],
+  addedAt: legacyNow - 2_000,
+  startedAt: legacyNow - 1_000,
+  endsAt: legacyNow + 1_000,
+  advanceToken: "b".repeat(32),
+  composition: { bpm: 120, waveform: "sine", notes: [{ note: "C4", at: 0, duration: 8, velocity: 0.7 }], durationMs: 1_000 },
+  license: "CC0-1.0",
+  originalNonInfringingAttested: true,
+};
+const legacyMusicStorage = new MemoryStorage({
+  music: {
+    now: legacyCurrent,
+    queue: [
+      { ...legacyCurrent, id: "legacy-same-owner", title: "Same owner waits", voters: [], votes: 50, startedAt: undefined, endsAt: undefined, advanceToken: undefined },
+      { ...legacyCurrent, id: "legacy-other-owner", title: "Other owner waits", submittedBy: "agent-b", voters: [], votes: 1, startedAt: undefined, endsAt: undefined, advanceToken: undefined },
+    ],
+    version: 7,
+  },
+});
+const legacyMusicCanvas = mutationCanvas(legacyMusicStorage);
+await legacyMusicCanvas.getMusic();
+const repairedLegacyMusic = await legacyMusicStorage.get("music");
+check(
+  "legacy music repair transaction bounds voter identities and seeds the active contributor",
+  repairedLegacyMusic.now?.voters?.length === 128
+    && repairedLegacyMusic.lastPlayedBy === "agent-a"
+    && repairedLegacyMusic.version === 8,
+  JSON.stringify({ voters: repairedLegacyMusic.now?.voters?.length, lastPlayedBy: repairedLegacyMusic.lastPlayedBy, version: repairedLegacyMusic.version })
+);
+await legacyMusicStorage.put("music", {
+  ...repairedLegacyMusic,
+  now: { ...repairedLegacyMusic.now, startedAt: legacyNow - 2_000, endsAt: legacyNow - 1 },
+});
+await legacyMusicCanvas.getMusic();
+const promotedLegacyMusic = await legacyMusicStorage.get("music");
+check(
+  "first natural promotion after legacy repair avoids repeating the active contributor",
+  promotedLegacyMusic.now?.id === "legacy-other-owner"
+    && promotedLegacyMusic.now?.submittedBy === "agent-b"
+    && promotedLegacyMusic.queue?.some((song) => song.id === "legacy-same-owner"),
+  JSON.stringify(promotedLegacyMusic)
+);
+
 const shortStartedAt = Date.now();
 const shortSong = {
   id: "short-song",

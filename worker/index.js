@@ -181,7 +181,7 @@ function isMusicPlanRequestRecord(value) {
 }
 
 /** @param {unknown} value @returns {value is MusicSong} */
-function isMusicSong(value) {
+function isLegacyMusicSong(value) {
   return isJsonRecord(value)
     && typeof value.id === "string"
     && typeof value.title === "string"
@@ -203,6 +203,37 @@ function isMusicSong(value) {
     && (value.fingerprint === undefined || typeof value.fingerprint === "string")
     && (value.reason === undefined || typeof value.reason === "string")
     && (value.musicPlanId === undefined || typeof value.musicPlanId === "string" && MUSIC_PLAN_ID_RE.test(value.musicPlanId));
+}
+
+/** @param {unknown} value @returns {value is MusicSong} */
+function isMusicSong(value) {
+  return isLegacyMusicSong(value)
+    && (value.voters === undefined || value.voters.length <= MUSIC_VOTERS_MAX)
+    && (value.reporters === undefined || value.reporters.length <= MUSIC_REPORT_THRESHOLD);
+}
+
+/** @param {unknown} value @param {number} limit @returns {string[]} */
+function normalizeMusicIdentities(value, limit) {
+  if (!Array.isArray(value)) return [];
+  const unique = new Set();
+  for (const identity of value) {
+    if (typeof identity !== "string") continue;
+    const parsed = parseAgent(identity);
+    if (!parsed.ok) continue;
+    unique.add(parsed.agent.toLowerCase());
+    if (unique.size >= limit) break;
+  }
+  return [...unique];
+}
+
+/** @param {unknown} value @returns {MusicSong | null} */
+function normalizeMusicSong(value) {
+  if (!isLegacyMusicSong(value)) return null;
+  return {
+    ...value,
+    voters: normalizeMusicIdentities(value.voters, MUSIC_VOTERS_MAX),
+    reporters: normalizeMusicIdentities(value.reporters, MUSIC_REPORT_THRESHOLD),
+  };
 }
 
 /** @param {unknown} value @returns {value is MusicState} */
@@ -2257,19 +2288,23 @@ export class GrokPlaceCanvas extends DurableObject {
   /** @param {unknown} value @returns {MusicState} */
   normalizeMusic(value) {
     if (!isJsonRecord(value)) return emptyMusicState();
+    const now = normalizeMusicSong(value.now);
+    const queue = Array.isArray(value.queue) ? value.queue.map(normalizeMusicSong).filter(isPresent) : [];
     const songs = [
-      ...(isMusicSong(value.now) ? [value.now] : []),
-      ...(Array.isArray(value.queue) ? value.queue.filter(isMusicSong) : []),
+      ...(now ? [now] : []),
+      ...queue,
     ];
     const derivedNextQueueOrder = songs.reduce(
       (next, song) => Math.max(next, typeof song.queueOrder === "number" ? song.queueOrder + 1 : 0),
       0,
     );
     return {
-      now: isMusicSong(value.now) ? value.now : null,
-      queue: Array.isArray(value.queue) ? value.queue.filter(isMusicSong) : [],
+      now,
+      queue,
       version: typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 0 ? value.version : 0,
-      ...(typeof value.lastPlayedBy === "string" && parseAgent(value.lastPlayedBy).ok ? { lastPlayedBy: value.lastPlayedBy } : {}),
+      ...(typeof value.lastPlayedBy === "string" && parseAgent(value.lastPlayedBy).ok
+        ? { lastPlayedBy: value.lastPlayedBy }
+        : now ? { lastPlayedBy: now.submittedBy } : {}),
       ...(typeof value.nextQueueOrder === "number" && Number.isSafeInteger(value.nextQueueOrder) && value.nextQueueOrder >= derivedNextQueueOrder
         ? { nextQueueOrder: value.nextQueueOrder }
         : derivedNextQueueOrder > 0 ? { nextQueueOrder: derivedNextQueueOrder } : {}),
@@ -2573,15 +2608,24 @@ export class GrokPlaceCanvas extends DurableObject {
   async prepareMusicStateIn(storage, now) {
     const raw = await storage.get("music");
     let m = this.normalizeMusic(raw);
-    let changed = false;
+    const rawSongs = isJsonRecord(raw)
+      ? [raw.now, ...(Array.isArray(raw.queue) ? raw.queue : [])].filter(isLegacyMusicSong)
+      : [];
+    const repairedIdentities = rawSongs.some((song) => {
+      const normalized = normalizeMusicSong(song);
+      return normalized && (JSON.stringify(song.voters || []) !== JSON.stringify(normalized.voters)
+        || JSON.stringify(song.reporters || []) !== JSON.stringify(normalized.reporters));
+    });
+    let changed = repairedIdentities;
+    if (changed) m.version = (m.version || 0) + 1;
     /** @param {unknown} song @returns {song is MusicSong} */
     const valid = (song) => isMusicSong(song)
       && scanTextSafety(song.title, "composition title").ok
       && parseAgent(song.submittedBy).ok
       && !Object.keys(song).some((key) => ["url", "link", "href", "audio", "file", "source", "ref", "embedUrl", "canonical", "lyrics", "style", "sample"].includes(key));
     const normalizedDropped = isJsonRecord(raw)
-      ? (raw.now === undefined || raw.now === null || isMusicSong(raw.now) ? 0 : 1)
-        + (Array.isArray(raw.queue) ? raw.queue.filter((song) => !isMusicSong(song)).length : 0)
+      ? (raw.now === undefined || raw.now === null || isLegacyMusicSong(raw.now) ? 0 : 1)
+        + (Array.isArray(raw.queue) ? raw.queue.filter((song) => !isLegacyMusicSong(song)).length : 0)
       : 0;
     const before = m.queue.length + (m.now ? 1 : 0);
     m.queue = m.queue.filter(valid).slice(0, MUSIC_QUEUE_MAX);
