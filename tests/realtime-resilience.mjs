@@ -209,18 +209,20 @@ class MemoryStorage {
     `rpt:stale:${String(index).padStart(3, "0")}`,
     [{ a: "old-agent", t: index, reason: "unsafe" }],
   ]));
+  const staleOwners = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [`owner:${index}`, "old-agent"]));
   const storage = new MemoryStorage({
     ...staleReports,
-    board: new Uint8Array([0, 0, 0, 1]).buffer,
-    scores: new Int16Array(4).buffer,
-    size: 2,
+    ...staleOwners,
+    board: new Uint8Array(128 * 128).buffer,
+    scores: new Int16Array(128 * 128).buffer,
+    size: 128,
     schema: 4,
     "rpt:1,1": [{ a: "alice", t: 1, reason: "unsafe" }, { a: "bob", t: 2, reason: "unsafe" }],
     "vote:alice:1,1": 1,
-    "owner:3": "old-owner",
     "agent:alice": { name: "alice", placements: 1 },
+    "agent:old-agent": { name: "old-agent", placements: 1, reputation: 7, upvotesReceived: 2 },
   });
-  const room = new GrokPlaceCanvas({ storage, getWebSockets() { return []; } }, { CANVAS_SIZE: "2", RESET_SECRET: "test-reset" });
+  const room = new GrokPlaceCanvas({ storage, getWebSockets() { return []; } }, { CANVAS_SIZE: "128", RESET_SECRET: "test-reset" });
   const response = await room.handleReset(new Request("https://test/internal/reset", {
     method: "POST",
     headers: { Authorization: "Bearer test-reset", "Content-Type": "application/json" },
@@ -238,7 +240,13 @@ class MemoryStorage {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ agent: "alice", x: 1, y: 1, reason: "unsafe" }),
-  }), 2, "*", "test-ip");
+  }), 128, "*", "test-ip");
+  const voteResponse = await room.handleVote(new Request("https://test/internal/vote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: "alice", x: 122, y: 1, dir: 1 }),
+  }), 128, "*", "test-ip");
+  const oldAgentAfterVote = await storage.get("agent:old-agent");
   check(
     "reset removes tile state and atomically epochs new reports away from orphaned records",
     response.status === 200
@@ -248,13 +256,18 @@ class MemoryStorage {
       && reportCleanupCalls[0]?.limit === 128
       && staleReportsRemaining > 0
       && (await storage.get("vote:alice:1,1")) === undefined
-      && (await storage.get("owner:3")) === undefined
+      && (await storage.get("owner:250")) === "old-agent"
       && (await storage.get("agent:alice")) !== undefined
       && reportResponse.status === 200
       && (await storage.get("rpt:1,1"))?.length === 2
       && (await storage.get(`rpt:${resetMeta.tileEpoch}:1,1`))?.length === 1
+      && voteResponse.status === 409
+      && (await voteResponse.clone().json()).error === "empty_tile"
+      && oldAgentAfterVote.reputation === 7
+      && oldAgentAfterVote.upvotesReceived === 2
+      && (await storage.get(`vote:${resetMeta.tileEpoch}:alice:122,1`)) === undefined
       && new Uint8Array(await storage.get("board")).every((cell) => cell === 0),
-    JSON.stringify({ body, resetMeta, reportCleanupCalls, staleReportsRemaining, report: await reportResponse.json(), keys: [...storage.values.keys()] })
+    JSON.stringify({ body, resetMeta, reportCleanupCalls, staleReportsRemaining, report: await reportResponse.json(), vote: await voteResponse.json(), oldAgentAfterVote, keys: [...storage.values.keys()] })
   );
 }
 

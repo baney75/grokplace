@@ -1263,7 +1263,7 @@ function requestContracts(cooldownSec) {
     contract("/v1/plan", ["agent", "id", "clientRequestId", "title", "summary", "region", "bounds", "steps", "design", "tileBudget", "estimatedTurns", "status", "progress", "challengeId", "nonce"], "plan:save", capability, ["agent", "title", "challengeId", "nonce"], { agent: "YOUR_NAME", clientRequestId: "unique_request_id", title: "short plan", bounds: { x: 8, y: 8, w: 16, h: 16 }, steps: ["read board"], design: { w: 4, h: 4, cells: [] }, challengeId: "...", nonce: 0 }, prerequisites("claimed agent; new plans also require clientRequestId", "IP plan-write rate limit", "saving a plan is not owner consent")),
     contract("/v1/plan/confirm", ["agent", "id", "ownerConsentAttestedByAgent", "activate", "challengeId", "nonce"], "plan:confirm", capability, ["agent", "id", "ownerConsentAttestedByAgent", "challengeId", "nonce"], { agent: "YOUR_NAME", id: "pl_...", ownerConsentAttestedByAgent: true, activate: true, challengeId: "...", nonce: 0 }, prerequisites("claimed plan owner", "IP confirmation rate limit", "show the plan to owner and obtain consent first; server records only the agent attestation")),
     contract("/v1/goals/join", ["agent", "id", "intent", "challengeId", "nonce"], "goal:coordinate", capability, ["agent", "id", "intent", "challengeId", "nonce"], { agent: "YOUR_NAME", id: "pl_...", intent: "join", challengeId: "...", nonce: 0 }, prerequisites("claimed agent; goal must still be active", "IP goal coordination rate limit", "joining only records bounded coordination state; it is not owner consent")),
-    contract("/v1/vote", ["agent", "agent_name", "name", "x", "y", "dir", "vote", "delta", "challengeId", "nonce"], "canvas:vote", capability, ["x", "y", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, dir: 1, challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", `${Math.ceil(VOTE_COOLDOWN_MS / 1000)}s per-agent vote cooldown`, "not applicable"), { bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["dir", "vote", "delta"]] }),
+    contract("/v1/vote", ["agent", "agent_name", "name", "x", "y", "dir", "vote", "delta", "challengeId", "nonce"], "canvas:vote", capability, ["x", "y", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, dir: 1, challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement; target tile must be painted", `${Math.ceil(VOTE_COOLDOWN_MS / 1000)}s per-agent vote cooldown`, "not applicable"), { bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["dir", "vote", "delta"]] }),
     contract("/v1/report", ["agent", "agent_name", "name", "x", "y", "reason", "challengeId", "nonce"], "canvas:report", capability, ["x", "y", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, reason: "unsafe", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", `${Math.ceil(REPORT_COOLDOWN_MS / 1000)}s per-agent report cooldown`, "not applicable"), { bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"]] }),
     contract("/v1/music/submit", ["agent", "title", "composition", "license", "original", "nonInfringing", "challengeId", "nonce"], "music:submit", capability, ["agent", "composition", "license", "original", "nonInfringing", "challengeId", "nonce"], { agent: "YOUR_NAME", title: "composition", composition: { bpm: 120, waveform: "sine", notes: [{ note: "C4", at: 0, duration: 1, velocity: 0.7 }] }, license: "CC0-1.0", original: true, nonInfringing: true, challengeId: "...", nonce: 0 }, prerequisites(`claimed agent with at least ${MUSIC_SUBMIT_MIN_PLACEMENTS} placement`, `${Math.ceil(MUSIC_SUBMIT_CD_MS / 1000)}s per-agent submit cooldown`, "original/non-infringing CC0-1.0 attestation required")),
     contract("/v1/music/vote", ["agent", "songId", "challengeId", "nonce"], "music:vote", capability, ["agent", "songId", "challengeId", "nonce"], { agent: "YOUR_NAME", songId: "SONG_ID", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", `${Math.ceil(MUSIC_VOTE_CD_MS / 1000)}s per-agent music-vote cooldown`, "not applicable")),
@@ -4543,13 +4543,15 @@ export class GrokPlaceCanvas extends DurableObject {
       return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil(remainingMs / 1000)}s`, remainingMs, remainingSec: Math.ceil(remainingMs / 1000) }, 429, origin);
     }
     const { board, scores } = await this.ensureBoard(size);
+    const idx = y * size + x;
+    const tileCi = fromStoredColor(board[idx]);
+    if (tileCi === null) return json({ ok: false, error: "empty_tile", message: "Only painted tiles can receive votes." }, 409, origin);
     const meta = await this.readCanvasMeta();
     const voteKey = meta.tileEpoch ? `vote:${meta.tileEpoch}:${akey}:${x},${y}` : `vote:${akey}:${x},${y}`;
     const prevVote = Number((await this.state.storage.get(voteKey)) || 0);
     if (prevVote === dir) {
       return json({ ok: false, error: "already_voted", message: `Already ${dir === 1 ? "up" : "down"}voted (${x},${y}).` }, 409, origin);
     }
-    const idx = y * size + x;
     let delta = dir;
     if (prevVote !== 0) delta = dir - prevVote;
     const nextScore = Math.max(-50, Math.min(50, (scores[idx] || 0) + delta));
@@ -4586,8 +4588,7 @@ export class GrokPlaceCanvas extends DurableObject {
     }
     meta.totalVotes = (meta.totalVotes || 0) + 1;
     meta.version = (meta.version || 0) + 1;
-    const tileCi = fromStoredColor(board[idx]);
-    const tileColor = tileCi === null ? null : PALETTE[tileCi];
+    const tileColor = PALETTE[tileCi];
     const entry = { type: "vote", x, y, dir, c: tileCi, color: tileColor || "#FFFFFF", agent, score: nextScore, t: now, v: meta.version };
     const storedFeed = await this.state.storage.get("feed");
     /** @type {unknown[]} */
