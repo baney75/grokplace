@@ -38,6 +38,7 @@
   // Disconnected viewers retain the critic-reviewed 12/min fallback budget.
   const MUSIC_POLL_MS = 30_000;
   const MUSIC_BACKOFF_MAX_MS = 60_000;
+  const MAX_TIMER_DELAY_MS = 2_147_000_000;
   // GET /v1/music also promotes an expired track, so this must cover the
   // shortest valid composition even while the invalidation socket is healthy.
   const LIVE_MUSIC_RECONCILE_MS = 30_000;
@@ -193,7 +194,7 @@
       }
       musicRetryNotBefore = 0;
       void pollMusic();
-    }, Math.max(delay, gateDelay));
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(delay, gateDelay)));
   }
 
   function isPollingActive() {
@@ -205,9 +206,9 @@
     const value = response.headers?.get?.("Retry-After")?.trim() || "";
     if (!value) return 0;
     const seconds = Number(value);
-    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(MUSIC_BACKOFF_MAX_MS, Math.ceil(seconds * 1000));
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(Number.MAX_SAFE_INTEGER - Date.now(), Math.ceil(seconds * 1000));
     const at = Date.parse(value);
-    return Number.isFinite(at) ? Math.min(MUSIC_BACKOFF_MAX_MS, Math.max(0, at - Date.now())) : 0;
+    return Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0;
   }
 
   /** @param {Response | { status?: number, headers?: { get?: (name: string) => string | null } }} response */
@@ -227,7 +228,7 @@
       : {};
     const value = Number(retry.retryAfterMs);
     return {
-      retryAfterMs: Number.isFinite(value) && value > 0 ? Math.min(MUSIC_BACKOFF_MAX_MS, value) : 0,
+      retryAfterMs: Number.isFinite(value) && value > 0 ? value : 0,
       jitter: retry.retryJitter === true,
     };
   }
@@ -237,9 +238,9 @@
     const base = liveConnected ? LIVE_MUSIC_RECONCILE_MS : MUSIC_POLL_MS;
     if (musicFailures <= 0) return base;
     const exponential = Math.min(MUSIC_BACKOFF_MAX_MS, base * (2 ** Math.min(musicFailures, 2)));
-    if (!jitter) return Math.max(Math.min(MUSIC_BACKOFF_MAX_MS, serverRetryAfterMs), exponential);
+    if (!jitter) return Math.max(serverRetryAfterMs, exponential);
     const jittered = Math.min(MUSIC_BACKOFF_MAX_MS, Math.round(exponential * (0.8 + Math.random() * 0.4)));
-    return Math.max(Math.min(MUSIC_BACKOFF_MAX_MS, serverRetryAfterMs), jittered);
+    return Math.max(serverRetryAfterMs, jittered);
   }
 
   function refreshMusicNow() {

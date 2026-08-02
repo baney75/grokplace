@@ -270,7 +270,7 @@ async function flush(ms = 0) {
     const count = (attempts.get(path) || 0) + 1;
     attempts.set(path, count);
     if (count === 1 && (path === "/v1/canvas" || path === "/v1/feed")) {
-      const retryAfter = path === "/v1/canvas" ? "45" : "50";
+      const retryAfter = path === "/v1/canvas" ? "120" : "125";
       return { ok: false, status: 429, headers: { get: () => retryAfter } };
     }
     if (path === "/v1/canvas") return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#ffffff"], version: 1 }) };
@@ -308,10 +308,10 @@ async function flush(ms = 0) {
     "live invalidations cannot bypass canvas or feed Retry-After gates",
     attempts.get("/v1/canvas") === 1
       && attempts.get("/v1/feed") === 1
-      && JSON.stringify(timers.delays()) === JSON.stringify([45_000, 50_000]),
+      && JSON.stringify(timers.delays()) === JSON.stringify([120_000, 125_000]),
     JSON.stringify({ attempts: Object.fromEntries(attempts), delays: timers.delays(), calls })
   );
-  await timers.tick(44_999);
+  await timers.tick(119_999);
   socket.message('{"t":"canvas","v":99}');
   socket.message('{"t":"activity","v":99}');
   await timers.tick(1);
@@ -739,7 +739,7 @@ async function flush(ms = 0) {
     ...harness,
     fetch: async () => {
       calls++;
-      if (calls === 1) return { ok: false, status: 429, headers: { get: () => "50" } };
+      if (calls === 1) return { ok: false, status: 429, headers: { get: () => "120" } };
       return { ok: true, json: async () => ({ ok: true, now: null }) };
     },
     AbortController,
@@ -762,7 +762,7 @@ async function flush(ms = 0) {
   emit(harness.documentListeners, "visibilitychange");
   emit(harness.windowListeners, "focus");
   emit(harness.windowListeners, "grokplace:live", { detail: { t: "music", v: 99 } });
-  await timers.tick(9_999);
+  await timers.tick(79_999);
   check(
     "music live, focus, and visibility triggers cannot bypass Retry-After",
     calls === 1 && JSON.stringify(timers.delays()) === JSON.stringify([1]),

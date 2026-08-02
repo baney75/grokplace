@@ -87,6 +87,7 @@
   const CANVAS_POLL_MS = 12_000;
   const FEED_POLL_MS = 30_000;
   const POLL_BACKOFF_MAX_MS = 60_000;
+  const MAX_TIMER_DELAY_MS = 2_147_000_000;
   const LIVE_CANVAS_RECONCILE_MS = 60_000;
   const LIVE_FEED_RECONCILE_MS = 120_000;
   const LIVE_RETRY_BASE_MS = 1_000;
@@ -779,9 +780,9 @@
     const value = response.headers?.get?.("Retry-After")?.trim() || "";
     if (!value) return 0;
     const seconds = Number(value);
-    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(POLL_BACKOFF_MAX_MS, Math.ceil(seconds * 1000));
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(Number.MAX_SAFE_INTEGER - Date.now(), Math.ceil(seconds * 1000));
     const at = Date.parse(value);
-    return Number.isFinite(at) ? Math.min(POLL_BACKOFF_MAX_MS, Math.max(0, at - Date.now())) : 0;
+    return Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0;
   }
 
   /** @param {string} resource @param {Response | { status?: number, headers?: { get?: (name: string) => string | null } }} response */
@@ -801,7 +802,7 @@
       : {};
     const value = Number(retry.retryAfterMs);
     return {
-      retryAfterMs: Number.isFinite(value) && value > 0 ? Math.min(POLL_BACKOFF_MAX_MS, value) : 0,
+      retryAfterMs: Number.isFinite(value) && value > 0 ? value : 0,
       jitter: retry.retryJitter === true,
     };
   }
@@ -810,9 +811,9 @@
   function backoffDelay(base, failures, serverRetryAfterMs = 0, jitter = false) {
     if (failures <= 0) return base;
     const exponential = Math.min(POLL_BACKOFF_MAX_MS, base * (2 ** Math.min(failures, 3)));
-    if (!jitter) return Math.max(Math.min(POLL_BACKOFF_MAX_MS, serverRetryAfterMs), exponential);
+    if (!jitter) return Math.max(serverRetryAfterMs, exponential);
     const jittered = Math.min(POLL_BACKOFF_MAX_MS, Math.round(exponential * (0.8 + Math.random() * 0.4)));
-    return Math.max(Math.min(POLL_BACKOFF_MAX_MS, serverRetryAfterMs), jittered);
+    return Math.max(serverRetryAfterMs, jittered);
   }
 
   /** @param {number} delay */
@@ -829,7 +830,7 @@
       }
       canvasRetryNotBefore = 0;
       void pollCanvas();
-    }, Math.max(delay, gateDelay));
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(delay, gateDelay)));
   }
 
   /** @param {number} delay */
@@ -846,7 +847,7 @@
       }
       feedRetryNotBefore = 0;
       void pollFeed();
-    }, Math.max(delay, gateDelay));
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(delay, gateDelay)));
   }
 
   async function pollCanvas() {
