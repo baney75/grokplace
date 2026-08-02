@@ -205,7 +205,12 @@ class MemoryStorage {
 }
 
 {
+  const staleReports = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [
+    `rpt:stale:${String(index).padStart(3, "0")}`,
+    [{ a: "old-agent", t: index, reason: "unsafe" }],
+  ]));
   const storage = new MemoryStorage({
+    ...staleReports,
     board: new Uint8Array([0, 0, 0, 1]).buffer,
     scores: new Int16Array(4).buffer,
     size: 2,
@@ -223,6 +228,8 @@ class MemoryStorage {
   }), "*");
   const body = await response.json();
   const resetMeta = await storage.get("meta");
+  const reportCleanupCalls = storage.listCalls.filter((call) => call.prefix === "rpt:");
+  const staleReportsRemaining = [...storage.values.keys()].filter((key) => key.startsWith("rpt:stale:")).length;
   await storage.put("rpt:1,1", [{ a: "alice", t: 1, reason: "unsafe" }, { a: "bob", t: 2, reason: "unsafe" }]);
   room.rateLimit = async () => ({ ok: true });
   room.consumeProof = async () => ({ ok: true });
@@ -237,13 +244,17 @@ class MemoryStorage {
     response.status === 200
       && body.ok === true
       && /^[a-f0-9]{16}$/.test(resetMeta.tileEpoch)
+      && reportCleanupCalls.length === 1
+      && reportCleanupCalls[0]?.limit === 128
+      && staleReportsRemaining > 0
       && (await storage.get("vote:alice:1,1")) === undefined
       && (await storage.get("owner:3")) === undefined
       && (await storage.get("agent:alice")) !== undefined
       && reportResponse.status === 200
       && (await storage.get("rpt:1,1"))?.length === 2
-      && (await storage.get(`rpt:${resetMeta.tileEpoch}:1,1`))?.length === 1,
-    JSON.stringify({ body, resetMeta, report: await reportResponse.json(), keys: [...storage.values.keys()] })
+      && (await storage.get(`rpt:${resetMeta.tileEpoch}:1,1`))?.length === 1
+      && new Uint8Array(await storage.get("board")).every((cell) => cell === 0),
+    JSON.stringify({ body, resetMeta, reportCleanupCalls, staleReportsRemaining, report: await reportResponse.json(), keys: [...storage.values.keys()] })
   );
 }
 

@@ -156,6 +156,28 @@ response = await unboundedCanvas.handlePlanConfirm(
 data = await response.json();
 check("active goals reject missing bounds before they enter regional discovery", response.status === 400 && data.error === "goal_bounds_required", JSON.stringify(data));
 
+const legacyUnboundedPlan = { ...activePlan, id: "pl_4444444444444444", bounds: null, status: "active" };
+const legacyUnboundedStorage = new MemoryStorage({ [`plan:${legacyUnboundedPlan.id}`]: legacyUnboundedPlan });
+const legacyUnboundedCanvas = new GrokPlaceCanvas({ storage: legacyUnboundedStorage }, { CANVAS_SIZE: "8" });
+legacyUnboundedCanvas.rateLimit = async () => ({ ok: true });
+legacyUnboundedCanvas.consumeProof = async () => ({ ok: true });
+legacyUnboundedCanvas.requireAgentCapability = async () => ({ ok: true });
+response = await legacyUnboundedCanvas.handlePlace(new Request("https://test/internal/place", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ agent: owner, goal: "legacy unbounded goal", planId: legacyUnboundedPlan.id, x: 7, y: 7, color: 13 }),
+}), 8, 60_000, "*", "test-ip");
+data = await response.json();
+check(
+  "legacy active goals without bounds are paused before placement association",
+  response.status === 409
+    && data.error === "goal_bounds_required"
+    && (await legacyUnboundedStorage.get(`plan:${legacyUnboundedPlan.id}`))?.status === "paused"
+    && new Uint8Array(await legacyUnboundedStorage.get("board"))[63] === 0
+    && (await legacyUnboundedStorage.get("provenance:row:7")) === undefined,
+  JSON.stringify(data)
+);
+
 const stalePlan = { ...activePlan, id: "pl_2222222222222222", status: "active", updatedAt: 0 };
 const staleStorage = new MemoryStorage({
   [`plan:${stalePlan.id}`]: stalePlan,

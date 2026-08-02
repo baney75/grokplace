@@ -1685,14 +1685,11 @@ export class GrokPlaceCanvas extends DurableObject {
   }
 
   /** @param {string} prefix */
-  async deletePrefix(prefix) {
-    while (true) {
-      const records = await this.state.storage.list({ prefix, limit: 128 });
-      const keys = [...records.keys()];
-      if (!keys.length) return;
-      await this.state.storage.delete(keys);
-      if (keys.length < 128) return;
-    }
+  async deletePrefixBatch(prefix) {
+    const records = await this.state.storage.list({ prefix, limit: 128 });
+    const keys = [...records.keys()];
+    if (keys.length) await this.state.storage.delete(keys);
+    return keys.length;
   }
 
   /** @param {string[]} types @param {number} [version] */
@@ -2629,7 +2626,8 @@ export class GrokPlaceCanvas extends DurableObject {
     }
 
     const akey = agent.toLowerCase();
-    const requestKey = `protection:requests:${akey}`;
+    const requestMeta = await this.readCanvasMeta();
+    const requestKey = requestMeta.tileEpoch ? `protection:requests:${requestMeta.tileEpoch}:${akey}` : `protection:requests:${akey}`;
     const storedReplays = await this.state.storage.get(requestKey);
     const replayLog = Array.isArray(storedReplays) ? storedReplays.filter(isProtectionRequestRecord).slice(0, PROTECTION_REPLAY_MAX) : [];
     const replay = replayLog.find((record) => record.clientRequestId === clientRequestId);
@@ -2953,6 +2951,12 @@ export class GrokPlaceCanvas extends DurableObject {
       const storedPlan = await this.state.storage.get(`plan:${requestedPlanId}`);
       const candidate = isPlanRecord(storedPlan) ? storedPlan : null;
       if (!candidate || candidate.status !== "active") return json({ ok: false, error: "inactive_goal", message: "The requested goal is not active." }, 409, origin);
+      if (!isPlanBounds(candidate.bounds)) {
+        candidate.status = "paused";
+        candidate.updatedAt = now;
+        await this.state.storage.put(`plan:${candidate.id}`, candidate);
+        return json({ ok: false, error: "goal_bounds_required", message: "Legacy unbounded goals are paused before placement association." }, 409, origin);
+      }
       if (!this.isPlanParticipant(candidate, agentStat, akey)) return json({ ok: false, error: "goal_not_joined", message: "Join this active goal before associating placements with it." }, 403, origin);
       if (!this.boundsContainTiles(candidate.bounds, batch)) return json({ ok: false, error: "outside_goal_region", message: "Every associated tile must stay within the goal bounds." }, 400, origin);
       placementPlan = candidate;
@@ -3862,7 +3866,8 @@ export class GrokPlaceCanvas extends DurableObject {
 
   /** @param {PlanBounds | null | undefined} bounds @param {{ x: number, y: number }[]} tiles */
   boundsContainTiles(bounds, tiles) {
-    return !bounds || tiles.every((tile) => tile.x >= bounds.x && tile.y >= bounds.y && tile.x < bounds.x + bounds.w && tile.y < bounds.y + bounds.h);
+    if (!bounds) return false;
+    return tiles.every((tile) => tile.x >= bounds.x && tile.y >= bounds.y && tile.x < bounds.x + bounds.w && tile.y < bounds.y + bounds.h);
   }
 
   /** @param {PlanRecord} plan @returns {PlanIndexEntry} */
@@ -3890,7 +3895,10 @@ export class GrokPlaceCanvas extends DurableObject {
       if (!isPlanRecord(stored)) continue;
       /** @type {PlanRecord} */
       let plan = stored;
-      if (plan.status === "active" && now - plan.updatedAt > GOAL_ACTIVE_TTL_MS) {
+      if (plan.status === "active" && !isPlanBounds(plan.bounds)) {
+        plan = { ...plan, status: "paused", updatedAt: now };
+        await this.state.storage.put(`plan:${plan.id}`, plan);
+      } else if (plan.status === "active" && now - plan.updatedAt > GOAL_ACTIVE_TTL_MS) {
         plan = { ...plan, status: "paused", updatedAt: now };
         await this.state.storage.put(`plan:${plan.id}`, plan);
       }
@@ -5114,19 +5122,21 @@ export class GrokPlaceCanvas extends DurableObject {
       leaders: [],
     };
     const clearedMusic = body.clearMusic !== false ? emptyMusicState() : null;
-    await this.deletePrefix("provenance:row:");
-    await this.deletePrefix("protection:cell:");
-    await this.deletePrefix("protection:requests:");
-    await this.deletePrefix("rpt:");
-    await this.deletePrefix("vote:");
-    await this.deletePrefix("owner:");
-    await this.state.storage.delete("provenance");
     await this.state.storage.put(put);
+    // The new board and tile epoch become authoritative before bounded cleanup.
+    // Any old epoch-scoped report, vote, or replay records are already inert.
+    await this.deletePrefixBatch("provenance:row:");
+    await this.deletePrefixBatch("protection:cell:");
+    await this.deletePrefixBatch("protection:requests:");
+    await this.deletePrefixBatch("rpt:");
+    await this.deletePrefixBatch("vote:");
+    await this.deletePrefixBatch("owner:");
+    await this.state.storage.delete("provenance");
     if (clearedMusic) await this.writeMusicAndAlarm(clearedMusic);
     // Drop rate-limit / cooldown / challenge buckets so admin reset fully unsticks ops/tests
     if (body.clearLimits !== false) {
       const prefixes = ["rl:", "pow:", "reviewauth:", "cd:", "vcd:", "mscd:", "mvcd:", "rcd:"];
-      for (const prefix of prefixes) await this.deletePrefix(prefix);
+      for (const prefix of prefixes) await this.deletePrefixBatch(prefix);
     }
     this.broadcastLive(["canvas", "activity", "music"], put.meta.version);
     return json({ ok: true, message: "Mosaic reset.", size, resetAt: now }, 200, origin);
