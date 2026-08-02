@@ -155,6 +155,22 @@ check(
     headers: { "CF-Connecting-IP": "203.0.113.17", "Content-Type": "application/json" },
     body: JSON.stringify({}),
   }), env);
+  const maintainers = await worker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/maintainers", {
+    headers: { "CF-Connecting-IP": "203.0.113.18" },
+  }), env);
+  const reservations = await worker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/maintain/reservations", {
+    headers: { "CF-Connecting-IP": "203.0.113.19", Authorization: "Bearer test-secret" },
+  }), env);
+  const award = await worker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev/v1/maintain/award", {
+    method: "POST",
+    headers: { "CF-Connecting-IP": "203.0.113.20", Authorization: "Bearer test-secret", "Content-Type": "application/json" },
+    body: "{}",
+  }), env);
+  const previewAwardBlocked = await worker.fetch(new Request("https://version-123.grokplace.projectbarnlab.workers.dev/v1/maintain/award", {
+    method: "POST",
+    headers: { "CF-Connecting-IP": "203.0.113.21", Authorization: "Bearer test-secret", "Content-Type": "application/json" },
+    body: "{}",
+  }), env);
   const terminalDotBlocked = await worker.fetch(new Request("https://grokplace.projectbarnlab.workers.dev./v1/canvas", {
     headers: { "CF-Connecting-IP": "203.0.113.17" },
   }), env);
@@ -162,6 +178,8 @@ check(
   check("direct review mirror blocks application paths", blocked.status === 404 && (await blocked.text()).trim() === "Not found");
   check("version preview hosts also block application paths", previewBlocked.status === 404 && (await previewBlocked.text()).trim() === "Not found");
   check("normal direct mirror blocks review-claim writes", reviewClaimBlocked.status === 404 && (await reviewClaimBlocked.text()).trim() === "Not found");
+  check("canonical direct host reaches only trusted maintenance machine routes", maintainers.status === 200 && reservations.status === 200 && award.status === 200);
+  check("version preview hosts block trusted maintenance writes", previewAwardBlocked.status === 404 && (await previewAwardBlocked.text()).trim() === "Not found");
   check("terminal-dot direct hosts also block application paths", terminalDotBlocked.status === 404 && (await terminalDotBlocked.text()).trim() === "Not found");
   check("direct-host errors are never cacheable", blocked.headers.get("Cache-Control") === "no-store" && previewBlocked.headers.get("Cache-Control") === "no-store" && terminalDotBlocked.headers.get("Cache-Control") === "no-store");
 }

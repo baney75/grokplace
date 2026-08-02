@@ -860,6 +860,8 @@ const REVIEW_CAPABILITY_TTL_MS = 15 * 60_000;
 const REVIEW_CLEANUP_BATCH = 16;
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
 const WORKERS_DEV_SUFFIX = ".workers.dev";
+const TRUSTED_WORKERS_DEV_HOST = "grokplace.projectbarnlab.workers.dev";
+const TRUSTED_MACHINE_READ_PATHS = new Set(["/v1/maintainers", "/v1/bank", "/v1/maintain/reservations"]);
 const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health", "/see"]);
 const AGENT_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 const COLOR_HEX_RE = /^#?[0-9A-Fa-f]{6}$/;
@@ -1669,6 +1671,11 @@ function isWorkersDevHost(hostname) {
   // WHATWG URL preserves a terminal DNS root label; normalize it before the
   // suffix check so `workers.dev.` cannot bypass the direct-host boundary.
   return hostname.toLowerCase().replace(/\.+$/, "").endsWith(WORKERS_DEV_SUFFIX);
+}
+
+/** @param {string} hostname */
+function isTrustedWorkersDevHost(hostname) {
+  return hostname.toLowerCase() === TRUSTED_WORKERS_DEV_HOST;
 }
 
 /** @param {WorkerEnv} env @param {"EDGE_READ_LIMITER" | "EDGE_WRITE_LIMITER" | "EDGE_LIVE_LIMITER" | "EDGE_CHALLENGE_LIMITER"} bindingName @param {Request} request @param {string} bucket */
@@ -7837,9 +7844,14 @@ export default {
     const isApiSurface = path.startsWith("/v1/") || EDGE_READ_PATHS.has(path) || path === "/place" || path === "/webhook";
     const method = request.method.toUpperCase();
     // GitHub-hosted runners can be denied by the branded zone's edge policy.
-    // Keep the alternate workers.dev origin read-only and path-scoped so it
-    // cannot become a bypass for the application or mutation controls.
-    if (isWorkersDevHost(url.hostname) && !(method === "GET" && path === "/v1/reviews")) {
+    // Keep direct-host access path-scoped. The canonical machine origin exposes
+    // only CI reads plus secret-authenticated award lifecycle calls.
+    const directReviewRead = method === "GET" && path === "/v1/reviews";
+    const directTrustedMachineRoute = isTrustedWorkersDevHost(url.hostname) && (
+      (method === "GET" && TRUSTED_MACHINE_READ_PATHS.has(path)) ||
+      (method === "POST" && path === "/v1/maintain/award")
+    );
+    if (isWorkersDevHost(url.hostname) && !directReviewRead && !directTrustedMachineRoute) {
       return plainText("Not found", origin, 404);
     }
     if (method === "OPTIONS") {

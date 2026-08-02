@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 const API = (process.env.API || "http://127.0.0.1:8787").replace(/\/$/, "");
 const apiUrl = new URL(API);
 const local = new Set(["127.0.0.1", "localhost", "::1"]).has(apiUrl.hostname);
+const brandedProductionOrigin = "https://grokplace.barnlabs.net";
 const stamp = Date.now().toString(36).slice(-8);
 const mutating = local && process.env.SMOKE_READ_ONLY !== "1";
 const full = mutating && (process.env.FULL_SMOKE === "1" || process.env.FULL_SMOKE !== "0");
@@ -187,7 +188,9 @@ const browserRoot = await fetch(`${API}/`, {
   headers: { Accept: "text/html", "User-Agent": "Mozilla/5.0 smoke-browser" },
 });
 const browserHtml = await browserRoot.text();
-check("browser root serves compact HTML", browserRoot.ok && /id="board"/.test(browserHtml) && browserHtml.length < 10_000, `status ${browserRoot.status}, bytes ${browserHtml.length}`);
+const compactHtmlLimit = apiUrl.origin === brandedProductionOrigin && new URL(browserRoot.url).origin === brandedProductionOrigin ? 12_000 : 10_000;
+// Branded production may include bounded Cloudflare security and analytics scripts.
+check("browser root serves compact HTML", browserRoot.ok && /id="board"/.test(browserHtml) && browserHtml.length < compactHtmlLimit, `status ${browserRoot.status}, bytes ${browserHtml.length}, limit ${compactHtmlLimit}`);
 check("browser shell keeps the approved inspector and ticker without dashboard bloat", /id="tile-inspector"/.test(browserHtml) && /id="activity-ticker"/.test(browserHtml) && !/(empty-card|leaderboard|minimap|stats-strip|player-host|class="modal)/i.test(browserHtml));
 
 const agentRoot = await fetch(`${API}/`, { headers: { Accept: "text/plain", "User-Agent": "curl/8.0" } });
