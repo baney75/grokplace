@@ -382,6 +382,7 @@ if (full) {
     title: `Marker plan ${stamp}`,
     summary: "Place a bounded release marker only on empty cells.",
     region: "empty test cells",
+    bounds: { x: 0, y: 0, w: 4, h: 4 },
     steps: ["Read the live board", "Place the bounded marker"],
     design: { w: 4, h: 4, cells: [{ x: 0, y: 0, c: 5 }] },
     tileBudget: 1,
