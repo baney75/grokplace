@@ -13,6 +13,8 @@ const clientHeaders = local ? { "CF-Connecting-IP": `2001:db8:${ipSeed.slice(0, 
 const resetSecret = process.env.SMOKE_RESET_SECRET || "";
 let failed = 0;
 let postCount = 0;
+let proofClientSequence = 0;
+const proofClientHeaders = new WeakMap();
 
 function redact(value) {
   const text = typeof value === "string" ? value : JSON.stringify(value);
@@ -57,19 +59,29 @@ function solvePow(challenge, difficulty) {
 }
 
 async function proof(scope, headers = {}) {
-  const result = await json(`/v1/challenge?scope=${encodeURIComponent(scope)}`, { headers: { ...clientHeaders, ...headers } });
+  const generatedHeaders = local && !Object.keys(headers).length
+    ? { "CF-Connecting-IP": `2001:db8:${ipSeed.slice(0, 4)}:${ipSeed.slice(4)}:${(++proofClientSequence).toString(16)}::1` }
+    : {};
+  const effectiveHeaders = { ...clientHeaders, ...generatedHeaders, ...headers };
+  const result = await json(`/v1/challenge?scope=${encodeURIComponent(scope)}`, { headers: effectiveHeaders });
   if (!result.response.ok || !result.data.ok) throw new Error(`challenge ${scope} failed: ${redact(result.data)}`);
-  return {
+  const captcha = {
     challengeId: result.data.challengeId,
     nonce: solvePow(result.data.challenge, result.data.difficulty),
   };
+  proofClientHeaders.set(captcha, effectiveHeaders);
+  return captcha;
+}
+
+function headersForProof(captcha) {
+  return proofClientHeaders.get(captcha) || clientHeaders;
 }
 
 async function claim(name) {
   const captcha = await proof("agent:claim");
   const result = await json("/v1/agent/claim", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...clientHeaders },
+    headers: { "Content-Type": "application/json", ...headersForProof(captcha) },
     body: JSON.stringify({ agent: name, ...captcha }),
   });
   const token = result.data.agentCapability;
@@ -78,11 +90,12 @@ async function claim(name) {
   return { name, token };
 }
 
-function actorHeaders(actor) {
+function actorHeaders(actor, headers = {}) {
   return {
     "Content-Type": "application/json",
     Authorization: `Agent ${actor.token}`,
     ...clientHeaders,
+    ...headers,
   };
 }
 
@@ -90,7 +103,7 @@ async function mutate(path, scope, actor, body, headers = {}) {
   const captcha = await proof(scope, headers);
   return json(path, {
     method: "POST",
-    headers: { ...actorHeaders(actor), ...clientHeaders, ...headers },
+    headers: { ...actorHeaders(actor, headersForProof(captcha)), ...headers },
     body: JSON.stringify({ ...body, agent: body.agent || actor.name, ...captcha }),
   });
 }
@@ -175,7 +188,7 @@ const browserRoot = await fetch(`${API}/`, {
 });
 const browserHtml = await browserRoot.text();
 check("browser root serves compact HTML", browserRoot.ok && /id="board"/.test(browserHtml) && browserHtml.length < 10_000, `status ${browserRoot.status}, bytes ${browserHtml.length}`);
-check("browser shell has no blocking or dashboard bloat", !/(empty-card|leaderboard|minimap|stats-strip|activity-ticker|player-host|class="modal)/i.test(browserHtml));
+check("browser shell keeps the approved inspector and ticker without dashboard bloat", /id="tile-inspector"/.test(browserHtml) && /id="activity-ticker"/.test(browserHtml) && !/(empty-card|leaderboard|minimap|stats-strip|player-host|class="modal)/i.test(browserHtml));
 
 const agentRoot = await fetch(`${API}/`, { headers: { Accept: "text/plain", "User-Agent": "curl/8.0" } });
 const agentText = await agentRoot.text();
@@ -216,7 +229,7 @@ if (!mutating) {
   const wrongScope = await proof("place");
   const result = await json("/v1/agent/claim", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...clientHeaders },
+    headers: { "Content-Type": "application/json", ...headersForProof(wrongScope) },
     body: JSON.stringify({ agent: `scope-${stamp}`, ...wrongScope }),
   });
   check("PoW rejects wrong mutation scope", result.response.status === 401 && result.data.error === "captcha_scope_mismatch", result.data);
@@ -243,7 +256,7 @@ const e = resetSecret ? await claim(`smke-${stamp}`) : null;
   const captcha = await proof("agent:claim");
   const result = await json("/v1/agent/claim", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...clientHeaders },
+    headers: { "Content-Type": "application/json", ...headersForProof(captcha) },
     body: JSON.stringify({ agent: a.name, ...captcha }),
   });
   check("claimed name cannot be reclaimed", result.response.status === 409 && result.data.error === "already_claimed" && !result.data.agentCapability, result.data);
@@ -253,7 +266,7 @@ const e = resetSecret ? await claim(`smke-${stamp}`) : null;
   const captcha = await proof("agent:claim");
   const result = await json("/v1/agent/claim", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...clientHeaders },
+    headers: { "Content-Type": "application/json", ...headersForProof(captcha) },
     body: JSON.stringify({ agent: "porn_bot99", ...captcha }),
   });
   check("unsafe agent name is filtered", result.response.status === 400 && result.data.error === "content_filtered" && !result.data.agentCapability, result.data);
@@ -267,7 +280,7 @@ const cells = findEmptyCells(canvasBefore.data, e ? 9 : 8);
   const captcha = await proof("place");
   const result = await json("/v1/place", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...clientHeaders },
+    headers: { "Content-Type": "application/json", ...headersForProof(captcha) },
     body: JSON.stringify({ agent: a.name, ...cells[0], color: 5, goal: "release smoke marker", ...captcha }),
   });
   check("mutation without capability is rejected", result.response.status === 401 && result.data.error === "agent_capability_required", result.data);
@@ -277,7 +290,7 @@ const cells = findEmptyCells(canvasBefore.data, e ? 9 : 8);
   const captcha = await proof("place");
   const result = await json("/v1/place", {
     method: "POST",
-    headers: actorHeaders(b),
+    headers: actorHeaders(b, headersForProof(captcha)),
     body: JSON.stringify({ agent: a.name, ...cells[0], color: 5, goal: "release smoke marker", ...captcha }),
   });
   check("one agent cannot use another agent capability", result.response.status === 403 && result.data.error === "agent_capability_invalid", result.data);
@@ -345,8 +358,8 @@ check("eligible agent votes on art", vote.response.ok && vote.data.vote?.score =
 {
   const captcha = await proof("feature:submit");
   const body = { agent: a.name, title: "x", summary: "long enough summary", ...captcha };
-  const first = await json("/v1/features", { method: "POST", headers: actorHeaders(a), body: JSON.stringify(body) });
-  const second = await json("/v1/features", { method: "POST", headers: actorHeaders(a), body: JSON.stringify(body) });
+  const first = await json("/v1/features", { method: "POST", headers: actorHeaders(a, headersForProof(captcha)), body: JSON.stringify(body) });
+  const second = await json("/v1/features", { method: "POST", headers: actorHeaders(a, headersForProof(captcha)), body: JSON.stringify(body) });
   check("single-use PoW is consumed on a validation failure", first.data.error === "bad_feature" && second.response.status === 401 && ["captcha_used", "captcha_invalid"].includes(second.data.error), { first: first.data, second: second.data });
 }
 
