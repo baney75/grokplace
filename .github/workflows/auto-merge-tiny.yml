@@ -75,23 +75,32 @@ jobs:
           gh api "repos/$REPO/pulls/$PR" > /tmp/pr.json
           HEAD=$(jq -r '.head.sha' /tmp/pr.json)
           AUTHOR=$(jq -r '.user.login' /tmp/pr.json)
+          STATE=$(jq -r '.state' /tmp/pr.json)
           [[ "$HEAD" =~ ^[a-f0-9]{40}$ ]] || { echo "PR head is not a full SHA."; exit 1; }
+          [[ "$STATE" =~ ^(open|closed)$ ]] || { echo "PR state is invalid."; exit 1; }
           [ -n "$RUN_HEAD" ] || RUN_HEAD="$HEAD"
           [ "$HEAD" = "$RUN_HEAD" ] || { echo "PR head differs from the successful PR quality run."; exit 1; }
+          {
+            echo "pr=$PR"
+            echo "head=$HEAD"
+            echo "author=$AUTHOR"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$STATE" != "open" ]; then
+            echo "inactive=true" >> "$GITHUB_OUTPUT"
+            echo "PR #$PR is already closed; no trusted merge action is required."
+            exit 0
+          fi
+          echo "inactive=false" >> "$GITHUB_OUTPUT"
           DETAILS_URL="https://github.com/$REPO/actions/runs/$GITHUB_RUN_ID"
           EXTERNAL_ID="trusted-merge:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$PR:$HEAD"
           STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           CHECK_ID=$(gh api --method POST "repos/$REPO/check-runs" -f name="merge-and-award" -f head_sha="$HEAD" -f status="in_progress" -f started_at="$STARTED_AT" -f details_url="$DETAILS_URL" -f external_id="$EXTERNAL_ID" --jq '.id')
           [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Exact-head merge gate check-run ID was not returned."; exit 1; }
-          {
-            echo "pr=$PR"
-            echo "head=$HEAD"
-            echo "author=$AUTHOR"
-            echo "check_id=$CHECK_ID"
-          } >> "$GITHUB_OUTPUT"
+          echo "check_id=$CHECK_ID" >> "$GITHUB_OUTPUT"
 
       - name: Validate exact head, lane, reviewer identity, bounty, and checks
         id: validation
+        if: steps.candidate.outputs.inactive != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -242,6 +251,7 @@ jobs:
 
       - name: Publish successful exact-head merge gate
         id: trusted_success
+        if: steps.candidate.outputs.inactive != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -260,7 +270,7 @@ jobs:
           jq -e --argjson id "$CHECK_ID" --arg head "$HEAD" '.id == $id and .head_sha == $head and .name == "merge-and-award" and .app.id == 15368 and .status == "completed" and .conclusion == "success"' /tmp/trusted-success.json >/dev/null
 
       - name: Publish failed exact-head merge gate
-        if: ${{ always() && steps.candidate.outputs.check_id != '' && steps.trusted_success.outcome != 'success' }}
+        if: ${{ always() && steps.candidate.outputs.inactive != 'true' && steps.candidate.outputs.check_id != '' && steps.trusted_success.outcome != 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -277,6 +287,7 @@ jobs:
 
       - name: Merge the exact eligible head
         id: merge
+        if: steps.candidate.outputs.inactive != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
