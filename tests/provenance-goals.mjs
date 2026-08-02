@@ -41,6 +41,8 @@ const activePlan = {
   attestedAt: now,
   progress: { notes: "" },
   acceptedPlacements: 0,
+  version: 1,
+  activatedVersion: 1,
   createdAt: now,
   updatedAt: now,
 };
@@ -77,7 +79,8 @@ check(
     && (await storage.get("provenance:row:0"))?.length === 8
     && (await storage.get("provenance:row:0"))?.[0]?.agent === owner
     && (await storage.get("provenance:row:0"))?.[0]?.colorIndex === 0
-    && (await storage.get("provenance:row:0"))?.[0]?.planId === planId,
+    && (await storage.get("provenance:row:0"))?.[0]?.planId === planId
+    && (await storage.get("provenance:row:0"))?.[0]?.planVersion === 1,
   JSON.stringify(result.data)
 );
 
@@ -94,6 +97,7 @@ check(
     && /^\d{4}-\d\d-\d\dT/.test(data.tile?.placement?.placedAtIso || "")
     && data.tile?.placement?.goal === "small blue square"
     && data.tile?.placement?.plan?.id === planId
+    && data.tile?.placement?.plan?.provenanceVersion === 1
     && data.tile?.placement?.plan?.progress?.serverCalculated === true
     && typeof data.tile?.protection?.protected === "boolean",
   JSON.stringify(data)
@@ -148,7 +152,7 @@ response = await unboundedCanvas.handlePlanConfirm(
   new Request("https://test/internal/plan/confirm", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent: owner, id: unboundedPlan.id, ownerConsentAttestedByAgent: true, challengeId: "test", nonce: 0 }),
+    body: JSON.stringify({ agent: owner, id: unboundedPlan.id, version: 1, ownerConsentAttestedByAgent: true, challengeId: "test", nonce: 0 }),
   }),
   "*",
   "test-ip"

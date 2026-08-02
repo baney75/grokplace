@@ -26,6 +26,19 @@ check(
   "tile inspector markup or read-only fetch contract missing"
 );
 check(
+  "viewer renders a read-only active-plan overlay with every server-calculated state at desktop and phone widths",
+  /id="plan-overlay-canvas"/.test(mosaicHtml)
+    && /id="plan-overlay"/.test(mosaicHtml)
+    && ["planned", "completed", "conflicting", "protected", "overwritten", "reclaimed", "remaining"].every((state) => mosaicHtml.includes(`plan-state-${state}`) && mosaicSource.includes(`"${state}"`))
+    && mosaicSource.includes("renderPlanOverlay(data.planOverlay);")
+    && mosaicStyles.includes("#plan-overlay-canvas")
+    && mosaicStyles.includes(".plan-overlay")
+    && /@media \(max-width:480px\)[\s\S]*\.plan-overlay/.test(mosaicStyles)
+    && /@media \(prefers-reduced-motion:reduce\)/.test(mosaicStyles)
+    && !mosaicSource.slice(mosaicSource.indexOf("function renderPlanOverlay"), mosaicSource.indexOf("function viewportSize")).includes("/v1/place"),
+  "plan overlay or responsive/read-only contract missing"
+);
+check(
   "tile selection uses the existing canvas refresh path rather than a second polling loop",
   mosaicSource.includes("/v1/tile?")
     && mosaicSource.includes("if (selectedTile) void fetchSelectedTile(selectedTile);")

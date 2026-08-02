@@ -7,12 +7,15 @@
 /** @typedef {{ agent: string, x: number, y: number, color: string, goal: string, delayMs: number, until: number }} PainterTag */
 /** @typedef {{ type?: unknown, t?: unknown, batchOrder?: unknown, agent?: unknown, x?: unknown, y?: unknown, c?: unknown, color?: unknown, goal?: unknown }} FeedEntry */
 /** @typedef {{ t: "ready" | "canvas" | "activity" | "music", v: number }} LiveEvent */
-/** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown }} CanvasResponse */
+/** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown, planOverlay?: unknown }} CanvasResponse */
 /** @typedef {{ ok?: unknown, feed?: unknown }} FeedResponse */
 /** @typedef {{ x: number, y: number }} SelectedTile */
+/** @typedef {"planned" | "completed" | "conflicting" | "protected" | "overwritten" | "reclaimed" | "remaining"} PlanOverlayState */
+/** @typedef {{ x: number, y: number, state: PlanOverlayState }} ActivePlanCell */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const boardNode = /** @type {HTMLCanvasElement | null} */ (document.getElementById("board"));
+  const planOverlayNode = /** @type {HTMLCanvasElement | null} */ (document.getElementById("plan-overlay-canvas"));
   const wrapNode = document.getElementById("canvas-wrap");
   const coordTip = document.getElementById("coord-tip");
   const shareBtn = document.getElementById("share-btn");
@@ -24,8 +27,13 @@
   const tileInspectorTitle = document.getElementById("tile-inspector-title");
   const tileInspectorState = document.getElementById("tile-inspector-state");
   const tileInspectorClose = document.getElementById("tile-inspector-close");
+  const planOverlay = document.getElementById("plan-overlay");
+  const planOverlayTitle = document.getElementById("plan-overlay-title");
+  const planOverlayVersion = document.getElementById("plan-overlay-version");
+  const planOverlayProgress = document.getElementById("plan-overlay-progress");
   if (!boardNode || !wrapNode) return;
   const boardEl = boardNode;
+  const planOverlayEl = planOverlayNode;
   const wrap = wrapNode;
 
   /** @type {string[]} */
@@ -33,6 +41,8 @@
   let size = 128;
   let version = -1;
   let board = new Uint8Array(size * size);
+  /** @type {ActivePlanCell[]} */
+  let activePlanCells = [];
   /** @type {Uint8Array | null} */
   let prevBoard = null;
   let scale = 1;
@@ -94,6 +104,23 @@
   const LIVE_RETRY_MAX_MS = 30_000;
   const LIVE_MESSAGE_MAX_CHARS = 96;
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  /** @type {PlanOverlayState[]} */
+  const PLAN_STATES = ["planned", "completed", "conflicting", "protected", "overwritten", "reclaimed", "remaining"];
+  /** @type {Record<PlanOverlayState, string>} */
+  const PLAN_STATE_COLORS = {
+    planned: "#FFFFFF",
+    completed: "#51E9F4",
+    conflicting: "#FFA800",
+    protected: "#CF6EE4",
+    overwritten: "#E50000",
+    reclaimed: "#00A368",
+    remaining: "#94A3B8",
+  };
+
+  /** @param {unknown} value @returns {value is PlanOverlayState} */
+  function isPlanOverlayState(value) {
+    return typeof value === "string" && PLAN_STATES.includes(/** @type {PlanOverlayState} */ (value));
+  }
 
   const VOID = { r: 10, g: 12, b: 16 };
   const MOVE_SLOP = 10;
@@ -167,6 +194,7 @@
       data[o + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
+    paintPlanOverlay();
     applyTransform();
     if (anyFlash && !reduceMotion.matches) {
       cancelAnimationFrame(rafId);
@@ -182,9 +210,74 @@
 
   function applyTransform() {
     clampPan();
-    boardEl.style.width = `${size * scale}px`;
-    boardEl.style.height = `${size * scale}px`;
-    boardEl.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px))`;
+    const width = `${size * scale}px`;
+    const transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px))`;
+    boardEl.style.width = width;
+    boardEl.style.height = width;
+    boardEl.style.transform = transform;
+    if (planOverlayEl) {
+      planOverlayEl.style.width = width;
+      planOverlayEl.style.height = width;
+      planOverlayEl.style.transform = transform;
+    }
+  }
+
+  function paintPlanOverlay() {
+    if (!planOverlayEl) return;
+    const ctx = planOverlayEl.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, planOverlayEl.width, planOverlayEl.height);
+    for (const cell of activePlanCells) {
+      const color = PLAN_STATE_COLORS[cell.state] || PLAN_STATE_COLORS.planned;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = cell.state === "remaining" ? 0.78 : 0.98;
+      ctx.lineWidth = 0.18;
+      ctx.setLineDash(cell.state === "planned" || cell.state === "remaining" ? [0.28, 0.18] : []);
+      ctx.strokeRect(cell.x + 0.09, cell.y + 0.09, 0.82, 0.82);
+      ctx.restore();
+    }
+  }
+
+  /** @param {unknown} raw */
+  function renderPlanOverlay(raw) {
+    if (!isRecord(raw) || !isRecord(raw.plan) || !Array.isArray(raw.cells)) {
+      activePlanCells = [];
+      if (planOverlay) planOverlay.hidden = true;
+      if (planOverlayEl) planOverlayEl.hidden = true;
+      paintPlanOverlay();
+      return;
+    }
+    const plan = raw.plan;
+    const title = typeof plan.title === "string" ? plan.title.slice(0, 80) : "Active plan";
+    const version = typeof plan.version === "number" && Number.isInteger(plan.version) ? plan.version : null;
+    activePlanCells = raw.cells
+      .filter((cell) => isRecord(cell)
+        && typeof cell.x === "number" && Number.isInteger(cell.x) && cell.x >= 0 && cell.x < size
+        && typeof cell.y === "number" && Number.isInteger(cell.y) && cell.y >= 0 && cell.y < size
+        && isPlanOverlayState(cell.state))
+      .slice(0, 512)
+      .map((cell) => ({
+        x: /** @type {number} */ (cell.x),
+        y: /** @type {number} */ (cell.y),
+        state: /** @type {PlanOverlayState} */ (cell.state),
+      }));
+    if (planOverlayTitle) planOverlayTitle.textContent = title;
+    if (planOverlayVersion) planOverlayVersion.textContent = version === null ? "" : `v${version}`;
+    const progress = isRecord(raw.progress) ? raw.progress : {};
+    const complete = typeof progress.complete === "number" ? progress.complete : 0;
+    const total = typeof progress.total === "number" ? progress.total : activePlanCells.length;
+    const remaining = typeof progress.remaining === "number" ? progress.remaining : 0;
+    if (planOverlayProgress) planOverlayProgress.textContent = `${complete}/${total} complete · ${remaining} remaining`;
+    const states = isRecord(raw.states) ? raw.states : {};
+    for (const state of PLAN_STATES) {
+      const field = document.getElementById(`plan-state-${state}`);
+      if (field) field.textContent = typeof states[state] === "number" ? String(states[state]) : "0";
+    }
+    if (planOverlay) planOverlay.hidden = false;
+    if (planOverlayEl) planOverlayEl.hidden = false;
+    paintPlanOverlay();
+    applyTransform();
   }
 
   function viewportSize() {
@@ -602,6 +695,10 @@
       size = nextSize;
       boardEl.width = size;
       boardEl.height = size;
+      if (planOverlayEl) {
+        planOverlayEl.width = size;
+        planOverlayEl.height = size;
+      }
       version = -1;
       userAdjusted = false;
       hasFitted = false;
@@ -621,6 +718,7 @@
       else applyTransform();
       if (selectedTile) void fetchSelectedTile(selectedTile);
     }
+    renderPlanOverlay(data.planOverlay);
     canvasReadThisVisibility = true;
   }
 

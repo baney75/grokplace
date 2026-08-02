@@ -140,12 +140,12 @@ if (mutating) {
 
 const info = await json("/v1/info");
 check("info brand and palette", info.response.ok && info.data.name === "grok/place" && Array.isArray(info.data.palette), info.data);
-check("info documents scoped PoW", info.data.pow?.binding?.includes("mutation-scoped") && info.data.pow?.scopes?.includes("music:report") && info.data.pow?.scopes?.includes("review:attest"), info.data.pow);
+check("info documents scoped PoW", info.data.pow?.binding?.includes("mutation-scoped") && info.data.pow?.scopes?.includes("music:report") && info.data.pow?.scopes?.includes("review:attest") && info.data.pow?.scopes?.includes("plan:review") && info.data.pow?.scopes?.includes("plan:reset"), info.data.pow);
 check("info documents capability isolation", info.data.agentCapability?.storage?.includes("SHA-256") && info.data.agentCapability?.recovery, info.data.agentCapability);
 check("info forbids external music", info.data.music?.allowed?.length === 1 && info.data.music.allowed[0] === "bounded_note_data", info.data.music);
 const expectedMutationContracts = [
   "/v1/agent/claim", "/v1/agent/rotate", "/v1/reset", "/v1/place", "/v1/maintain/register", "/v1/maintain/award",
-  "/v1/reviews/attest", "/v1/plan", "/v1/plan/confirm", "/v1/vote", "/v1/report", "/v1/music/submit",
+  "/v1/reviews/attest", "/v1/plan", "/v1/plan/confirm", "/v1/plan/review", "/v1/plan/reset", "/v1/vote", "/v1/report", "/v1/music/submit",
   "/v1/music/vote", "/v1/music/report", "/v1/music/advance", "/v1/features", "/v1/features/vote",
 ];
 const requestContracts = Array.isArray(info.data.requestContracts) ? info.data.requestContracts : [];
@@ -394,6 +394,7 @@ if (full) {
   if (saved.data.plan?.id) {
     const confirmed = await mutate("/v1/plan/confirm", "plan:confirm", a, {
       id: saved.data.plan.id,
+      version: saved.data.plan.version,
       ownerConsentAttestedByAgent: true,
       activate: false,
     });
