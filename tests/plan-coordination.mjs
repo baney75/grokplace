@@ -47,6 +47,8 @@ function plan(id, agent, overrides = {}) {
     attestedAt: now,
     progress: { notes: "" },
     acceptedPlacements: 0,
+    version: 1,
+    activatedVersion: 1,
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -231,8 +233,15 @@ response = await canvas.handlePlanAgreementDecision(request("/internal/plans/agr
 }), "*", "test-ip");
 data = await response.json();
 check(
-  "owner acceptance records the agreement before applying material bounds",
-  response.ok && data.agreement?.status === "accepted" && data.plan?.bounds?.h === 3,
+  "owner acceptance records material bounds without mutating the attested live revision",
+  response.ok
+    && data.agreement?.status === "accepted"
+    && data.agreement?.proposedBounds?.h === 3
+    && data.plan?.bounds?.h === 4
+    && data.plan?.version === 1
+    && data.plan?.activation?.active === true
+    && data.plan?.activation?.version === 1
+    && data.revisionRequired === true,
   JSON.stringify(data)
 );
 

@@ -108,6 +108,7 @@ check(
   pendingPreviewResponse.status === 200
     && pendingPreview.preview?.nonMutating === true
     && pendingPreview.preview?.ready === false
+    && pendingPreview.preview?.composition === null
     && pendingPreview.preview?.warnings?.length >= 1
     && planBeforePreview === planAfterPreview,
   JSON.stringify(pendingPreview)
