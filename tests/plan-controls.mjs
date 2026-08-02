@@ -557,6 +557,7 @@ const edgeResponse = await worker.fetch(new Request("https://grokplace.barnlabs.
   body: "{}",
 }), {
   CANVAS_SIZE: "8",
+  EDGE_WRITE_LIMITER: { async limit() { return { success: true }; } },
   CANVAS: {
     idFromName: () => "main",
     get: () => ({
