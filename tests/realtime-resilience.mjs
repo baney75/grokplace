@@ -217,7 +217,7 @@ class MemoryStorage {
   const feedBody = await feed.json();
   check(
     "Durable Object restart preserves legacy paint and leaves missing provenance unavailable",
-    canvasBody.board === before && tileBody.tile?.placement?.provenance === "legacy_unavailable" && (await legacyStorage.get("provenance")) === undefined,
+    canvasBody.board === before && tileBody.tile?.placement?.provenance === "legacy_unavailable" && (await legacyStorage.get("provenance")) === undefined && (await legacyStorage.get("provenance:row:0")) === undefined,
     JSON.stringify({ canvas: canvasBody, tile: tileBody })
   );
   check(

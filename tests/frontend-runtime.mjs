@@ -16,6 +16,7 @@ function check(name, condition, detail = "") {
 
 const mosaicSource = readFileSync(new URL("../public/mosaic.js", import.meta.url), "utf8");
 const mosaicHtml = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+const mosaicStyles = readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
 check(
   "viewer includes a focusable read-only tile inspector without mutation controls",
   /id="board"[^>]*tabindex="0"/.test(mosaicHtml)
@@ -32,6 +33,33 @@ check(
     && mosaicSource.includes('ev.type === "pointerup"')
     && mosaicSource.includes("document.activeElement === boardEl"),
   "selection or reconciliation contract missing"
+);
+check(
+  "the mobile music control moves clear of an open tile inspector",
+  mosaicSource.includes('classList.toggle("inspector-open", true)')
+    && mosaicSource.includes('classList.toggle("inspector-open", false)')
+    && mosaicStyles.includes(".inspector-open .sound-btn"),
+  "open-inspector responsive state missing"
+);
+check(
+  "painter attribution binds a CSS brush tip and escaped nametag to the exact feed color",
+  /color: string/.test(mosaicSource)
+    && /entry\.color, index \* 90/.test(mosaicSource)
+    && /setProperty\("--brush-color", t\.color\)/.test(mosaicSource)
+    && /class="brush-tip"/.test(mosaicSource)
+    && /class="who">\$\{escapeHtml\(t\.agent\)\}/.test(mosaicSource)
+    && /background:var\(--brush-color,#fff\)/.test(mosaicStyles),
+  "paintbrush color or escaped nametag binding missing"
+);
+check(
+  "painter attribution is ordered, bounded, motion-aware, and cleared when polling pauses",
+  /fresh\.sort\(\(a, b\) => a\.t - b\.t\)\.slice\(-8\)/.test(mosaicSource)
+    && /nameTags\.length > 24/.test(mosaicSource)
+    && /delayMs: Math\.max\(0, Math\.min\(630, delayMs\)\)/.test(mosaicSource)
+    && /clearPainterTags\(\);/.test(mosaicSource)
+    && /@keyframes brush-paint/.test(mosaicStyles)
+    && /prefers-reduced-motion:reduce/.test(mosaicStyles),
+  "painter lifecycle or reduced-motion contract missing"
 );
 
 function element(id = "") {

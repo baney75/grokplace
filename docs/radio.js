@@ -28,6 +28,8 @@
   let pollingPaused = Boolean(document.hidden);
   let refreshAfterPoll = false;
   let musicFailures = 0;
+  let musicRetryAfterMs = 0;
+  let musicRetryJitter = false;
   let liveConnected = false;
   let musicReadThisVisibility = false;
   /** @type {Set<Voice>} */
@@ -162,7 +164,7 @@
   /** @param {AbortSignal} signal */
   async function fetchMusic(signal) {
     const response = await fetch(`${API}/v1/music`, { cache: "no-store", signal });
-    if (!response.ok) throw new Error(`music ${response.status}`);
+    if (!response.ok) throw musicRequestError(response);
     /** @type {unknown} */
     const raw = await response.json();
     if (!isRecord(raw)) return;
@@ -190,9 +192,46 @@
     return !pollingStopped && !pollingPaused && !document.hidden;
   }
 
-  function musicBackoffDelay() {
+  /** @param {Response | { headers?: { get?: (name: string) => string | null } }} response */
+  function retryAfterMs(response) {
+    const value = response.headers?.get?.("Retry-After")?.trim() || "";
+    if (!value) return 0;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(MUSIC_BACKOFF_MAX_MS, Math.ceil(seconds * 1000));
+    const at = Date.parse(value);
+    return Number.isFinite(at) ? Math.min(MUSIC_BACKOFF_MAX_MS, Math.max(0, at - Date.now())) : 0;
+  }
+
+  /** @param {Response | { status?: number, headers?: { get?: (name: string) => string | null } }} response */
+  function musicRequestError(response) {
+    const error = new Error(`music ${response.status || 0}`);
+    const status = response.status || 0;
+    if (status === 429 || status >= 500 && status <= 599) {
+      Object.assign(error, { retryAfterMs: retryAfterMs(response), retryJitter: true });
+    }
+    return error;
+  }
+
+  /** @param {unknown} error */
+  function retryPolicyFromError(error) {
+    const retry = error && typeof error === "object"
+      ? /** @type {{ retryAfterMs?: unknown, retryJitter?: unknown }} */ (error)
+      : {};
+    const value = Number(retry.retryAfterMs);
+    return {
+      retryAfterMs: Number.isFinite(value) && value > 0 ? Math.min(MUSIC_BACKOFF_MAX_MS, value) : 0,
+      jitter: retry.retryJitter === true,
+    };
+  }
+
+  /** @param {number} [serverRetryAfterMs] @param {boolean} [jitter] */
+  function musicBackoffDelay(serverRetryAfterMs = 0, jitter = false) {
     const base = liveConnected ? LIVE_MUSIC_RECONCILE_MS : MUSIC_POLL_MS;
-    return Math.min(MUSIC_BACKOFF_MAX_MS, base * (2 ** Math.min(musicFailures, 2)));
+    if (musicFailures <= 0) return base;
+    const exponential = Math.min(MUSIC_BACKOFF_MAX_MS, base * (2 ** Math.min(musicFailures, 2)));
+    if (!jitter) return Math.max(Math.min(MUSIC_BACKOFF_MAX_MS, serverRetryAfterMs), exponential);
+    const jittered = Math.round(exponential * (0.8 + Math.random() * 0.4));
+    return Math.max(Math.min(MUSIC_BACKOFF_MAX_MS, serverRetryAfterMs), jittered);
   }
 
   function refreshMusicNow() {
@@ -217,12 +256,19 @@
       await fetchMusic(controller.signal);
       musicFailures = 0;
     } catch (error) {
-      if (!(error instanceof Error) || error.name !== "AbortError") musicFailures++;
+      if (!(error instanceof Error) || error.name !== "AbortError") {
+        musicFailures++;
+        const retry = retryPolicyFromError(error);
+        musicRetryAfterMs = retry.retryAfterMs;
+        musicRetryJitter = retry.jitter;
+      }
     } finally {
       if (musicRequest === controller) musicRequest = null;
       if (isPollingActive()) {
-        const delay = refreshAfterPoll ? 0 : musicBackoffDelay();
+        const delay = refreshAfterPoll ? 0 : musicBackoffDelay(musicRetryAfterMs, musicRetryJitter);
         refreshAfterPoll = false;
+        musicRetryAfterMs = 0;
+        musicRetryJitter = false;
         scheduleMusicPoll(delay);
       }
     }

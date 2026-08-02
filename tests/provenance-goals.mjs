@@ -74,10 +74,10 @@ check(
   "accepted plan placements write one durable provenance record per current tile",
   result.response.ok
     && result.data.plan?.progress?.acceptedPlacements === 2
-    && (await storage.get("provenance"))?.length === 64
-    && (await storage.get("provenance"))?.[0]?.agent === owner
-    && (await storage.get("provenance"))?.[0]?.colorIndex === 0
-    && (await storage.get("provenance"))?.[0]?.planId === planId,
+    && (await storage.get("provenance:row:0"))?.length === 8
+    && (await storage.get("provenance:row:0"))?.[0]?.agent === owner
+    && (await storage.get("provenance:row:0"))?.[0]?.colorIndex === 0
+    && (await storage.get("provenance:row:0"))?.[0]?.planId === planId,
   JSON.stringify(result.data)
 );
 

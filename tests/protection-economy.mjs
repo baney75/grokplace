@@ -42,6 +42,7 @@ class TransactionalMemoryStorage {
       get: (key) => this.get(key),
       put: (key, value) => this.put(key, value),
       delete: (key) => this.delete(key),
+      list: (options) => this.list(options),
     };
     try {
       return await callback(store);
@@ -67,7 +68,6 @@ for (const [x, y, color] of [[1, 1, 5], [2, 1, 6], [3, 1, 7], [4, 1, 8]]) board[
 const storage = new TransactionalMemoryStorage({
   board: board.buffer,
   scores: new Int16Array(size * size).buffer,
-  provenance: Array.from({ length: size * size }, () => null),
   size,
   schema: 4,
   meta: { version: 0, totalPlacements: 4, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: 0 },
@@ -112,7 +112,7 @@ try {
   let result = await protect({ agent: "protector", x: 1, y: 1, action: "protect", clientRequestId: "protect-cell-1" });
   const firstProtection = await storage.get("protection:cell:9");
   const firstTurn = await storage.get("turn:protector");
-  const committed = storage.transactionWrites.filter((write) => ["protection:cell:9", "protection:request:protector:protect-cell-1", "turn:protector"].includes(write.key));
+  const committed = storage.transactionWrites.filter((write) => ["protection:cell:9", "protection:requests:protector", "turn:protector"].includes(write.key));
   check(
     "a successful protection atomically spends exactly three current turn credits",
     result.response.status === 200
@@ -218,6 +218,77 @@ try {
       && (await storage.get("protection:cell:12")) === undefined
       && new Uint8Array(await storage.get("board"))[12] === 11,
     JSON.stringify({ response: result.data, protection: await storage.get("protection:cell:12") })
+  );
+
+  let boundedOk = true;
+  for (let index = 0; index < 34; index++) {
+    await storage.put("turn:bounded", { left: 5, nextTurnAt: 0 });
+    now += 1;
+    const action = index % 2 === 0 ? "protect" : "overwrite";
+    const attempt = await protect({
+      agent: "bounded",
+      x: 4,
+      y: 1,
+      action,
+      ...(action === "overwrite" ? { color: (index % 15) + 1 } : {}),
+      clientRequestId: `bounded-${String(index).padStart(3, "0")}`,
+    });
+    if (attempt.response.status !== 200) boundedOk = false;
+  }
+  const replayLog = await storage.get("protection:requests:bounded");
+  check(
+    "protection idempotency uses one bounded replay ring per agent",
+    boundedOk
+      && Array.isArray(replayLog)
+      && replayLog.length === 32
+      && replayLog[0]?.clientRequestId === "bounded-033"
+      && !replayLog.some((record) => record.clientRequestId === "bounded-000"),
+    JSON.stringify(replayLog)
+  );
+
+  const capacitySize = 16;
+  const capacityBoard = new Uint8Array(capacitySize * capacitySize).fill(2);
+  const capacityValues = {
+    board: capacityBoard.buffer,
+    scores: new Int16Array(capacitySize * capacitySize).buffer,
+    size: capacitySize,
+    schema: 4,
+    meta: { version: 0, totalPlacements: 256, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: now },
+    feed: [],
+    history: [],
+    leaders: [],
+    "turn:capacity": { left: 5, nextTurnAt: 0 },
+  };
+  for (let index = 0; index < 120; index++) {
+    capacityValues[`protection:cell:${index}`] = {
+      version: 1,
+      x: index % capacitySize,
+      y: Math.floor(index / capacitySize),
+      colorIndex: 1,
+      color: "#E4E4E4",
+      protector: "capacity",
+      protectedAt: now,
+      expiresAt: now + 60_000,
+    };
+  }
+  const capacityStorage = new TransactionalMemoryStorage(capacityValues);
+  const capacityCanvas = new GrokPlaceCanvas({ storage: capacityStorage, getWebSockets() { return []; } }, {});
+  capacityCanvas.rateLimit = async () => ({ ok: true });
+  capacityCanvas.consumeProof = async () => ({ ok: true });
+  capacityCanvas.requireAgentCapability = async () => ({ ok: true });
+  const capacityResponse = await capacityCanvas.handleProtect(new Request("https://test/internal/protect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: "capacity", x: 15, y: 15, action: "protect", clientRequestId: "capacity-full" }),
+  }), capacitySize, 60_000, "*", "test-ip");
+  const capacityData = await capacityResponse.json();
+  check(
+    "the active protection cap rejects new records before spending credits",
+    capacityResponse.status === 429
+      && capacityData.error === "protection_capacity"
+      && (await capacityStorage.get("turn:capacity")).left === 5
+      && (await capacityStorage.get("protection:cell:255")) === undefined,
+    JSON.stringify({ response: capacityData, turn: await capacityStorage.get("turn:capacity") })
   );
 } finally {
   Date.now = realNow;

@@ -65,14 +65,14 @@ check(
   const keys = [];
   const env = envWithRoute({ value: false });
   env.EDGE_WRITE_LIMITER = { async limit({ key }) { keys.push(key); return { success: true }; } };
-  for (const path of ["/v1/place", "/v1/vote", "/v1/music/vote", "/v1/features/vote"]) {
+  for (const path of ["/v1/place", "/v1/protect", "/v1/goals/join", "/v1/vote", "/v1/music/vote", "/v1/features/vote"]) {
     await worker.fetch(new Request(`https://grokplace.barnlabs.net${path}`, {
       method: "POST",
       headers: { "CF-Connecting-IP": "203.0.113.9", "Content-Type": "application/json" },
       body: "{}",
     }), env);
   }
-  check("all public mutations share one bounded edge bucket", keys.length === 4 && new Set(keys).size === 1);
+  check("all public mutations share one bounded edge bucket", keys.length === 6 && new Set(keys).size === 1);
 }
 
 {

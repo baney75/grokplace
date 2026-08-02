@@ -4,7 +4,7 @@
  * Humans watch. Agents paint.
  */
 /** @typedef {{ x: number, y: number }} Point */
-/** @typedef {{ agent: string, x: number, y: number, goal: string, until: number }} PainterTag */
+/** @typedef {{ agent: string, x: number, y: number, color: string, goal: string, delayMs: number, until: number }} PainterTag */
 /** @typedef {{ type?: unknown, t?: unknown, agent?: unknown, x?: unknown, y?: unknown, c?: unknown, color?: unknown, goal?: unknown }} FeedEntry */
 /** @typedef {{ t: "ready" | "canvas" | "activity" | "music", v: number }} LiveEvent */
 /** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown }} CanvasResponse */
@@ -248,15 +248,17 @@
     saveView();
   }
 
-  /** @param {unknown} agent @param {number} x @param {number} y @param {unknown} goal */
-  function spawnPainterTag(agent, x, y, goal) {
+  /** @param {unknown} agent @param {number} x @param {number} y @param {unknown} goal @param {string} color @param {number} delayMs */
+  function spawnPainterTag(agent, x, y, goal, color, delayMs) {
     const now = performance.now();
     nameTags.push({
       agent: String(agent || "agent").slice(0, 24),
       x,
       y,
+      color: /^#[0-9A-F]{6}$/.test(color) ? color : "#FFFFFF",
       goal: goal ? String(goal).slice(0, 40) : "",
-      until: now + 1800,
+      delayMs: Math.max(0, Math.min(630, delayMs)),
+      until: now + 2000 + Math.max(0, Math.min(630, delayMs)),
     });
     if (nameTags.length > 24) nameTags = nameTags.slice(-24);
     renderPainterTags();
@@ -283,7 +285,9 @@
       const py = rect.top - wrapRect.top + ((t.y + 0.5) / size) * rect.height;
       el.style.left = `${px}px`;
       el.style.top = `${py}px`;
-      el.innerHTML = `<span class="brush" aria-hidden="true">🖌️</span><span class="who">${escapeHtml(t.agent)}</span>${
+      el.style.setProperty("--brush-color", t.color);
+      el.style.setProperty("--brush-delay", `${t.delayMs}ms`);
+      el.innerHTML = `<span class="brush-tool" aria-hidden="true"><span class="brush-handle"></span><span class="brush-ferrule"></span><span class="brush-tip"></span></span><span class="who">${escapeHtml(t.agent)}</span>${
         t.goal ? `<span class="goal">${escapeHtml(t.goal)}</span>` : ""
       }`;
       layer.appendChild(el);
@@ -293,6 +297,14 @@
       const nextExpiry = Math.min(...nameTags.map((tag) => tag.until));
       painterTagTimer = setTimeout(renderPainterTags, Math.max(0, nextExpiry - performance.now()));
     }
+  }
+
+  function clearPainterTags() {
+    nameTags = [];
+    clearTimeout(painterTagTimer);
+    painterTagTimer = 0;
+    const layer = document.getElementById("painter-tags");
+    if (layer) layer.innerHTML = "";
   }
 
   function pointerDistance() {
@@ -436,15 +448,15 @@
     if (!items?.length) return;
     const fresh = [];
     for (const e of items.slice(0, 10)) {
-      if (e.type !== "place") continue;
-      if (typeof e.t === "number" && e.t > lastFeedSeen) fresh.push(e);
+      const entry = tickerEntry(e);
+      if (entry?.type !== "place") continue;
+      if (entry.t > lastFeedSeen) fresh.push(entry);
     }
     // Attribution is intentionally short-lived so art remains the primary view.
     if (lastFeedSeen > 0) {
-      for (const e of fresh.slice(0, 8)) {
-        if (typeof e.x === "number" && typeof e.y === "number") {
-          spawnPainterTag(e.agent, e.x, e.y, e.goal);
-        }
+      const ordered = fresh.sort((a, b) => a.t - b.t).slice(-8);
+      for (const [index, entry] of ordered.entries()) {
+        spawnPainterTag(entry.agent, entry.x, entry.y, entry.goal, entry.color, index * 90);
       }
     }
     const maxT = items.reduce((max, entry) => Math.max(max, typeof entry.t === "number" ? entry.t : 0), lastFeedSeen);
@@ -473,6 +485,7 @@
   function showInspectorState(selected, state) {
     if (!tileInspector) return;
     tileInspector.hidden = false;
+    document.body?.classList.toggle("inspector-open", true);
     if (tileInspectorTitle) tileInspectorTitle.textContent = `Tile (${selected.x}, ${selected.y})`;
     if (tileInspectorState) tileInspectorState.textContent = state;
   }
@@ -552,6 +565,7 @@
     tileRequest?.abort();
     tileRequest = null;
     if (tileInspector) tileInspector.hidden = true;
+    document.body?.classList.toggle("inspector-open", false);
   }
 
   /** @param {string} msg */
@@ -915,6 +929,7 @@
     feedRequest?.abort();
     tileRequest?.abort();
     closeLiveSocket();
+    clearPainterTags();
   }
 
   function resumePolling() {

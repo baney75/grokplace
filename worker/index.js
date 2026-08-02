@@ -40,7 +40,7 @@ import { publicMaintainer } from "../shared/maintainer.js";
 /** @typedef {{ challenge: string, exp: number, ip: string, scope: string, used: boolean }} ProofRecord */
 /** @typedef {{ agent: string, hash: string, version: 1, createdAt: number, expiresAt: number }} ReviewCapabilityRecord */
 /** @typedef {{ version: 1, x: number, y: number, colorIndex: number, color: string, protector: string, protectedAt: number, expiresAt: number }} ProtectionRecord */
-/** @typedef {{ version: 1, x: number, y: number, action: "protect" | "overwrite", result: JsonRecord }} ProtectionRequestRecord */
+/** @typedef {{ version: 1, clientRequestId: string, x: number, y: number, action: "protect" | "overwrite", createdAt: number, result: JsonRecord }} ProtectionRequestRecord */
 /** @typedef {{ ok: true } | { ok: false, retryAfterMs: number }} LocalRateLimitResult */
 /** @typedef {{ ok: true, challengeId: string, nonce: number, digest: string } | { ok: false, status: number, error: string, message: string }} ProofResult */
 /** @typedef {{ ok: true } | { ok: false, status: number, error: string, message: string }} CapabilityResult */
@@ -551,6 +551,7 @@ const MAINTAIN_ALLOWLIST = [
 const PROTECTION_CREDIT_COST = 3;
 const PROTECTION_DURATION_MS = 15 * 60_000;
 const PROTECTION_PUBLIC_MAX = 120;
+const PROTECTION_REPLAY_MAX = 32;
 const PROTECTION_REQUEST_ID_RE = /^[a-zA-Z0-9_-]{8,80}$/;
 const IP_PLACE_LIMIT = 80;
 const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
@@ -851,15 +852,22 @@ function isProtectionRecord(value) {
 function isProtectionRequestRecord(value) {
   return isJsonRecord(value)
     && value.version === 1
+    && typeof value.clientRequestId === "string" && PROTECTION_REQUEST_ID_RE.test(value.clientRequestId)
     && typeof value.x === "number" && Number.isSafeInteger(value.x) && value.x >= 0
     && typeof value.y === "number" && Number.isSafeInteger(value.y) && value.y >= 0
     && (value.action === "protect" || value.action === "overwrite")
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt) && value.createdAt >= 0
     && isJsonRecord(value.result);
 }
 
 /** @param {number} idx */
 function protectionKey(idx) {
   return `protection:cell:${idx}`;
+}
+
+/** @param {number} y */
+function provenanceRowKey(y) {
+  return `provenance:row:${y}`;
 }
 
 /** @param {ProtectionRecord} record */
@@ -1555,9 +1563,8 @@ export class GrokPlaceCanvas extends DurableObject {
     return raw;
   }
 
-  /** @param {number} size @param {Uint8Array} board @param {number} now */
-  async listActiveProtections(size, board, now) {
-    const storage = this.state.storage;
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {number} size @param {Uint8Array} board @param {number} now */
+  async listActiveProtectionsFrom(storage, size, board, now) {
     if (typeof storage.list !== "function") return { active: [], truncated: false };
     const records = await storage.list({ prefix: "protection:cell:", limit: PROTECTION_PUBLIC_MAX + 1 });
     const entries = records instanceof Map ? [...records.entries()] : [];
@@ -1575,6 +1582,11 @@ export class GrokPlaceCanvas extends DurableObject {
     }
     active.sort((left, right) => left.expiresAt - right.expiresAt || left.y - right.y || left.x - right.x);
     return { active, truncated: entries.length > PROTECTION_PUBLIC_MAX };
+  }
+
+  /** @param {number} size @param {Uint8Array} board @param {number} now */
+  async listActiveProtections(size, board, now) {
+    return this.listActiveProtectionsFrom(this.state.storage, size, board, now);
   }
 
   /** @param {unknown} value @returns {MusicState} */
@@ -1655,15 +1667,30 @@ export class GrokPlaceCanvas extends DurableObject {
   }
 
   /** @param {unknown} value @param {number} size @returns {(TileProvenance | null)[]} */
-  normalizeProvenance(value, size) {
-    const length = size * size;
-    if (!Array.isArray(value) || value.length !== length) return Array.from({ length }, () => null);
-    return value.map((record) => isTileProvenance(record) ? record : null);
+  normalizeProvenanceRow(value, size) {
+    const row = Array.isArray(value) && value.length <= size ? value : [];
+    return Array.from({ length: size }, (_, x) => isTileProvenance(row[x]) ? row[x] : null);
   }
 
-  /** @param {number} size @returns {Promise<(TileProvenance | null)[]>} */
-  async readProvenance(size) {
-    return this.normalizeProvenance(await this.state.storage.get("provenance"), size);
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {number} y @param {number} size @returns {Promise<(TileProvenance | null)[]>} */
+  async readProvenanceRow(storage, y, size) {
+    return this.normalizeProvenanceRow(await storage.get(provenanceRowKey(y)), size);
+  }
+
+  /** @param {number} x @param {number} y @param {number} size @returns {Promise<TileProvenance | null>} */
+  async readTileProvenance(x, y, size) {
+    return (await this.readProvenanceRow(this.state.storage, y, size))[x] || null;
+  }
+
+  /** @param {string} prefix */
+  async deletePrefix(prefix) {
+    while (true) {
+      const records = await this.state.storage.list({ prefix, limit: 1000 });
+      const keys = [...records.keys()];
+      if (!keys.length) return;
+      await this.state.storage.delete(keys);
+      if (keys.length < 1000) return;
+    }
   }
 
   /** @param {string[]} types @param {number} [version] */
@@ -1802,7 +1829,6 @@ export class GrokPlaceCanvas extends DurableObject {
       await this.state.storage.put({
         board: freshBoard.buffer,
         scores: scores.buffer,
-        provenance: Array.from({ length: size * size }, () => null),
         size,
         schema: BOARD_SCHEMA,
         meta: { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: Date.now() },
@@ -1820,9 +1846,6 @@ export class GrokPlaceCanvas extends DurableObject {
         // Expand board: copy old pixels top-left, pad empty — art preserved
         const next = new Uint8Array(size * size);
         const nextScores = new Int16Array(size * size);
-        const oldProvenance = this.normalizeProvenance(await this.state.storage.get("provenance"), storedN);
-        /** @type {(TileProvenance | null)[]} */
-        const nextProvenance = Array.from({ length: size * size }, () => null);
         let scoresRaw0 = await this.state.storage.get("scores");
         const oldScores =
           scoresRaw0 instanceof Int16Array
@@ -1836,13 +1859,11 @@ export class GrokPlaceCanvas extends DurableObject {
             const ni = y * size + x;
             next[ni] = bytes[oi] || 0;
             nextScores[ni] = oldScores[oi] || 0;
-            nextProvenance[ni] = oldProvenance[oi];
           }
         }
         await this.state.storage.put({
           board: this.bufCopy(next),
           scores: this.scoresCopy(nextScores),
-          provenance: nextProvenance,
           size,
           schema: BOARD_SCHEMA,
         });
@@ -2606,9 +2627,11 @@ export class GrokPlaceCanvas extends DurableObject {
     }
 
     const akey = agent.toLowerCase();
-    const requestKey = `protection:request:${akey}:${clientRequestId}`;
-    const replay = await this.state.storage.get(requestKey);
-    if (isProtectionRequestRecord(replay)) {
+    const requestKey = `protection:requests:${akey}`;
+    const storedReplays = await this.state.storage.get(requestKey);
+    const replayLog = Array.isArray(storedReplays) ? storedReplays.filter(isProtectionRequestRecord).slice(0, PROTECTION_REPLAY_MAX) : [];
+    const replay = replayLog.find((record) => record.clientRequestId === clientRequestId);
+    if (replay) {
       if (replay.x !== x || replay.y !== y || replay.action !== action) {
         return json({ ok: false, error: "protection_request_conflict", message: "clientRequestId is already bound to a different protection action." }, 409, origin);
       }
@@ -2626,8 +2649,10 @@ export class GrokPlaceCanvas extends DurableObject {
     const cdKey = `cd:${akey}`;
     const agentKey = `agent:${akey}`;
     const result = await this.storageTransaction(async (storage) => {
-      const duplicate = await storage.get(requestKey);
-      if (isProtectionRequestRecord(duplicate)) {
+      const storedDuplicates = await storage.get(requestKey);
+      const duplicateLog = Array.isArray(storedDuplicates) ? storedDuplicates.filter(isProtectionRequestRecord).slice(0, PROTECTION_REPLAY_MAX) : [];
+      const duplicate = duplicateLog.find((record) => record.clientRequestId === clientRequestId);
+      if (duplicate) {
         if (duplicate.x !== x || duplicate.y !== y || duplicate.action !== action) {
           return { status: 409, body: { ok: false, error: "protection_request_conflict", message: "clientRequestId is already bound to a different protection action." } };
         }
@@ -2680,6 +2705,15 @@ export class GrokPlaceCanvas extends DurableObject {
       }
       if (action === "overwrite" && !active) {
         return { status: 409, body: { ok: false, error: "not_protected", message: "Protected overwrite requires an active protection record." } };
+      }
+      if (action === "protect") {
+        const protections = await this.listActiveProtectionsFrom(storage, size, board, now);
+        if (protections.truncated || protections.active.length >= PROTECTION_PUBLIC_MAX) {
+          return {
+            status: 429,
+            body: { ok: false, error: "protection_capacity", message: `The active protection cap (${PROTECTION_PUBLIC_MAX}) is full. Retry after a protection expires.`, maxActive: PROTECTION_PUBLIC_MAX },
+          };
+        }
       }
       if (turn.left < PROTECTION_CREDIT_COST) {
         return {
@@ -2754,8 +2788,8 @@ export class GrokPlaceCanvas extends DurableObject {
         const previousProtection = /** @type {ProtectionRecord} */ (active);
         board[idx] = toStoredColor(/** @type {number} */ (colorIndex));
         const color = PALETTE[/** @type {number} */ (colorIndex)];
-        const provenance = this.normalizeProvenance(await storage.get("provenance"), size);
-        provenance[idx] = {
+        const provenanceRow = await this.readProvenanceRow(storage, y, size);
+        provenanceRow[x] = {
           agent,
           colorIndex: /** @type {number} */ (colorIndex),
           placedAt: now,
@@ -2787,7 +2821,7 @@ export class GrokPlaceCanvas extends DurableObject {
           version: meta.version,
         };
         put.board = this.bufCopy(board);
-        put.provenance = provenance;
+        put[provenanceRowKey(y)] = provenanceRow;
         put[`owner:${idx}`] = akey;
         await storage.delete(protectionKey(idx));
       }
@@ -2798,7 +2832,7 @@ export class GrokPlaceCanvas extends DurableObject {
       const history = [entry, ...(Array.isArray(storedHistory) ? storedHistory : [])].slice(0, HISTORY_MAX);
       put.feed = feed;
       put.history = history;
-      put[requestKey] = { version: 1, x, y, action, result: bodyResult };
+      put[requestKey] = [{ version: 1, clientRequestId, x, y, action, createdAt: now, result: bodyResult }, ...duplicateLog.filter((record) => record.clientRequestId !== clientRequestId)].slice(0, PROTECTION_REPLAY_MAX);
       if (agentChanged) put[agentKey] = agentStat;
       if (onCooldown) put[cdKey] = turn.nextTurnAt;
       await storage.put(put);
@@ -2903,7 +2937,8 @@ export class GrokPlaceCanvas extends DurableObject {
     // after validation, then commit them with the protection recheck below.
     const board = new Uint8Array(currentCanvas.board);
     const scores = new Int16Array(currentCanvas.scores);
-    const provenance = await this.readProvenance(size);
+    /** @type {Map<number, (TileProvenance | null)[]>} */
+    const provenanceRows = new Map();
     const agentKey = `agent:${akey}`;
     const agentStat = await this.readAgent(akey, agent, now);
     const placements = agentStat.placements || 0;
@@ -2970,7 +3005,12 @@ export class GrokPlaceCanvas extends DurableObject {
       board[idx] = toStoredColor(colorIdx);
       if (tileScore < 0) scores[idx] = 0;
       putOwners[`owner:${idx}`] = akey;
-      provenance[idx] = {
+      let provenanceRow = provenanceRows.get(y);
+      if (!provenanceRow) {
+        provenanceRow = await this.readProvenanceRow(this.state.storage, y, size);
+        provenanceRows.set(y, provenanceRow);
+      }
+      provenanceRow[x] = {
         agent,
         colorIndex: colorIdx,
         placedAt: now,
@@ -3059,7 +3099,6 @@ export class GrokPlaceCanvas extends DurableObject {
       await storage.put({
       board: this.bufCopy(board),
       scores: this.scoresCopy(scores),
-      provenance,
       size,
       schema: BOARD_SCHEMA,
       meta,
@@ -3070,6 +3109,7 @@ export class GrokPlaceCanvas extends DurableObject {
       [cdKey]: onCooldown ? turn.nextTurnAt : 0,
       [agentKey]: agentStat,
       ...putOwners,
+      ...Object.fromEntries([...provenanceRows].map(([rowY, row]) => [provenanceRowKey(rowY), row])),
       ...(placementPlan ? { [`plan:${placementPlan.id}`]: placementPlan, planIndex: nextPlanIndex } : {}),
       });
       return null;
@@ -4412,7 +4452,7 @@ export class GrokPlaceCanvas extends DurableObject {
     if (colorIndex === null) {
       return json({ ok: true, tile: { x, y, state: "empty", colorIndex: null, color: null, placement: null, protection } }, 200, origin, { "Cache-Control": "public, max-age=1" });
     }
-    const recordedProvenance = (await this.readProvenance(size))[index];
+    const recordedProvenance = await this.readTileProvenance(x, y, size);
     const provenance = recordedProvenance?.colorIndex === colorIndex ? recordedProvenance : null;
     if (!provenance) {
       const owner = await this.state.storage.get(`owner:${index}`);
@@ -4616,8 +4656,8 @@ export class GrokPlaceCanvas extends DurableObject {
     if (reporters.length >= REPORT_THRESHOLD) {
       board[idx] = 0;
       scores[idx] = 0;
-      const provenance = await this.readProvenance(size);
-      provenance[idx] = null;
+      const provenanceRow = await this.readProvenanceRow(this.state.storage, y, size);
+      provenanceRow[x] = null;
       cleared = true;
       await this.state.storage.delete(`owner:${idx}`);
       await this.state.storage.delete(protectionKey(idx));
@@ -4634,7 +4674,7 @@ export class GrokPlaceCanvas extends DurableObject {
       /** @type {unknown[]} */
       let history = Array.isArray(storedHistory) ? storedHistory : [];
       history = [entry, ...history].slice(0, HISTORY_MAX);
-      await this.state.storage.put({ board: this.bufCopy(board), scores: this.scoresCopy(scores), provenance, meta, feed, history, [rcdKey]: now + REPORT_COOLDOWN_MS });
+      await this.state.storage.put({ board: this.bufCopy(board), scores: this.scoresCopy(scores), [provenanceRowKey(y)]: provenanceRow, meta, feed, history, [rcdKey]: now + REPORT_COOLDOWN_MS });
     } else {
       const entry = { type: "report", x, y, agent, reason, t: now, reports: reporters.length, threshold: REPORT_THRESHOLD };
       const storedFeed = await this.state.storage.get("feed");
@@ -5064,7 +5104,6 @@ export class GrokPlaceCanvas extends DurableObject {
     const put = {
       board: this.bufCopy(board),
       scores: this.scoresCopy(scores),
-      provenance: Array.from({ length: size * size }, () => null),
       size,
       schema: BOARD_SCHEMA,
       meta: { version: 1, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: now, resetAt: now },
@@ -5073,6 +5112,10 @@ export class GrokPlaceCanvas extends DurableObject {
       leaders: [],
     };
     const clearedMusic = body.clearMusic !== false ? emptyMusicState() : null;
+    await this.deletePrefix("provenance:row:");
+    await this.deletePrefix("protection:cell:");
+    await this.deletePrefix("protection:requests:");
+    await this.state.storage.delete("provenance");
     await this.state.storage.put(put);
     if (clearedMusic) await this.writeMusicAndAlarm(clearedMusic);
     // Drop rate-limit / cooldown / challenge buckets so admin reset fully unsticks ops/tests
@@ -5158,7 +5201,7 @@ export default {
           mode: "mosaic-viewer-humans · agents-self-serve",
           agentBootstrap: "GET /llms.txt or curl / — full playbook + live board",
           ts: Date.now(),
-          schema: 3,
+          schema: BOARD_SCHEMA,
         }, 200, origin, { "Cache-Control": "public, max-age=5" });
       }
       if (path === "/v1/info" && request.method === "GET") {
