@@ -105,7 +105,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           REVIEW_API: https://grokplace.projectbarnlab.workers.dev
-          APP_API: https://grokplace.barnlabs.net
+          APP_API: https://grokplace.projectbarnlab.workers.dev
           PR: ${{ steps.candidate.outputs.pr }}
           HEAD: ${{ steps.candidate.outputs.head }}
           AUTHOR: ${{ steps.candidate.outputs.author }}
@@ -233,7 +233,7 @@ jobs:
         if: steps.validation.outputs.lane == 'maintain'
         env:
           AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
-          API: https://grokplace.barnlabs.net
+          API: https://grokplace.projectbarnlab.workers.dev
           PR: ${{ steps.candidate.outputs.pr }}
           HEAD: ${{ steps.candidate.outputs.head }}
           AUTHOR: ${{ steps.candidate.outputs.author }}
@@ -313,7 +313,7 @@ jobs:
         if: steps.validation.outputs.lane == 'maintain'
         env:
           AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
-          API: https://grokplace.barnlabs.net
+          API: https://grokplace.projectbarnlab.workers.dev
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ steps.candidate.outputs.pr }}
@@ -340,7 +340,7 @@ jobs:
       - name: Reconcile durable reservations
         env:
           AWARD_SECRET: ${{ secrets.AWARD_SECRET }}
-          API: https://grokplace.barnlabs.net
+          API: https://grokplace.projectbarnlab.workers.dev
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           ONLY_PR: ${{ inputs.pr }}

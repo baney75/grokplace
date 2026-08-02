@@ -83,13 +83,13 @@ check("trusted merge workflow coalesces stale runs per PR", /group:\s*trusted-pr
 check("merge refuses a bank that cannot accept the full award", /\.bank\.bonusTiles >= 0 and \.bank\.bonusTiles <= 190/.test(mergeWorkflow));
 check("trusted workflow resolves the immutable review artifact", /review-artifact/.test(mergeWorkflow) && /review-artifact-check\.mjs/.test(mergeWorkflow));
 check(
-  "trusted workflow separates the read-only review mirror from live maintainer state",
+  "trusted workflow uses the canonical machine origin for review and award state",
   /REVIEW_API:\s*https:\/\/grokplace\.projectbarnlab\.workers\.dev/.test(mergeWorkflow) &&
-    /APP_API:\s*https:\/\/grokplace\.barnlabs\.net/.test(mergeWorkflow) &&
+    /APP_API:\s*https:\/\/grokplace\.projectbarnlab\.workers\.dev/.test(mergeWorkflow) &&
     /"\$REVIEW_API\/v1\/reviews"/.test(mergeWorkflow) &&
     /"\$APP_API\/v1\/maintainers"/.test(mergeWorkflow) &&
     /"\$APP_API\/v1\/bank"/.test(mergeWorkflow) &&
-    !/"\$REVIEW_API\/v1\/(?:maintainers|bank)"/.test(mergeWorkflow)
+    (mergeWorkflow.match(/API:\s*https:\/\/grokplace\.projectbarnlab\.workers\.dev/g) || []).length >= 5
 );
 check("owner-authored PRs always enter product lane before path classification", /if \[ "\$AUTHOR" = "baney75" \]; then\s+LANE=product\s+elif jq -r '\.\[\]\.filename' \/tmp\/files\.json \| node scripts\/maintain-path-check\.mjs[\s\S]*then\s+LANE=maintain/.test(mergeWorkflow));
 check("non-owner PRs fail closed outside the maintain allowlist", /Non-owner PRs are eligible only for the allowlisted maintenance lane\."\s+exit 1/.test(mergeWorkflow) && /jq -r '\.\[\]\.filename' \/tmp\/files\.json \| node scripts\/maintain-path-check\.mjs/.test(mergeWorkflow));
