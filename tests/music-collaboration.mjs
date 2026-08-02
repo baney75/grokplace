@@ -7,20 +7,23 @@ class MemoryStorage {
     this.alarmAt = null;
     this.tail = Promise.resolve();
     this.transactionCount = 0;
+    this.insideTransaction = false;
+    this.topLevelCallsInsideTransaction = 0;
   }
 
-  async get(key) { return this.values.get(key); }
+  async get(key) { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; return this.values.get(key); }
   async put(key, value) {
+    if (this.insideTransaction) this.topLevelCallsInsideTransaction++;
     if (typeof key === "object" && key !== null) {
       for (const [name, item] of Object.entries(key)) this.values.set(name, item);
       return;
     }
     this.values.set(key, value);
   }
-  async delete(key) { this.values.delete(key); }
-  async getAlarm() { return this.alarmAt; }
-  async setAlarm(at) { this.alarmAt = at; }
-  async deleteAlarm() { this.alarmAt = null; }
+  async delete(key) { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; this.values.delete(key); }
+  async getAlarm() { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; return this.alarmAt; }
+  async setAlarm(at) { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; this.alarmAt = at; }
+  async deleteAlarm() { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; this.alarmAt = null; }
   async transaction(callback) {
     const previous = this.tail;
     let release;
@@ -28,14 +31,18 @@ class MemoryStorage {
     await previous;
     this.transactionCount++;
     const transaction = {
-      get: (key) => this.get(key),
-      put: (key, value) => this.put(key, value),
-      delete: (key) => this.delete(key),
-      getAlarm: () => this.getAlarm(),
-      setAlarm: (at) => this.setAlarm(at),
-      deleteAlarm: () => this.deleteAlarm(),
+      get: async (key) => this.values.get(key),
+      put: async (key, value) => {
+        if (typeof key === "object" && key !== null) for (const [name, item] of Object.entries(key)) this.values.set(name, item);
+        else this.values.set(key, value);
+      },
+      delete: async (key) => { this.values.delete(key); },
+      getAlarm: async () => this.alarmAt,
+      setAlarm: async (at) => { this.alarmAt = at; },
+      deleteAlarm: async () => { this.alarmAt = null; },
     };
-    try { return await callback(transaction); } finally { release(); }
+    this.insideTransaction = true;
+    try { return await callback(transaction); } finally { this.insideTransaction = false; release(); }
   }
 }
 
@@ -499,6 +506,245 @@ check(
     && shortAdvance.opensAt === shortSong.endsAt,
   JSON.stringify(shortAdvance)
 );
+
+function mutationSong(id, submittedBy, note, addedAt = Date.now(), extra = {}) {
+  return {
+    id,
+    title: id,
+    submittedBy,
+    votes: 1,
+    addedAt,
+    composition: { bpm: 120, waveform: "sine", notes: [{ note, at: 0, duration: 8, velocity: 0.7 }], durationMs: 1_000 },
+    license: "CC0-1.0",
+    originalNonInfringingAttested: true,
+    ...extra,
+  };
+}
+
+function mutationCanvas(storage, env = {}) {
+  const instance = new GrokPlaceCanvas({ storage }, env);
+  instance.rateLimit = async () => ({ ok: true });
+  instance.consumeProof = async () => ({ ok: true, challengeId: "test", nonce: 0, digest: "0".repeat(64) });
+  instance.requireAgentCapability = async () => ({ ok: true });
+  instance.readAgent = async (_key, name) => ({ name, placements: 1 });
+  return instance;
+}
+
+function musicVote(canvas, agent, songId) {
+  return canvas.handleMusicVote(post("/internal/music/vote", { agent, songId, challengeId: "test", nonce: 0 }), "*", "test");
+}
+
+function musicReport(canvas, agent, songId) {
+  return canvas.handleMusicReport(post("/internal/music/report", { agent, songId, reason: "suspected infringement", challengeId: "test", nonce: 0 }), "*", "test");
+}
+
+function musicSubmit(canvas, agent, clientRequestId, title, note) {
+  return canvas.handleMusicSubmit(post("/internal/music/submit", {
+    agent,
+    clientRequestId,
+    title,
+    composition: { bpm: 120, waveform: "sine", notes: [{ note, at: 0, duration: 8, velocity: 0.7 }] },
+    license: "CC0-1.0",
+    original: true,
+    nonInfringing: true,
+    challengeId: "test",
+    nonce: 0,
+  }), "*", "test");
+}
+
+const mutationNow = Date.now();
+const mutationCurrent = mutationSong("mutation-current", "current-agent", "C4", mutationNow, {
+  startedAt: mutationNow,
+  endsAt: mutationNow + 60_000,
+  advanceToken: "c".repeat(32),
+});
+{
+  const storage = new MemoryStorage({ music: { now: mutationCurrent, queue: [mutationSong("vote-target", "queue-agent", "D4", mutationNow, { voters: [] })], version: 1 } });
+  const canvas = mutationCanvas(storage);
+  const responses = await Promise.all([
+    musicVote(canvas, "vote-alpha", "vote-target"),
+    musicVote(canvas, "vote-beta", "vote-target"),
+  ]);
+  const results = await Promise.all(responses.map(async (response) => ({ status: response.status, body: await response.json() })));
+  const target = (await storage.get("music")).queue.find((song) => song.id === "vote-target");
+  check(
+    "distinct simultaneous music votes both persist through one serialized queue state",
+    results.every((result) => result.status === 200)
+      && target?.votes === 3
+      && target.voters?.includes("vote-alpha")
+      && target.voters?.includes("vote-beta")
+      && storage.topLevelCallsInsideTransaction === 0,
+    JSON.stringify({ results, target, topLevelCallsInsideTransaction: storage.topLevelCallsInsideTransaction })
+  );
+}
+
+{
+  const storage = new MemoryStorage({ music: { now: mutationCurrent, queue: [mutationSong("same-vote-target", "queue-agent", "E4", mutationNow, { voters: [] })], version: 1 } });
+  const canvas = mutationCanvas(storage);
+  const responses = await Promise.all([
+    musicVote(canvas, "same-voter", "same-vote-target"),
+    musicVote(canvas, "same-voter", "same-vote-target"),
+  ]);
+  const results = await Promise.all(responses.map(async (response) => ({ status: response.status, body: await response.json() })));
+  const target = (await storage.get("music")).queue.find((song) => song.id === "same-vote-target");
+  check(
+    "same-agent concurrent music votes set one cooldown and admit one vote atomically",
+    results.filter((result) => result.status === 200).length === 1
+      && results.filter((result) => result.status === 429 && result.body.error === "cooldown").length === 1
+      && target?.votes === 2
+      && target.voters?.filter((voter) => voter === "same-voter").length === 1
+      && Number(await storage.get("mvcd:same-voter")) > mutationNow
+      && storage.topLevelCallsInsideTransaction === 0,
+    JSON.stringify({ results, target, cooldown: await storage.get("mvcd:same-voter"), topLevelCallsInsideTransaction: storage.topLevelCallsInsideTransaction })
+  );
+}
+
+{
+  const storage = new MemoryStorage({ music: { now: mutationCurrent, queue: [mutationSong("report-target", "queue-agent", "F4", mutationNow, { reporters: [] })], version: 1 } });
+  const canvas = mutationCanvas(storage);
+  const responses = await Promise.all([
+    musicReport(canvas, "report-alpha", "report-target"),
+    musicReport(canvas, "report-beta", "report-target"),
+    musicReport(canvas, "report-gamma", "report-target"),
+  ]);
+  const results = await Promise.all(responses.map(async (response) => ({ status: response.status, body: await response.json() })));
+  const state = await storage.get("music");
+  check(
+    "concurrent music reports reach threshold without loss and remove the composition exactly once",
+    results.every((result) => result.status === 200)
+      && results.filter((result) => result.body.cleared === true).length === 1
+      && !state.queue.some((song) => song.id === "report-target")
+      && state.queue.length === 0
+      && storage.topLevelCallsInsideTransaction === 0,
+    JSON.stringify({ results, state, topLevelCallsInsideTransaction: storage.topLevelCallsInsideTransaction })
+  );
+}
+
+{
+  const storage = new MemoryStorage({ music: { now: mutationCurrent, queue: [mutationSong("report-with-submit", "queue-agent", "G4", mutationNow, { reporters: [] })], version: 1 } });
+  const canvas = mutationCanvas(storage);
+  const [reportResponse, submitResponse] = await Promise.all([
+    musicReport(canvas, "reporter", "report-with-submit"),
+    musicSubmit(canvas, "submit-during-report", "music-submit-during-report-001", "Submission survives report", "A4"),
+  ]);
+  const report = await reportResponse.json();
+  const submit = await submitResponse.json();
+  const state = await storage.get("music");
+  check(
+    "a music report concurrent with submit preserves both durable queue changes",
+    reportResponse.status === 200
+      && submitResponse.status === 200
+      && state.queue.some((song) => song.id === submit.song?.id)
+      && state.queue.find((song) => song.id === "report-with-submit")?.reporters?.includes("reporter")
+      && storage.topLevelCallsInsideTransaction === 0,
+    JSON.stringify({ report, submit, state, topLevelCallsInsideTransaction: storage.topLevelCallsInsideTransaction })
+  );
+}
+
+function advanceCurrent() {
+  const now = Date.now();
+  return mutationSong("advance-current", "advance-agent", "A4", now, {
+    composition: { bpm: 120, waveform: "sine", notes: [{ note: "A4", at: 64, duration: 16, velocity: 0.7 }], durationMs: 10_000 },
+    startedAt: now - 9_000,
+    endsAt: now + 1_000,
+    advanceToken: "d".repeat(32),
+  });
+}
+{
+  const advance = advanceCurrent();
+  const storage = new MemoryStorage({ music: { now: advance, queue: [mutationSong("advance-next", "next-agent", "B4", Date.now(), { votes: 9 })], version: 1 } });
+  const canvas = mutationCanvas(storage);
+  const [advanceResponse, submitResponse] = await Promise.all([
+    canvas.handleMusicAdvance(post("/internal/music/advance", { compositionId: advance.id, advanceToken: advance.advanceToken }), "*", "test"),
+    musicSubmit(canvas, "submit-during-advance", "music-submit-during-advance-001", "Submission survives advance", "C5"),
+  ]);
+  const advanceResult = await advanceResponse.json();
+  const submit = await submitResponse.json();
+  const state = await storage.get("music");
+  check(
+    "public advance concurrent with submit retains the submitted composition",
+    advanceResponse.status === 200
+      && submitResponse.status === 200
+      && [state.now, ...state.queue].some((song) => song?.id === submit.song?.id)
+      && storage.topLevelCallsInsideTransaction === 0,
+    JSON.stringify({ advance: advanceResult, submit, state, topLevelCallsInsideTransaction: storage.topLevelCallsInsideTransaction })
+  );
+}
+
+{
+  const advance = advanceCurrent();
+  const storage = new MemoryStorage({ music: { now: advance, queue: [mutationSong("advance-once-next", "next-agent", "D5")], version: 1 } });
+  const canvas = mutationCanvas(storage);
+  const responses = await Promise.all([
+    canvas.handleMusicAdvance(post("/internal/music/advance", { compositionId: advance.id, advanceToken: advance.advanceToken }), "*", "test"),
+    canvas.handleMusicAdvance(post("/internal/music/advance", { compositionId: advance.id, advanceToken: advance.advanceToken }), "*", "test"),
+  ]);
+  const results = await Promise.all(responses.map(async (response) => ({ status: response.status, body: await response.json() })));
+  const state = await storage.get("music");
+  const staleTokenResponse = await canvas.handleMusicAdvance(post("/internal/music/advance", { compositionId: state.now.id, advanceToken: advance.advanceToken }), "*", "test");
+  const staleToken = await staleTokenResponse.json();
+  check(
+    "two public advances promote once and the retired token cannot advance the replacement",
+    results.filter((result) => result.status === 200 && result.body.advanced === true).length === 1
+      && results.filter((result) => result.status === 409 && result.body.error === "stale").length === 1
+      && state.now?.id === "advance-once-next"
+      && state.queue.length === 0
+      && staleTokenResponse.status === 403
+      && staleToken.error === "advance_token_invalid"
+      && storage.topLevelCallsInsideTransaction === 0,
+    JSON.stringify({ results, state, staleToken, topLevelCallsInsideTransaction: storage.topLevelCallsInsideTransaction })
+  );
+}
+
+{
+  const storage = new MemoryStorage({ music: { now: mutationCurrent, queue: [mutationSong("admin-force-next", "next-agent", "E5", mutationNow)], version: 1 } });
+  const canvas = mutationCanvas(storage, { RESET_SECRET: "test-reset-secret" });
+  const response = await canvas.handleMusicAdvance(new Request("https://test/internal/music/advance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer test-reset-secret" },
+    body: JSON.stringify({ compositionId: mutationCurrent.id }),
+  }), "*", "test");
+  const body = await response.json();
+  check(
+    "administrator force-advance retains emergency authority inside the same transaction",
+    response.status === 200
+      && body.advanced === true
+      && (await storage.get("music")).now?.id === "admin-force-next"
+      && storage.topLevelCallsInsideTransaction === 0,
+    JSON.stringify({ body, state: await storage.get("music"), topLevelCallsInsideTransaction: storage.topLevelCallsInsideTransaction })
+  );
+}
+
+{
+  const alarmNow = Date.now();
+  const due = mutationSong("alarm-current", "alarm-agent", "F5", alarmNow, {
+    startedAt: alarmNow - 12_000,
+    endsAt: alarmNow - 1,
+    advanceToken: "e".repeat(32),
+  });
+  const storage = new MemoryStorage({
+    music: { now: due, queue: [mutationSong("alarm-next", "next-agent", "G5", alarmNow)], version: 1 },
+    musicAlarmTarget: { compositionId: due.id, endsAt: due.endsAt },
+  });
+  storage.alarmAt = due.endsAt;
+  const canvas = mutationCanvas(storage);
+  const [, submitResponse] = await Promise.all([
+    canvas.alarm(),
+    musicSubmit(canvas, "submit-during-alarm", "music-submit-during-alarm-001", "Submission survives alarm", "A5"),
+  ]);
+  const submit = await submitResponse.json();
+  const state = await storage.get("music");
+  check(
+    "alarm promotion concurrent with submit preserves the queued submission and exact new alarm",
+    submitResponse.status === 200
+      && state.now?.id === "alarm-next"
+      && state.queue.some((song) => song.id === submit.song?.id)
+      && (await storage.get("musicAlarmTarget"))?.compositionId === "alarm-next"
+      && storage.alarmAt === state.now.endsAt
+      && storage.topLevelCallsInsideTransaction === 0,
+    JSON.stringify({ submit, state, target: await storage.get("musicAlarmTarget"), alarmAt: storage.alarmAt, topLevelCallsInsideTransaction: storage.topLevelCallsInsideTransaction })
+  );
+}
 
 const forwarded = [];
 const routerEnv = {

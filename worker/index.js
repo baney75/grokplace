@@ -674,6 +674,7 @@ const MUSIC_QUEUE_MAX = 24;
 const MUSIC_QUEUE_PER_AGENT_MAX = 2;
 const MUSIC_FALLBACK_MS = 12_000;
 const MUSIC_VOTE_CD_MS = 15_000;
+const MUSIC_VOTERS_MAX = 128;
 const MUSIC_SUBMIT_CD_MS = 30_000;
 const MUSIC_SUBMIT_MIN_PLACEMENTS = 1;
 const MUSIC_REPORT_THRESHOLD = 3;
@@ -2322,15 +2323,15 @@ export class GrokPlaceCanvas extends DurableObject {
     };
   }
 
-  /** @param {string} key @param {string} fallbackName @param {number} now @returns {Promise<AgentStat | null>} */
-  async readExistingAgent(key, fallbackName, now) {
-    const value = await this.state.storage.get(`agent:${key}`);
+  /** @param {string} key @param {string} fallbackName @param {number} now @param {DurableObjectStorage | DurableObjectTransaction} [storage] @returns {Promise<AgentStat | null>} */
+  async readExistingAgent(key, fallbackName, now, storage = this.state.storage) {
+    const value = await storage.get(`agent:${key}`);
     return value === undefined ? null : this.normalizeAgent(value, fallbackName, now);
   }
 
-  /** @param {string} key @param {string} fallbackName @param {number} now @returns {Promise<AgentStat>} */
-  async readAgent(key, fallbackName, now) {
-    return (await this.readExistingAgent(key, fallbackName, now)) || this.defaultAgent(fallbackName, now);
+  /** @param {string} key @param {string} fallbackName @param {number} now @param {DurableObjectStorage | DurableObjectTransaction} [storage] @returns {Promise<AgentStat>} */
+  async readAgent(key, fallbackName, now, storage = this.state.storage) {
+    return (await this.readExistingAgent(key, fallbackName, now, storage)) || this.defaultAgent(fallbackName, now);
   }
 
   /** @param {Uint8Array} u8 */
@@ -2549,7 +2550,7 @@ export class GrokPlaceCanvas extends DurableObject {
     return { compositionId: current.id, endsAt: current.endsAt };
   }
 
-  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {JsonRecord} m */
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {MusicState} m */
   async writeMusicAndAlarmIn(storage, m) {
     const target = this.musicAlarmTarget(m);
     await storage.put("music", m);
@@ -2562,44 +2563,106 @@ export class GrokPlaceCanvas extends DurableObject {
     }
   }
 
-  /** @param {JsonRecord} m */
-  async writeMusicAndAlarm(m) {
-    const storage = this.state.storage;
-    // This class is SQLite-backed. Keep the composition identity, deadline, and
-    // alarm mutation in one storage transaction so a retry cannot split them.
-    if (typeof storage.transaction === "function") await storage.transaction(async (txn) => this.writeMusicAndAlarmIn(txn, m));
-    else await this.writeMusicAndAlarmIn(storage, m);
+  /**
+   * Normalize and repair music only within the caller's transaction. Queue
+   * mutations use this before deciding eligibility, so an alarm or submit
+   * cannot leave another handler holding an obsolete whole-state snapshot.
+   * @param {DurableObjectStorage | DurableObjectTransaction} storage
+   * @param {number} now
+   */
+  async prepareMusicStateIn(storage, now) {
+    const raw = await storage.get("music");
+    let m = this.normalizeMusic(raw);
+    let changed = false;
+    /** @param {unknown} song @returns {song is MusicSong} */
+    const valid = (song) => isMusicSong(song)
+      && scanTextSafety(song.title, "composition title").ok
+      && parseAgent(song.submittedBy).ok
+      && !Object.keys(song).some((key) => ["url", "link", "href", "audio", "file", "source", "ref", "embedUrl", "canonical", "lyrics", "style", "sample"].includes(key));
+    const normalizedDropped = isJsonRecord(raw)
+      ? (raw.now === undefined || raw.now === null || isMusicSong(raw.now) ? 0 : 1)
+        + (Array.isArray(raw.queue) ? raw.queue.filter((song) => !isMusicSong(song)).length : 0)
+      : 0;
+    const before = m.queue.length + (m.now ? 1 : 0);
+    m.queue = m.queue.filter(valid).slice(0, MUSIC_QUEUE_MAX);
+    if (!valid(m.now)) m.now = null;
+    const dropped = normalizedDropped + before - m.queue.length - (m.now ? 1 : 0);
+    /** @type {JsonRecord | null} */
+    let quarantine = null;
+    if (dropped > 0) {
+      m.version = (m.version || 0) + 1;
+      quarantine = { dropped, at: now, reason: "legacy_or_invalid_external_media" };
+      changed = true;
+    }
+    if (!m.now && m.queue.length) {
+      this.promoteMusicState(m, "sanitized-promotion", now);
+      changed = true;
+    }
+    if (m.now && !/^[a-f0-9]{32}$/.test(m.now.advanceToken || "")) {
+      m.now.advanceToken = randomHex(16);
+      m.version = (m.version || 0) + 1;
+      changed = true;
+    }
+    if (m.now && m.now.startedAt && now > (m.now.endsAt || m.now.startedAt + MUSIC_FALLBACK_MS)) {
+      this.promoteMusicState(m, "timeout", now);
+      changed = true;
+    }
+    return { m, changed, quarantine };
   }
 
-  /** @param {JsonRecord} m */
-  async ensureMusicAlarm(m) {
-    const storage = this.state.storage;
+  /**
+   * @param {DurableObjectStorage | DurableObjectTransaction} storage
+   * @param {{ m: MusicState, changed: boolean, quarantine: JsonRecord | null }} prepared
+   */
+  async persistPreparedMusicStateIn(storage, prepared) {
+    if (prepared.quarantine) await storage.put("musicQuarantine", prepared.quarantine);
+    if (prepared.changed) await this.writeMusicAndAlarmIn(storage, prepared.m);
+  }
+
+  /** @param {MusicState} m */
+  async writeMusicAndAlarm(m) {
+    // This class is SQLite-backed. Keep the composition identity, deadline, and
+    // alarm mutation in one storage transaction so a retry cannot split them.
+    await this.storageTransaction(async (storage) => this.writeMusicAndAlarmIn(storage, m));
+  }
+
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {MusicState} m */
+  async ensureMusicAlarmIn(storage, m) {
     const target = this.musicAlarmTarget(m);
     const stored = await storage.get(MUSIC_ALARM_KEY);
     const alarmAt = typeof storage.getAlarm === "function" ? await storage.getAlarm() : null;
-    if (target && isMusicAlarm(stored) && stored.compositionId === target.compositionId && stored.endsAt === target.endsAt && alarmAt === target.endsAt) return;
-    if (!target && !stored && alarmAt == null) return;
-    await this.writeMusicAndAlarm(m);
+    if (target && isMusicAlarm(stored) && stored.compositionId === target.compositionId && stored.endsAt === target.endsAt && alarmAt === target.endsAt) return false;
+    if (!target && !stored && alarmAt == null) return false;
+    await this.writeMusicAndAlarmIn(storage, m);
+    return true;
+  }
+
+  /** @param {MusicState} m */
+  async ensureMusicAlarm(m) {
+    await this.storageTransaction(async (storage) => this.ensureMusicAlarmIn(storage, m));
   }
 
   async alarm() {
-    const storage = this.state.storage;
-    let m = await this.readMusic();
-    const target = await storage.get(MUSIC_ALARM_KEY);
-    const current = this.musicAlarmTarget(m);
+    const now = Date.now();
+    const result = await this.storageTransaction(async (storage) => {
+      const prepared = await this.prepareMusicStateIn(storage, now);
+      const m = prepared.m;
+      const target = await storage.get(MUSIC_ALARM_KEY);
+      const current = this.musicAlarmTarget(m);
 
-    // Alarm delivery is at-least-once. Only the persisted identity/deadline may
-    // advance; a stale alarm repairs scheduling for the current composition.
-    if (!current || !isMusicAlarm(target) || target.compositionId !== current.compositionId || target.endsAt !== current.endsAt) {
-      await this.ensureMusicAlarm(m);
-      return;
-    }
-    if (Date.now() < current.endsAt) {
-      await this.ensureMusicAlarm(m);
-      return;
-    }
-    m = await this.promoteNext(m, "timeout-alarm");
-    this.broadcastLive(["music"], typeof m.version === "number" ? m.version : 0);
+      // Alarm delivery is at-least-once. Only the persisted identity/deadline may
+      // advance; a stale or early delivery repairs the exact current deadline.
+      if (!current || !isMusicAlarm(target) || target.compositionId !== current.compositionId || target.endsAt !== current.endsAt || now < current.endsAt) {
+        if (prepared.quarantine) await storage.put("musicQuarantine", prepared.quarantine);
+        await this.writeMusicAndAlarmIn(storage, m);
+        return { m, changed: prepared.changed };
+      }
+      this.promoteMusicState(m, "timeout-alarm", now);
+      prepared.changed = true;
+      await this.persistPreparedMusicStateIn(storage, prepared);
+      return { m, changed: true };
+    });
+    if (result.changed) this.broadcastLive(["music"], result.m.version || 0);
   }
 
   /** @param {number} size */
@@ -7110,42 +7173,15 @@ export class GrokPlaceCanvas extends DurableObject {
   }
 
   async getMusic() {
-    const raw = await this.state.storage.get("music");
-    let m = this.normalizeMusic(raw);
-    let changed = false;
-    /** @param {unknown} song @returns {song is MusicSong} */
-    const valid = (song) => isMusicSong(song) && scanTextSafety(song.title, "composition title").ok && parseAgent(song.submittedBy).ok && !Object.keys(song).some((key) => ["url", "link", "href", "audio", "file", "source", "ref", "embedUrl", "canonical", "lyrics", "style", "sample"].includes(key));
-    const normalizedDropped = isJsonRecord(raw)
-      ? (raw.now === undefined || raw.now === null || isMusicSong(raw.now) ? 0 : 1)
-        + (Array.isArray(raw.queue) ? raw.queue.filter((song) => !isMusicSong(song)).length : 0)
-      : 0;
-    const before = m.queue.length + (m.now ? 1 : 0);
-    m.queue = m.queue.filter(valid).slice(0, MUSIC_QUEUE_MAX);
-    if (!valid(m.now)) m.now = null;
-    const dropped = normalizedDropped + before - m.queue.length - (m.now ? 1 : 0);
-    if (dropped > 0) {
-      m.version = (m.version || 0) + 1;
-      await this.state.storage.put("musicQuarantine", { dropped, at: Date.now(), reason: "legacy_or_invalid_external_media" });
-      await this.writeMusicAndAlarm(m);
-      changed = true;
-    }
-    if (!m.now && m.queue.length) {
-      m = await this.promoteNext(m, "sanitized-promotion");
-      changed = true;
-    }
-    if (m.now && !/^[a-f0-9]{32}$/.test(m.now.advanceToken || "")) {
-      m.now.advanceToken = randomHex(16);
-      m.version = (m.version || 0) + 1;
-      await this.writeMusicAndAlarm(m);
-      changed = true;
-    }
-    if (m.now && m.now.startedAt && Date.now() > (m.now.endsAt || m.now.startedAt + MUSIC_FALLBACK_MS)) {
-      m = await this.promoteNext(m, "timeout");
-      changed = true;
-    }
-    await this.ensureMusicAlarm(m);
-    if (changed) this.broadcastLive(["music"], m.version || 0);
-    return m;
+    const now = Date.now();
+    const result = await this.storageTransaction(async (storage) => {
+      const prepared = await this.prepareMusicStateIn(storage, now);
+      await this.persistPreparedMusicStateIn(storage, prepared);
+      await this.ensureMusicAlarmIn(storage, prepared.m);
+      return prepared;
+    });
+    if (result.changed) this.broadcastLive(["music"], result.m.version || 0);
+    return result.m;
   }
 
   /** @param {MusicSong[]} queue @returns {MusicSong[]} */
@@ -7279,26 +7315,33 @@ export class GrokPlaceCanvas extends DurableObject {
       nonInfringing: body.nonInfringing,
     }));
     const replayKey = this.musicSubmitReplayKey(akey);
-    const preReplay = this.musicPlanReplay(await this.readMusicPlanReplays(this.state.storage, replayKey, now), clientRequestId, "submit", requestHash);
+    const preReplay = await this.storageTransaction(async (storage) => {
+      const records = await this.readMusicPlanReplays(storage, replayKey, now);
+      return this.musicPlanReplay(records, clientRequestId, "submit", requestHash);
+    });
     if (preReplay) return json(preReplay.body, preReplay.status, origin);
     const rl = await this.rateLimit("msub", ip, 20);
     if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many music submits." }, 429, origin);
     const proof = await this.consumeProof(body, ip, "music:submit");
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
-    const agentStat = await this.readAgent(akey, agent, now);
-    if ((agentStat.placements || 0) < MUSIC_SUBMIT_MIN_PLACEMENTS) {
-      return json({
-        ok: false,
-        error: "placement_required",
-        message: `Place at least ${MUSIC_SUBMIT_MIN_PLACEMENTS} clean tile(s) before submitting music.`,
-        placements: agentStat.placements || 0,
-        required: MUSIC_SUBMIT_MIN_PLACEMENTS,
-      }, 403, origin);
-    }
-    const result = await this.state.storage.transaction(async (transaction) => {
+    const result = await this.storageTransaction(async (transaction) => {
       const records = await this.readMusicPlanReplays(transaction, replayKey, now);
       const replay = this.musicPlanReplay(records, clientRequestId, "submit", requestHash);
       if (replay) return { ...replay, mutated: false };
+      const agentStat = await this.readAgent(akey, agent, now, transaction);
+      if ((agentStat.placements || 0) < MUSIC_SUBMIT_MIN_PLACEMENTS) {
+        return {
+          status: 403,
+          body: {
+            ok: false,
+            error: "placement_required",
+            message: `Place at least ${MUSIC_SUBMIT_MIN_PLACEMENTS} clean tile(s) before submitting music.`,
+            placements: agentStat.placements || 0,
+            required: MUSIC_SUBMIT_MIN_PLACEMENTS,
+          },
+          mutated: false,
+        };
+      }
       const nextSub = Number((await transaction.get(scd)) || 0);
       if (nextSub > now) return { status: 429, body: { ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextSub - now) / 1000)}s before another music submit.`, remainingMs: nextSub - now }, mutated: false };
       /** @type {MusicPlan | null} */
@@ -7394,33 +7437,45 @@ export class GrokPlaceCanvas extends DurableObject {
     const songId = typeof body.songId === "string" ? body.songId.trim() : "";
     if (!songId) return json({ ok: false, error: "bad_song", message: "songId required" }, 400, origin);
     const now = Date.now();
-    const agentStat = await this.readAgent(akey, agent, now);
-    if ((agentStat.placements || 0) < 1) {
-      return json({
-        ok: false,
-        error: "placement_required",
-        message: "Place at least one clean tile before voting on music.",
-      }, 403, origin);
-    }
     const vcd = `mvcd:${akey}`;
-    const nextV = Number((await this.state.storage.get(vcd)) || 0);
-    if (nextV > now) {
-      return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextV - now) / 1000)}s`, remainingMs: nextV - now }, 429, origin);
-    }
-    let m = await this.getMusic();
-    const idx = (m.queue || []).findIndex((s) => s.id === songId);
-    if (idx < 0) return json({ ok: false, error: "not_found", message: "Song not in queue." }, 404, origin);
-    const song = m.queue[idx];
-    if (!Array.isArray(song.voters)) song.voters = [];
-    if (song.voters.includes(akey)) return json({ ok: false, error: "already_voted", message: "Already voted for this song." }, 409, origin);
-    song.voters.push(akey);
-    song.votes = (song.votes || 0) + 1;
-    m.queue[idx] = song;
-    m.version = (m.version || 0) + 1;
-    await this.writeMusicAndAlarm(m);
-    await this.state.storage.put(vcd, String(now + MUSIC_VOTE_CD_MS));
-    this.broadcastLive(["music"], m.version || 0);
-    return json({ ok: true, song: publicComposition(song), queue: this.sortQueue(m.queue).map((queuedSong) => publicComposition(queuedSong)), message: `Voted for “${song.title}” (${song.votes} votes).` }, 200, origin);
+    const result = await this.storageTransaction(async (storage) => {
+      const agentStat = await this.readAgent(akey, agent, now, storage);
+      if ((agentStat.placements || 0) < 1) {
+        return { status: 403, body: { ok: false, error: "placement_required", message: "Place at least one clean tile before voting on music." }, mutated: false, version: 0 };
+      }
+      const prepared = await this.prepareMusicStateIn(storage, now);
+      const m = prepared.m;
+      /** @param {number} status @param {JsonRecord} body @param {boolean} [mutated] */
+      const finish = async (status, body, mutated = false) => {
+        await this.persistPreparedMusicStateIn(storage, prepared);
+        return { status, body, mutated: mutated || prepared.changed, version: m.version || 0 };
+      };
+      const nextV = Number((await storage.get(vcd)) || 0);
+      if (nextV > now) {
+        return finish(429, { ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextV - now) / 1000)}s`, remainingMs: nextV - now });
+      }
+      const idx = (m.queue || []).findIndex((song) => song.id === songId);
+      if (idx < 0) return finish(404, { ok: false, error: "not_found", message: "Song not in queue." });
+      const song = m.queue[idx];
+      const voters = Array.isArray(song.voters) ? song.voters.filter((voter) => typeof voter === "string") : [];
+      if (voters.includes(akey)) return finish(409, { ok: false, error: "already_voted", message: "Already voted for this song." });
+      if (voters.length >= MUSIC_VOTERS_MAX) return finish(409, { ok: false, error: "vote_cap_reached", message: `This composition has reached the ${MUSIC_VOTERS_MAX}-agent voter record cap.` });
+      const votedSong = { ...song, voters: [...voters, akey], votes: (song.votes || 0) + 1 };
+      m.queue[idx] = votedSong;
+      m.version = (m.version || 0) + 1;
+      prepared.changed = true;
+      const response = {
+        ok: true,
+        song: publicComposition(votedSong),
+        queue: this.sortQueue(m.queue).map((queuedSong) => publicComposition(queuedSong)),
+        message: `Voted for “${votedSong.title}” (${votedSong.votes} votes).`,
+      };
+      await this.persistPreparedMusicStateIn(storage, prepared);
+      await storage.put(vcd, String(now + MUSIC_VOTE_CD_MS));
+      return { status: 200, body: response, mutated: true, version: m.version || 0 };
+    });
+    if (result.mutated) this.broadcastLive(["music"], result.version || 0);
+    return json(result.body, result.status, origin);
   }
 
   /** @param {Request} request @param {string} origin @param {string} ip */
@@ -7437,33 +7492,56 @@ export class GrokPlaceCanvas extends DurableObject {
     const capability = await this.requireAgentCapability(request, parsed.agent);
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const akey = parsed.agent.toLowerCase();
-    const stat = await this.readAgent(akey, parsed.agent, Date.now());
-    if (stat.placements < 1) return json({ ok: false, error: "placement_required" }, 403, origin);
     const reason = scanTextSafety(typeof body.reason === "string" ? body.reason.slice(0, 120) : "suspected infringement", "music report");
     if (!reason.ok) return json({ ok: false, error: "content_filtered", message: reason.reason }, 400, origin);
     const songId = typeof body.songId === "string" ? body.songId.trim() : "";
-    let m = await this.getMusic();
-    const current = m.now?.id === songId;
-    const index = current ? -1 : m.queue.findIndex((song) => song.id === songId);
-    const song = current ? m.now : m.queue[index];
-    if (!song) return json({ ok: false, error: "not_found" }, 404, origin);
-    if (!Array.isArray(song.reporters)) song.reporters = [];
-    if (song.reporters.includes(akey)) return json({ ok: true, already: true, songId, reports: song.reporters.length, threshold: MUSIC_REPORT_THRESHOLD }, 200, origin);
-    song.reporters = [...song.reporters, akey].slice(0, MUSIC_REPORT_THRESHOLD);
-    const cleared = song.reporters.length >= MUSIC_REPORT_THRESHOLD;
-    m.version = (m.version || 0) + 1;
-    if (cleared && current) {
-      m.now = null;
-      m = await this.promoteNext(m, "infringement-reports");
-    } else if (cleared) {
-      m.queue.splice(index, 1);
-      await this.writeMusicAndAlarm(m);
-    } else {
-      if (current) m.now = song; else m.queue[index] = song;
-      await this.writeMusicAndAlarm(m);
-    }
-    this.broadcastLive(["music"], m.version || 0);
-    return json({ ok: true, songId, reports: cleared ? MUSIC_REPORT_THRESHOLD : song.reporters.length, threshold: MUSIC_REPORT_THRESHOLD, cleared, message: cleared ? "Composition suppressed after three unique infringement reports." : "Infringement report recorded." }, 200, origin);
+    const now = Date.now();
+    const result = await this.storageTransaction(async (storage) => {
+      const stat = await this.readAgent(akey, parsed.agent, now, storage);
+      if (stat.placements < 1) return { status: 403, body: { ok: false, error: "placement_required" }, mutated: false, version: 0 };
+      const prepared = await this.prepareMusicStateIn(storage, now);
+      const m = prepared.m;
+      /** @param {number} status @param {JsonRecord} body @param {boolean} [mutated] */
+      const finish = async (status, body, mutated = false) => {
+        await this.persistPreparedMusicStateIn(storage, prepared);
+        return { status, body, mutated: mutated || prepared.changed, version: m.version || 0 };
+      };
+      const current = m.now?.id === songId;
+      const index = current ? -1 : m.queue.findIndex((song) => song.id === songId);
+      const song = current ? m.now : m.queue[index];
+      if (!song) return finish(404, { ok: false, error: "not_found" });
+      const reporters = Array.isArray(song.reporters) ? song.reporters.filter((reporter) => typeof reporter === "string") : [];
+      if (reporters.includes(akey)) {
+        return finish(200, { ok: true, already: true, songId, reports: reporters.length, threshold: MUSIC_REPORT_THRESHOLD });
+      }
+      const nextReporters = [...reporters, akey].slice(0, MUSIC_REPORT_THRESHOLD);
+      const cleared = nextReporters.length >= MUSIC_REPORT_THRESHOLD;
+      const reportedSong = { ...song, reporters: nextReporters };
+      m.version = (m.version || 0) + 1;
+      if (cleared && current) {
+        m.now = null;
+        this.promoteMusicState(m, "infringement-reports", now);
+      } else if (cleared) {
+        m.queue.splice(index, 1);
+      } else if (current) {
+        m.now = reportedSong;
+      } else {
+        m.queue[index] = reportedSong;
+      }
+      prepared.changed = true;
+      const response = {
+        ok: true,
+        songId,
+        reports: cleared ? MUSIC_REPORT_THRESHOLD : nextReporters.length,
+        threshold: MUSIC_REPORT_THRESHOLD,
+        cleared,
+        message: cleared ? "Composition suppressed after three unique infringement reports." : "Infringement report recorded.",
+      };
+      await this.persistPreparedMusicStateIn(storage, prepared);
+      return { status: 200, body: response, mutated: true, version: m.version || 0 };
+    });
+    if (result.mutated) this.broadcastLive(["music"], result.version || 0);
+    return json(result.body, result.status, origin);
   }
 
   /** @param {Request} request @param {string} origin @param {string} ip */
@@ -7489,46 +7567,59 @@ export class GrokPlaceCanvas extends DurableObject {
       if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Slow down." }, 429, origin);
     }
 
-    let m = await this.getMusic();
-    if (!m.now) {
-      return json({
-        ok: true,
-        now: null,
-        queue: [],
-        advanced: false,
-        message: "Queue empty — agents should compose and submit note data.",
-      }, 200, origin);
-    }
-
-    const compositionId = typeof body.compositionId === "string" ? body.compositionId : m.now.id;
-    if (compositionId !== m.now.id) {
-      return json({ ok: false, error: "stale", message: "Not the current composition.", now: publicComposition(m.now, true) }, 409, origin);
-    }
-
-    if (!adminForce) {
-      const presented = typeof body.advanceToken === "string" ? body.advanceToken : "";
-      if (!presented) return json({ ok: false, error: "advance_token_required", message: "Use the current advanceToken from GET /v1/music." }, 401, origin);
-      if (!(await this.timingSafeEqualStr(presented, m.now.advanceToken || ""))) {
-        return json({ ok: false, error: "advance_token_invalid", message: "advanceToken does not match the current composition." }, 403, origin);
+    const now = Date.now();
+    const result = await this.storageTransaction(async (storage) => {
+      const prepared = await this.prepareMusicStateIn(storage, now);
+      const m = prepared.m;
+      /** @param {number} status @param {JsonRecord} body @param {boolean} [mutated] */
+      const finish = async (status, body, mutated = false) => {
+        await this.persistPreparedMusicStateIn(storage, prepared);
+        return { status, body, mutated: mutated || prepared.changed, version: m.version || 0 };
+      };
+      if (!m.now) {
+        return finish(200, {
+          ok: true,
+          now: null,
+          queue: [],
+          advanced: false,
+          message: "Queue empty — agents should compose and submit note data.",
+        });
       }
-      const endsAt = typeof m.now.endsAt === "number" ? m.now.endsAt : (m.now.startedAt || Date.now()) + m.now.composition.durationMs;
-      // A short composition has no meaningful pre-end window. Keep its public
-      // advance closed until the deterministic deadline rather than making the
-      // entire track immediately skippable.
-      const opensAt = m.now.composition.durationMs <= MUSIC_ADVANCE_WINDOW_MS * 2
-        ? endsAt
-        : endsAt - MUSIC_ADVANCE_WINDOW_MS;
-      if (Date.now() < opensAt) return json({ ok: false, error: "too_early", message: "Public advance opens shortly before the deterministic end time.", opensAt, endsAt }, 429, origin);
-    }
-    m = await this.promoteNext(m, adminForce ? "admin-force" : "ended");
-    this.broadcastLive(["music"], m.version || 0);
-    return json({
-      ok: true,
-      advanced: true,
-      now: publicComposition(m.now, true),
-      queue: this.sortQueue(m.queue || []).map((song) => publicComposition(song)),
-      message: m.now ? `Now playing “${m.now.title}”` : "Queue finished.",
-    }, 200, origin);
+
+      const compositionId = typeof body.compositionId === "string" ? body.compositionId : m.now.id;
+      if (compositionId !== m.now.id) {
+        return finish(409, { ok: false, error: "stale", message: "Not the current composition.", now: publicComposition(m.now, true) });
+      }
+
+      if (!adminForce) {
+        const presented = typeof body.advanceToken === "string" ? body.advanceToken : "";
+        if (!presented) return finish(401, { ok: false, error: "advance_token_required", message: "Use the current advanceToken from GET /v1/music." });
+        if (!(await this.timingSafeEqualStr(presented, m.now.advanceToken || ""))) {
+          return finish(403, { ok: false, error: "advance_token_invalid", message: "advanceToken does not match the current composition." });
+        }
+        const endsAt = typeof m.now.endsAt === "number" ? m.now.endsAt : (m.now.startedAt || now) + m.now.composition.durationMs;
+        // A short composition has no meaningful pre-end window. Keep its public
+        // advance closed until the deterministic deadline rather than making the
+        // entire track immediately skippable.
+        const opensAt = m.now.composition.durationMs <= MUSIC_ADVANCE_WINDOW_MS * 2
+          ? endsAt
+          : endsAt - MUSIC_ADVANCE_WINDOW_MS;
+        if (now < opensAt) return finish(429, { ok: false, error: "too_early", message: "Public advance opens shortly before the deterministic end time.", opensAt, endsAt });
+      }
+      this.promoteMusicState(m, adminForce ? "admin-force" : "ended", now);
+      prepared.changed = true;
+      const response = {
+        ok: true,
+        advanced: true,
+        now: publicComposition(m.now, true),
+        queue: this.sortQueue(m.queue || []).map((song) => publicComposition(song)),
+        message: m.now ? `Now playing “${m.now.title}”` : "Queue finished.",
+      };
+      await this.persistPreparedMusicStateIn(storage, prepared);
+      return { status: 200, body: response, mutated: true, version: m.version || 0 };
+    });
+    if (result.mutated) this.broadcastLive(["music"], result.version || 0);
+    return json(result.body, result.status, origin);
   }
 
   /** @param {string} origin */

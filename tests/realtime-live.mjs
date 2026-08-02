@@ -8,7 +8,7 @@ class MemoryStorage {
     this.insideTransaction = false;
     this.topLevelCallsInsideTransaction = 0;
   }
-  async get(key) { return this.values.get(key); }
+  async get(key) { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; return this.values.get(key); }
   async put(key, value) {
     if (this.insideTransaction) this.topLevelCallsInsideTransaction++;
     if (typeof key === "object" && key !== null) for (const [name, item] of Object.entries(key)) this.values.set(name, item);
@@ -16,15 +16,17 @@ class MemoryStorage {
   }
   async delete(key) { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; this.values.delete(key); }
   async setAlarm(at) { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; this.alarmAt = at; }
-  async getAlarm() { return this.alarmAt; }
+  async getAlarm() { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; return this.alarmAt; }
   async deleteAlarm() { if (this.insideTransaction) this.topLevelCallsInsideTransaction++; this.alarmAt = null; }
   async transaction(callback) {
     const txn = {
+      get: async (key) => this.values.get(key),
       put: async (key, value) => {
         if (typeof key === "object" && key !== null) for (const [name, item] of Object.entries(key)) this.values.set(name, item);
         else this.values.set(key, value);
       },
       delete: async (key) => { this.values.delete(key); },
+      getAlarm: async () => this.alarmAt,
       setAlarm: async (at) => { this.alarmAt = at; },
       deleteAlarm: async () => { this.alarmAt = null; },
     };
