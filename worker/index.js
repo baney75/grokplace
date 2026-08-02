@@ -2523,11 +2523,11 @@ export class GrokPlaceCanvas extends DurableObject {
     return colorIndex === event.overwritten.colorIndex && this.sameProvenanceSnapshot(this.provenanceSnapshot(provenance), event.overwritten);
   }
 
-  /** @param {string} prefix */
-  async deletePrefixBatch(prefix) {
-    const records = await this.state.storage.list({ prefix, limit: 128 });
+  /** @param {DurableObjectStorage | DurableObjectTransaction} storage @param {string} prefix */
+  async deletePrefixBatchIn(storage, prefix) {
+    const records = await storage.list({ prefix, limit: 128 });
     const keys = [...records.keys()];
-    if (keys.length) await this.state.storage.delete(keys);
+    if (keys.length) await storage.delete(keys);
     return keys.length;
   }
 
@@ -5874,7 +5874,12 @@ export class GrokPlaceCanvas extends DurableObject {
     if (requestedBoardVersion !== null && requestedBoardVersion !== meta.version) {
       return json({ ok: false, error: "stale_preview", currentBoardVersion: meta.version, refresh: `/v1/plan/preview?id=${encodeURIComponent(id)}&version=${version}&format=${format}` }, 409, origin);
     }
-    const protections = await this.listActiveProtectionsReadonly(size, board, Date.now());
+    // Exact-version preview URLs are durable review evidence. Time-expiring
+    // protections remain visible on fresh no-store previews, but are excluded
+    // from immutable representations whose identity is plan + board version.
+    const protections = requestedBoardVersion === null
+      ? await this.listActiveProtectionsReadonly(size, board, Date.now())
+      : { active: [], truncated: false };
     const overlay = await this.buildPlanOverlay(revision, board, size, protections);
     const cacheKey = planPreviewCacheKey(id, version, meta.version);
     const etag = `"${cacheKey}"`;
@@ -7803,23 +7808,20 @@ export class GrokPlaceCanvas extends DurableObject {
       leaders: [],
     };
     const clearedMusic = body.clearMusic !== false ? emptyMusicState() : null;
-    await this.state.storage.put(put);
-    // The new board and tile epoch become authoritative before bounded cleanup.
-    // Any old epoch-scoped report, vote, or replay records are already inert.
-    await this.deletePrefixBatch("provenance:row:");
-    await this.deletePrefixBatch("protection:cell:");
-    await this.deletePrefixBatch("protection:requests:");
-    await this.deletePrefixBatch("reclaim:");
-    await this.deletePrefixBatch("rpt:");
-    await this.deletePrefixBatch("vote:");
-    await this.deletePrefixBatch("owner:");
-    await this.state.storage.delete("provenance");
-    if (clearedMusic) await this.writeMusicAndAlarm(clearedMusic);
-    // Drop rate-limit / cooldown / challenge buckets so admin reset fully unsticks ops/tests
-    if (body.clearLimits !== false) {
-      const prefixes = ["rl:", "pow:", "reviewauth:", "cd:", "vcd:", "mscd:", "mvcd:", "rcd:"];
-      for (const prefix of prefixes) await this.deletePrefixBatch(prefix);
-    }
+    await this.storageTransaction(async (storage) => {
+      await storage.put(put);
+      // Publish the new epoch and bounded cleanup atomically with respect to
+      // placement, protection, voting, reporting, reclaim, and music writes.
+      const tilePrefixes = ["provenance:row:", "protection:cell:", "protection:requests:", "reclaim:", "rpt:", "vote:", "owner:"];
+      for (const prefix of tilePrefixes) await this.deletePrefixBatchIn(storage, prefix);
+      await storage.delete("provenance");
+      if (clearedMusic) await this.writeMusicAndAlarmIn(storage, clearedMusic);
+      // Drop bounded rate-limit/cooldown/challenge buckets when explicitly requested.
+      if (body.clearLimits !== false) {
+        const prefixes = ["rl:", "pow:", "reviewauth:", "cd:", "vcd:", "mscd:", "mvcd:", "rcd:"];
+        for (const prefix of prefixes) await this.deletePrefixBatchIn(storage, prefix);
+      }
+    });
     this.broadcastLive(["canvas", "activity", "music"], put.meta.version);
     return json({ ok: true, message: "Mosaic reset.", size, resetAt: now }, 200, origin);
   }

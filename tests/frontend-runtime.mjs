@@ -18,6 +18,11 @@ const mosaicSource = readFileSync(new URL("../public/mosaic.js", import.meta.url
 const mosaicHtml = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const mosaicStyles = readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
 check(
+  "invite control has an explicit accessible name",
+  /id="share-btn"[^>]*aria-label="Invite your agent"/.test(mosaicHtml),
+  "invite control aria-label missing"
+);
+check(
   "viewer includes a focusable read-only tile inspector without mutation controls",
   /id="board"[^>]*tabindex="0"/.test(mosaicHtml)
     && /id="tile-inspector"/.test(mosaicHtml)

@@ -160,6 +160,22 @@ check(
 );
 
 const cacheKey = data.preview?.cacheKey;
+const immutableJsonUrl = `${previewUrl}&boardVersion=7`;
+response = await canvas.handlePlanPreview(new Request(immutableJsonUrl), new URL(immutableJsonUrl), 8, "*");
+const immutableJson = await response.json();
+storage.values.set("protection:cell:1:1", { ...(await storage.get("protection:cell:1:1")), expiresAt: now - 1 });
+const expiredValidator = await canvas.handlePlanPreview(new Request(immutableJsonUrl, { headers: { "If-None-Match": `"${cacheKey}"` } }), new URL(immutableJsonUrl), 8, "*");
+const afterExpiry = await canvas.handlePlanPreview(new Request(immutableJsonUrl), new URL(immutableJsonUrl), 8, "*");
+const afterExpiryJson = await afterExpiry.json();
+check(
+  "immutable preview identity excludes transient protection expiry",
+  response.ok
+    && immutableJson.preview?.states?.protected === 0
+    && immutableJson.preview?.protections?.length === 0
+    && expiredValidator.status === 304
+    && JSON.stringify(afterExpiryJson) === JSON.stringify(immutableJson),
+  JSON.stringify({ before: immutableJson, validator: expiredValidator.status, after: afterExpiryJson })
+);
 const immutablePreviewUrl = `${previewUrl.replace("format=json", "format=png")}&boardVersion=7`;
 response = await canvas.handlePlanPreview(new Request(immutablePreviewUrl), new URL(immutablePreviewUrl), 8, "*");
 const png = new Uint8Array(await response.arrayBuffer());

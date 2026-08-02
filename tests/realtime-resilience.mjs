@@ -188,7 +188,13 @@ function response(status, retryAfter = "") {
 }
 
 class MemoryStorage {
-  constructor(values = {}) { this.values = new Map(Object.entries(values)); this.listCalls = []; }
+  constructor(values = {}) {
+    this.values = new Map(Object.entries(values));
+    this.listCalls = [];
+    this.tail = Promise.resolve();
+    this.nextGate = null;
+    this.transactionCalls = 0;
+  }
   async get(key) { return this.values.get(key); }
   async put(key, value) {
     if (key && typeof key === "object") for (const [name, item] of Object.entries(key)) this.values.set(name, item);
@@ -201,6 +207,29 @@ class MemoryStorage {
   async list({ prefix = "", limit = 1_000 } = {}) {
     this.listCalls.push({ prefix, limit });
     return new Map([...this.values].filter(([key]) => key.startsWith(prefix)).slice(0, limit));
+  }
+  async transaction(callback) {
+    this.transactionCalls++;
+    const previous = this.tail;
+    let releaseTail;
+    this.tail = new Promise((resolve) => { releaseTail = resolve; });
+    await previous;
+    const gate = this.nextGate;
+    this.nextGate = null;
+    if (gate) {
+      gate.entered();
+      await gate.release;
+    }
+    try { return await callback(this); }
+    finally { releaseTail(); }
+  }
+  holdNextTransaction() {
+    let entered;
+    let release;
+    const enteredPromise = new Promise((resolve) => { entered = resolve; });
+    const releasePromise = new Promise((resolve) => { release = resolve; });
+    this.nextGate = { entered, release: releasePromise };
+    return { entered: enteredPromise, release };
   }
 }
 
@@ -269,6 +298,51 @@ class MemoryStorage {
       && (await storage.get(`vote:${resetMeta.tileEpoch}:alice:122,1`)) === undefined
       && new Uint8Array(await storage.get("board")).every((cell) => cell === 0),
     JSON.stringify({ body, resetMeta, reportCleanupCalls, staleReportsRemaining, report: await reportResponse.json(), vote: await voteResponse.json(), oldAgentAfterVote, keys: [...storage.values.keys()] })
+  );
+}
+
+{
+  const storage = new MemoryStorage({
+    board: new Uint8Array([1, 0, 0, 0]).buffer,
+    scores: new Int16Array(4).buffer,
+    size: 2,
+    schema: 4,
+    meta: { version: 4, tileEpoch: "1111111111111111", totalPlacements: 1, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: 1 },
+    feed: [], history: [], leaders: [],
+    "owner:cell:0:0": "old-artist",
+    "provenance:row:0": [null, null],
+    "turn:new-artist": { left: 5, nextTurnAt: 0 },
+  });
+  const room = new GrokPlaceCanvas({ storage, getWebSockets() { return []; } }, { CANVAS_SIZE: "2", RESET_SECRET: "test-reset" });
+  room.rateLimit = async () => ({ ok: true });
+  room.consumeProof = async () => ({ ok: true });
+  room.requireAgentCapability = async () => ({ ok: true });
+  const gate = storage.holdNextTransaction();
+  const resetPromise = room.handleReset(new Request("https://test/internal/reset", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-reset", "Content-Type": "application/json" },
+    body: JSON.stringify({ clearMusic: false, clearLimits: false }),
+  }), "*");
+  await gate.entered;
+  const placementPromise = room.handlePlace(new Request("https://test/internal/place", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: "new-artist", x: 0, y: 0, color: 5 }),
+  }), 2, 60_000, "*", "test-ip");
+  while (storage.transactionCalls < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+  gate.release();
+  const resetResponse = await resetPromise;
+  const placementResponse = await placementPromise;
+  const placement = await placementResponse.json();
+  check(
+    "reset serializes publication and cleanup against an in-flight placement",
+    resetResponse.status === 200
+      && placementResponse.status === 409
+      && placement.error === "tile_changed_retry"
+      && new Uint8Array(await storage.get("board")).every((cell) => cell === 0)
+      && (await storage.get("owner:cell:0:0")) === undefined
+      && (await storage.get("provenance:row:0")) === undefined,
+    JSON.stringify({ reset: await resetResponse.json(), placement, keys: [...storage.values.keys()] })
   );
 }
 
