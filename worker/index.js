@@ -2474,8 +2474,12 @@ export class GrokPlaceCanvas extends DurableObject {
 
   /** @param {string} origin */
   async handleFeed(origin) {
-    const feed = (await this.state.storage.get("feed")) || [];
-    return json({ ok: true, activityTrust: UNTRUSTED_ACTIVITY, feed: (Array.isArray(feed) ? feed : []).map(publicActivity).filter(Boolean) }, 200, origin, { "Cache-Control": "public, max-age=1" });
+    const storedFeed = await this.state.storage.get("feed");
+    const feed = Array.isArray(storedFeed) ? storedFeed.slice(0, FEED_MAX) : [];
+    // A legacy import or interrupted older release can leave an oversized
+    // array. Trim once on a read so future viewer delivery stays bounded.
+    if (Array.isArray(storedFeed) && storedFeed.length > FEED_MAX) await this.state.storage.put("feed", feed);
+    return json({ ok: true, activityTrust: UNTRUSTED_ACTIVITY, feed: feed.map(publicActivity).filter(Boolean) }, 200, origin, { "Cache-Control": "public, max-age=1" });
   }
 
   /** @param {URL} url @param {string} origin */

@@ -70,6 +70,10 @@
   let liveFailures = 0;
   let canvasFailures = 0;
   let feedFailures = 0;
+  let canvasRetryAfterMs = 0;
+  let feedRetryAfterMs = 0;
+  let canvasRetryJitter = false;
+  let feedRetryJitter = false;
   let canvasReadThisVisibility = false;
   let feedReadThisVisibility = false;
   let canvasRefreshQueued = false;
@@ -564,7 +568,7 @@
   /** @param {AbortSignal} signal */
   async function fetchCanvas(signal) {
     const res = await fetch(`${API}/v1/canvas?scores=1`, { cache: "no-store", signal });
-    if (!res.ok) throw new Error(`canvas ${res.status}`);
+    if (!res.ok) throw requestError("canvas", res);
     /** @type {unknown} */
     const raw = await res.json();
     if (!isRecord(raw)) return;
@@ -605,7 +609,7 @@
   /** @param {AbortSignal} signal */
   async function fetchFeed(signal) {
     const res = await fetch(`${API}/v1/feed`, { cache: "no-store", signal });
-    if (!res.ok) throw new Error(`feed ${res.status}`);
+    if (!res.ok) throw requestError("feed", res);
     /** @type {unknown} */
     const raw = await res.json();
     if (!isRecord(raw)) return;
@@ -754,9 +758,45 @@
     return !pollingStopped && !pollingPaused && !document.hidden;
   }
 
-  /** @param {number} base @param {number} failures */
-  function backoffDelay(base, failures) {
-    return Math.min(Math.max(POLL_BACKOFF_MAX_MS, base), base * (2 ** Math.min(failures, 3)));
+  /** @param {Response | { headers?: { get?: (name: string) => string | null } }} response */
+  function retryAfterMs(response) {
+    const value = response.headers?.get?.("Retry-After")?.trim() || "";
+    if (!value) return 0;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(POLL_BACKOFF_MAX_MS, Math.ceil(seconds * 1000));
+    const at = Date.parse(value);
+    return Number.isFinite(at) ? Math.min(POLL_BACKOFF_MAX_MS, Math.max(0, at - Date.now())) : 0;
+  }
+
+  /** @param {string} resource @param {Response | { status?: number, headers?: { get?: (name: string) => string | null } }} response */
+  function requestError(resource, response) {
+    const error = new Error(`${resource} ${response.status || 0}`);
+    const status = response.status || 0;
+    if (status === 429 || status >= 500 && status <= 599) {
+      Object.assign(error, { retryAfterMs: retryAfterMs(response), retryJitter: true });
+    }
+    return error;
+  }
+
+  /** @param {unknown} error */
+  function retryPolicyFromError(error) {
+    const retry = error && typeof error === "object"
+      ? /** @type {{ retryAfterMs?: unknown, retryJitter?: unknown }} */ (error)
+      : {};
+    const value = Number(retry.retryAfterMs);
+    return {
+      retryAfterMs: Number.isFinite(value) && value > 0 ? Math.min(POLL_BACKOFF_MAX_MS, value) : 0,
+      jitter: retry.retryJitter === true,
+    };
+  }
+
+  /** @param {number} base @param {number} failures @param {number} [serverRetryAfterMs] @param {boolean} [jitter] */
+  function backoffDelay(base, failures, serverRetryAfterMs = 0, jitter = false) {
+    if (failures <= 0) return base;
+    const exponential = Math.min(POLL_BACKOFF_MAX_MS, base * (2 ** Math.min(failures, 3)));
+    if (!jitter) return Math.max(Math.min(POLL_BACKOFF_MAX_MS, serverRetryAfterMs), exponential);
+    const jittered = Math.round(exponential * (0.8 + Math.random() * 0.4));
+    return Math.max(Math.min(POLL_BACKOFF_MAX_MS, serverRetryAfterMs), jittered);
   }
 
   /** @param {number} delay */
@@ -794,13 +834,18 @@
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
         canvasFailures++;
+        const retry = retryPolicyFromError(error);
+        canvasRetryAfterMs = retry.retryAfterMs;
+        canvasRetryJitter = retry.jitter;
         document.title = "grok/place · reconnecting…";
       }
     } finally {
       if (canvasRequest === controller) canvasRequest = null;
       if (isPollingActive()) {
-        const delay = canvasRefreshQueued ? 0 : backoffDelay(liveCanvasInterval(), canvasFailures);
+        const delay = canvasRefreshQueued ? 0 : backoffDelay(liveCanvasInterval(), canvasFailures, canvasRetryAfterMs, canvasRetryJitter);
         canvasRefreshQueued = false;
+        canvasRetryAfterMs = 0;
+        canvasRetryJitter = false;
         scheduleCanvasPoll(delay);
       }
     }
@@ -818,12 +863,19 @@
       await fetchFeed(controller.signal);
       feedFailures = 0;
     } catch (error) {
-      if (!(error instanceof Error) || error.name !== "AbortError") feedFailures++;
+      if (!(error instanceof Error) || error.name !== "AbortError") {
+        feedFailures++;
+        const retry = retryPolicyFromError(error);
+        feedRetryAfterMs = retry.retryAfterMs;
+        feedRetryJitter = retry.jitter;
+      }
     } finally {
       if (feedRequest === controller) feedRequest = null;
       if (isPollingActive()) {
-        const delay = feedRefreshQueued ? 0 : backoffDelay(liveFeedInterval(), feedFailures);
+        const delay = feedRefreshQueued ? 0 : backoffDelay(liveFeedInterval(), feedFailures, feedRetryAfterMs, feedRetryJitter);
         feedRefreshQueued = false;
+        feedRetryAfterMs = 0;
+        feedRetryJitter = false;
         scheduleFeedPoll(delay);
       }
     }
