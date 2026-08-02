@@ -1,4 +1,389 @@
+import { DurableObject } from "cloudflare:workers";
 import { isMaintainAwardPath } from "../shared/maintain-policy.js";
+import { publicMaintainer } from "../shared/maintainer.js";
+
+/** @typedef {Record<string, unknown>} JsonRecord */
+/** @typedef {{ ok: true, value: string } | { ok: false, reason: string, code?: string }} SafeText */
+/** @typedef {{ ok: true, agent: string } | { ok: false, error: string, message: string }} ParsedAgent */
+/** @typedef {{ key: string }} RateLimitRequest */
+/** @typedef {{ success: boolean }} RateLimitResult */
+/** @typedef {{ limit(request: RateLimitRequest): Promise<RateLimitResult> }} RateLimiter */
+/** @typedef {Env & { RESET_SECRET?: string, AWARD_SECRET?: string }} WorkerEnv */
+/** @typedef {{ x: number, y: number, c: number, color?: string, score?: number }} SparseTile */
+/** @typedef {{ note: string, at: number, duration: number, velocity: number }} CompositionNote */
+/** @typedef {{ bpm: number, waveform: string, notes: CompositionNote[], durationMs: number }} Composition */
+/** @typedef {{ id: string, title: string, submittedBy: string, votes: number, voters?: string[], reporters?: string[], addedAt: number, startedAt?: number, endsAt?: number, composition: Composition, license: "CC0-1.0", originalNonInfringingAttested: boolean, advanceToken?: string, fingerprint?: string, reason?: string }} MusicSong */
+/** @typedef {{ now: MusicSong | null, queue: MusicSong[], version: number }} MusicState */
+/** @typedef {{ version: number, totalPlacements: number, totalVotes: number, uniqueAgents: number, lastPlaceAt: number | null, createdAt?: number, resetAt?: number, totalReportsCleared?: number, communityMission?: unknown, mission?: unknown }} CanvasMeta */
+/** @typedef {{ x: number, y: number, c: number, t: number }} AgentLastTile */
+/** @typedef {{ name: string, placements: number, votesCast: number, upvotesReceived: number, downvotesReceived: number, reputation: number, firstAt: number, lastAt: number, lastGoal: string, lastTile: AgentLastTile | null, bonusTiles: number, maintainer: boolean, github: string | null, activePlanId?: string | null, lastPlanId?: string }} AgentStat */
+/** @typedef {{ left: number, nextTurnAt: number }} TurnState */
+/** @typedef {{ login: string, id: number, html_url: string, created_at: string, public_repos: number, followers: number, ageDays: number, bio: string, blog: string }} GithubProfile */
+/** @typedef {{ login: string, id: number, html_url: string, created_at: string, public_repos: number, followers: number, public_gists: number, bio: string | null, blog: string | null, type: "User" }} GithubUserPayload */
+/** @typedef {{ login: string, id: number, html_url: string, created_at: string, public_repos: number, followers: number, ageDays: number }} StoredGithubProfile */
+/** @typedef {{ github: string, agent: string, status: "active", awards?: number, bonusTilesEarned?: number, githubId?: number, consentedAt?: number, consentPhrase?: string, verifiedAt?: number, ownershipProofAt?: number, profile?: Partial<StoredGithubProfile>, lastAwardAt?: number, lastPr?: number }} MaintainerRecord */
+/** @typedef {{ agent: string, github: string, githubId: number, proofToken: string, consentPhrase: string, createdAt: number, expiresAt: number }} PendingMaintainer */
+/** @typedef {{ id: string, reviewerAgent: string, reviewerTrust: "verified_maintainer" | "claimed_agent_only", reviewerGithub?: string, reviewerGithubId?: number, headSha: string, verdict: "SHIP" | "REWORK", findings: string, residualRisk: string, createdAt: number }} ReviewRecord */
+/** @typedef {{ prNumber: number, headSha: string, github: string, agent: string, filesChanged: number, linesChanged: number, paths: string[], amount: number, status: "reserved" | "awarded" | "cancelled", createdAt: number, bountyIssue?: number, bountyApprovalCommentId?: number, mergeSha?: string, awardedAt?: number, cancelledAt?: number, cancelReason?: string }} AwardReservation */
+/** @typedef {{ reservationKey: string, prNumber: number, headSha: string, github: string, bountyIssue: number, bountyApprovalCommentId: number, status: "reserved" | "awarded" | "released", reservedAt: number, mergeSha?: string, awardedAt?: number, releasedAt?: number, releaseReason?: string }} BountyPointer */
+/** @typedef {{ x: number, y: number, c: number, color: string }} PlanCell */
+/** @typedef {{ w: number, h: number, cells: PlanCell[] }} PlanDesign */
+/** @typedef {{ n: number, text: string, done: boolean }} PlanStep */
+/** @typedef {{ tilesPlaced?: number, notes?: string }} PlanProgress */
+/** @typedef {{ id: string, agent: string, clientRequestId?: string, title: string, summary?: string, region?: string, steps?: PlanStep[], design?: PlanDesign, tileBudget?: number, estimatedTurns?: number, status: "draft" | "proposed" | "attested" | "active" | "paused" | "done" | "rejected", ownerConsentAttestedByAgent?: boolean, attestedAt?: number | null, progress?: PlanProgress, createdAt: number, updatedAt: number }} PlanRecord */
+/** @typedef {{ id: string, title: string, summary: string, submittedBy: string, votes: number, voters: string[], status: "proposed", createdAt: number }} FeatureRecord */
+/** @typedef {{ a: string, t: number, reason: string }} TileReport */
+/** @typedef {{ t: number, n: number }} RateBucket */
+/** @typedef {{ challenge: string, exp: number, ip: string, scope: string, used: boolean }} ProofRecord */
+/** @typedef {{ agent: string, hash: string, version: 1, createdAt: number, expiresAt: number }} ReviewCapabilityRecord */
+/** @typedef {{ ok: true } | { ok: false, retryAfterMs: number }} LocalRateLimitResult */
+/** @typedef {{ ok: true, challengeId: string, nonce: number, digest: string } | { ok: false, status: number, error: string, message: string }} ProofResult */
+/** @typedef {{ ok: true } | { ok: false, status: number, error: string, message: string }} CapabilityResult */
+/** @typedef {{ ok: true, profile: GithubProfile } | { ok: false, reason: string, status?: number, ageDays?: number, message?: string }} GithubProfileResult */
+/** @typedef {{ type: string, agent: string, trust: string, x?: number, y?: number, c?: number, dir?: number, score?: number, reports?: number, threshold?: number, t?: number, v?: number, color?: string, goal?: string, reason?: string, quarantined?: true }} PublicActivity */
+/** @typedef {{ name: string, trust: string, reputation?: number, placements?: number, upvotesReceived?: number, lastGoal?: string, quarantined?: true }} PublicLeader */
+/** @typedef {{ id: string, title: string, summary: string, submittedBy: string, votes: number, status: string, createdAt: number | null, trust: string, quarantined?: true }} PublicFeature */
+
+/** @param {unknown} value @returns {value is JsonRecord} */
+function isJsonRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** @param {unknown} value @returns {value is { compositionId: string, endsAt: number }} */
+function isMusicAlarm(value) {
+  return isJsonRecord(value)
+    && typeof value.compositionId === "string"
+    && typeof value.endsAt === "number" && Number.isFinite(value.endsAt);
+}
+
+/** @param {unknown} value @returns {value is { t: number, n: number }} */
+function isRateBucket(value) {
+  return isJsonRecord(value)
+    && typeof value.t === "number" && Number.isFinite(value.t)
+    && typeof value.n === "number" && Number.isSafeInteger(value.n) && value.n >= 0;
+}
+
+/** @param {unknown} value @returns {value is { challenge: string, exp: number, ip: string, scope: string, used: boolean }} */
+function isProofRecord(value) {
+  return isJsonRecord(value)
+    && typeof value.challenge === "string"
+    && typeof value.exp === "number" && Number.isFinite(value.exp)
+    && typeof value.ip === "string"
+    && typeof value.scope === "string"
+    && typeof value.used === "boolean";
+}
+
+/** @param {unknown} value @returns {value is ReviewCapabilityRecord} */
+function isReviewCapabilityRecord(value) {
+  return isJsonRecord(value)
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && typeof value.hash === "string" && /^[a-f0-9]{64}$/.test(value.hash)
+    && value.version === 1
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && typeof value.expiresAt === "number" && Number.isFinite(value.expiresAt);
+}
+
+/** @param {unknown} value @returns {value is GithubUserPayload} */
+function isGithubUserPayload(value) {
+  return isJsonRecord(value)
+    && typeof value.login === "string" && GITHUB_LOGIN_RE.test(value.login)
+    && typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0
+    && typeof value.html_url === "string"
+    && typeof value.created_at === "string"
+    && typeof value.public_repos === "number" && Number.isSafeInteger(value.public_repos) && value.public_repos >= 0
+    && typeof value.followers === "number" && Number.isSafeInteger(value.followers) && value.followers >= 0
+    && typeof value.public_gists === "number" && Number.isSafeInteger(value.public_gists) && value.public_gists >= 0
+    && (value.bio === null || typeof value.bio === "string")
+    && (value.blog === null || typeof value.blog === "string")
+    && value.type === "User";
+}
+
+/** @param {unknown} value @returns {value is MusicSong} */
+function isMusicSong(value) {
+  return isJsonRecord(value)
+    && typeof value.id === "string"
+    && typeof value.title === "string"
+    && typeof value.submittedBy === "string"
+    && typeof value.votes === "number"
+    && Number.isSafeInteger(value.votes) && value.votes >= 0
+    && (value.voters === undefined || Array.isArray(value.voters) && value.voters.every((v) => typeof v === "string"))
+    && (value.reporters === undefined || Array.isArray(value.reporters) && value.reporters.every((v) => typeof v === "string"))
+    && typeof value.addedAt === "number"
+    && Number.isFinite(value.addedAt)
+    && isStoredComposition(value.composition)
+    && value.license === "CC0-1.0"
+    && value.originalNonInfringingAttested === true
+    && (value.startedAt === undefined || typeof value.startedAt === "number" && Number.isFinite(value.startedAt))
+    && (value.endsAt === undefined || typeof value.endsAt === "number" && Number.isFinite(value.endsAt))
+    && (value.startedAt === undefined || value.endsAt === undefined || value.endsAt >= value.startedAt)
+    && (value.advanceToken === undefined || typeof value.advanceToken === "string")
+    && (value.fingerprint === undefined || typeof value.fingerprint === "string")
+    && (value.reason === undefined || typeof value.reason === "string");
+}
+
+/** @param {unknown} value @returns {value is MusicState} */
+function isMusicState(value) {
+  return isJsonRecord(value)
+    && (value.now === null || isMusicSong(value.now))
+    && Array.isArray(value.queue) && value.queue.every(isMusicSong)
+    && typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 0;
+}
+
+/** @param {unknown} value @returns {value is CanvasMeta} */
+function isCanvasMeta(value) {
+  return isJsonRecord(value)
+    && typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 0
+    && typeof value.totalPlacements === "number" && Number.isSafeInteger(value.totalPlacements) && value.totalPlacements >= 0
+    && typeof value.totalVotes === "number" && Number.isSafeInteger(value.totalVotes) && value.totalVotes >= 0
+    && typeof value.uniqueAgents === "number" && Number.isSafeInteger(value.uniqueAgents) && value.uniqueAgents >= 0
+    && (value.lastPlaceAt === null || typeof value.lastPlaceAt === "number" && Number.isFinite(value.lastPlaceAt))
+    && (value.createdAt === undefined || typeof value.createdAt === "number" && Number.isFinite(value.createdAt))
+    && (value.resetAt === undefined || typeof value.resetAt === "number" && Number.isFinite(value.resetAt))
+    && (value.totalReportsCleared === undefined || typeof value.totalReportsCleared === "number" && Number.isSafeInteger(value.totalReportsCleared) && value.totalReportsCleared >= 0);
+}
+
+/** @param {unknown} value @returns {CanvasMeta} */
+function normalizeCanvasMeta(value) {
+  if (!isJsonRecord(value)) return emptyCanvasMeta();
+  // The original durable record predates vote counters. Preserve its history.
+  const candidate = value.totalVotes === undefined ? { ...value, totalVotes: 0 } : value;
+  return isCanvasMeta(candidate) ? candidate : emptyCanvasMeta();
+}
+
+/** @returns {CanvasMeta} */
+function emptyCanvasMeta() {
+  return { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null };
+}
+
+/** @param {unknown} value @returns {value is ArrayBuffer | Uint8Array} */
+function isBoardBytes(value) {
+  return value instanceof ArrayBuffer || value instanceof Uint8Array;
+}
+
+/** @param {unknown} value @returns {value is ArrayBuffer | Int16Array} */
+function isScoreBytes(value) {
+  return value instanceof ArrayBuffer || value instanceof Int16Array;
+}
+
+/** @param {unknown} value @returns {value is AgentStat} */
+function isAgentStat(value) {
+  return isJsonRecord(value)
+    && typeof value.name === "string" && parseAgent(value.name).ok
+    && ["placements", "votesCast", "upvotesReceived", "downvotesReceived", "reputation", "firstAt", "lastAt", "bonusTiles"].every((key) => typeof value[key] === "number" && Number.isFinite(value[key]))
+    && typeof value.lastGoal === "string"
+    && (value.lastTile === null || isJsonRecord(value.lastTile)
+      && typeof value.lastTile.x === "number" && Number.isFinite(value.lastTile.x)
+      && typeof value.lastTile.y === "number" && Number.isFinite(value.lastTile.y)
+      && typeof value.lastTile.c === "number" && Number.isFinite(value.lastTile.c)
+      && typeof value.lastTile.t === "number" && Number.isFinite(value.lastTile.t))
+    && typeof value.maintainer === "boolean"
+    && (value.github === null || typeof value.github === "string")
+    && (value.activePlanId === undefined || value.activePlanId === null || typeof value.activePlanId === "string")
+    && (value.lastPlanId === undefined || typeof value.lastPlanId === "string");
+}
+
+/** @param {unknown} value @returns {value is TurnState} */
+function isTurnState(value) {
+  return isJsonRecord(value)
+    && typeof value.left === "number" && Number.isSafeInteger(value.left) && value.left >= 0
+    && typeof value.nextTurnAt === "number" && Number.isFinite(value.nextTurnAt) && value.nextTurnAt >= 0;
+}
+
+/** @param {unknown} value @returns {value is MaintainerRecord} */
+function isMaintainerRecord(value) {
+  return isJsonRecord(value)
+    && typeof value.github === "string" && GITHUB_LOGIN_RE.test(value.github)
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && value.status === "active"
+    && (value.awards === undefined || typeof value.awards === "number" && Number.isSafeInteger(value.awards) && value.awards >= 0)
+    && (value.bonusTilesEarned === undefined || typeof value.bonusTilesEarned === "number" && Number.isSafeInteger(value.bonusTilesEarned) && value.bonusTilesEarned >= 0)
+    && (value.githubId === undefined || typeof value.githubId === "number" && Number.isSafeInteger(value.githubId) && value.githubId > 0)
+    && (value.consentedAt === undefined || typeof value.consentedAt === "number" && Number.isFinite(value.consentedAt))
+    && (value.consentPhrase === undefined || typeof value.consentPhrase === "string")
+    && (value.verifiedAt === undefined || typeof value.verifiedAt === "number" && Number.isFinite(value.verifiedAt))
+    && (value.ownershipProofAt === undefined || typeof value.ownershipProofAt === "number" && Number.isFinite(value.ownershipProofAt))
+    && (value.profile === undefined || isJsonRecord(value.profile)
+      && (value.profile.login === undefined || typeof value.profile.login === "string")
+      && (value.profile.id === undefined || typeof value.profile.id === "number" && Number.isSafeInteger(value.profile.id) && value.profile.id > 0)
+      && (value.profile.html_url === undefined || typeof value.profile.html_url === "string")
+      && (value.profile.created_at === undefined || typeof value.profile.created_at === "string")
+      && (value.profile.public_repos === undefined || typeof value.profile.public_repos === "number" && Number.isFinite(value.profile.public_repos))
+      && (value.profile.followers === undefined || typeof value.profile.followers === "number" && Number.isFinite(value.profile.followers))
+      && (value.profile.ageDays === undefined || typeof value.profile.ageDays === "number" && Number.isFinite(value.profile.ageDays)))
+    && (value.lastAwardAt === undefined || typeof value.lastAwardAt === "number" && Number.isFinite(value.lastAwardAt))
+    && (value.lastPr === undefined || typeof value.lastPr === "number" && Number.isSafeInteger(value.lastPr) && value.lastPr > 0);
+}
+
+/** @param {unknown} value @returns {value is PendingMaintainer} */
+function isPendingMaintainer(value) {
+  return isJsonRecord(value)
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && typeof value.github === "string" && GITHUB_LOGIN_RE.test(value.github)
+    && typeof value.githubId === "number" && Number.isSafeInteger(value.githubId) && value.githubId > 0
+    && typeof value.proofToken === "string"
+    && typeof value.consentPhrase === "string"
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && typeof value.expiresAt === "number" && Number.isFinite(value.expiresAt);
+}
+
+/** @param {unknown} value @returns {value is AwardReservation} */
+function isAwardReservation(value) {
+  return isJsonRecord(value)
+    && typeof value.prNumber === "number" && Number.isSafeInteger(value.prNumber) && value.prNumber > 0
+    && typeof value.headSha === "string" && /^[a-f0-9]{40}$/.test(value.headSha)
+    && typeof value.github === "string" && GITHUB_LOGIN_RE.test(value.github)
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && typeof value.filesChanged === "number" && Number.isSafeInteger(value.filesChanged) && value.filesChanged > 0
+    && typeof value.linesChanged === "number" && Number.isSafeInteger(value.linesChanged) && value.linesChanged > 0
+    && Array.isArray(value.paths) && value.paths.every((path) => typeof path === "string")
+    && typeof value.amount === "number" && Number.isSafeInteger(value.amount) && value.amount > 0
+    && typeof value.status === "string" && ["reserved", "awarded", "cancelled"].includes(value.status)
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && (value.bountyIssue === undefined || typeof value.bountyIssue === "number" && Number.isSafeInteger(value.bountyIssue) && value.bountyIssue > 0)
+    && (value.bountyApprovalCommentId === undefined || typeof value.bountyApprovalCommentId === "number" && Number.isSafeInteger(value.bountyApprovalCommentId) && value.bountyApprovalCommentId > 0)
+    && (value.mergeSha === undefined || typeof value.mergeSha === "string" && /^[a-f0-9]{40}$/.test(value.mergeSha))
+    && (value.awardedAt === undefined || typeof value.awardedAt === "number" && Number.isFinite(value.awardedAt))
+    && (value.cancelledAt === undefined || typeof value.cancelledAt === "number" && Number.isFinite(value.cancelledAt))
+    && (value.cancelReason === undefined || typeof value.cancelReason === "string");
+}
+
+/** @param {unknown} value @returns {AwardReservation | null} */
+function readAwardReservation(value) {
+  if (isAwardReservation(value)) return value;
+  if (!isJsonRecord(value)
+    || typeof value.prNumber !== "number" || !Number.isSafeInteger(value.prNumber) || value.prNumber < 1
+    || typeof value.headSha !== "string" || !/^[a-f0-9]{40}$/.test(value.headSha)
+    || typeof value.github !== "string" || !GITHUB_LOGIN_RE.test(value.github)
+    || typeof value.agent !== "string" || !parseAgent(value.agent).ok
+    || typeof value.amount !== "number" || !Number.isSafeInteger(value.amount) || value.amount < 1
+    || (value.status !== "reserved" && value.status !== "awarded" && value.status !== "cancelled")) return null;
+  const filesChanged = typeof value.filesChanged === "number" && Number.isSafeInteger(value.filesChanged) && value.filesChanged > 0 ? value.filesChanged : 0;
+  const linesChanged = typeof value.linesChanged === "number" && Number.isSafeInteger(value.linesChanged) && value.linesChanged > 0 ? value.linesChanged : 0;
+  const paths = Array.isArray(value.paths) && value.paths.every((path) => typeof path === "string") ? value.paths : [];
+  const bountyIssue = typeof value.bountyIssue === "number" && Number.isSafeInteger(value.bountyIssue) && value.bountyIssue > 0 ? value.bountyIssue : undefined;
+  const bountyApprovalCommentId = typeof value.bountyApprovalCommentId === "number" && Number.isSafeInteger(value.bountyApprovalCommentId) && value.bountyApprovalCommentId > 0 ? value.bountyApprovalCommentId : undefined;
+  return {
+    prNumber: value.prNumber,
+    headSha: value.headSha,
+    github: value.github,
+    agent: value.agent,
+    filesChanged,
+    linesChanged,
+    paths,
+    amount: value.amount,
+    status: value.status,
+    createdAt: typeof value.createdAt === "number" && Number.isFinite(value.createdAt) ? value.createdAt : 0,
+    ...(bountyIssue !== undefined && bountyApprovalCommentId !== undefined ? { bountyIssue, bountyApprovalCommentId } : {}),
+    ...(typeof value.mergeSha === "string" ? { mergeSha: value.mergeSha } : {}),
+    ...(typeof value.awardedAt === "number" && Number.isFinite(value.awardedAt) ? { awardedAt: value.awardedAt } : {}),
+    ...(typeof value.cancelledAt === "number" && Number.isFinite(value.cancelledAt) ? { cancelledAt: value.cancelledAt } : {}),
+    ...(typeof value.cancelReason === "string" ? { cancelReason: value.cancelReason } : {}),
+  };
+}
+
+/** @param {unknown} value @returns {value is BountyPointer} */
+function isBountyPointer(value) {
+  return isJsonRecord(value)
+    && typeof value.reservationKey === "string"
+    && typeof value.prNumber === "number" && Number.isSafeInteger(value.prNumber) && value.prNumber > 0
+    && typeof value.headSha === "string" && /^[a-f0-9]{40}$/.test(value.headSha)
+    && typeof value.github === "string" && GITHUB_LOGIN_RE.test(value.github)
+    && typeof value.bountyIssue === "number" && Number.isSafeInteger(value.bountyIssue) && value.bountyIssue > 0
+    && typeof value.bountyApprovalCommentId === "number" && Number.isSafeInteger(value.bountyApprovalCommentId) && value.bountyApprovalCommentId > 0
+    && typeof value.status === "string" && ["reserved", "awarded", "released"].includes(value.status)
+    && typeof value.reservedAt === "number" && Number.isFinite(value.reservedAt)
+    && (value.mergeSha === undefined || typeof value.mergeSha === "string" && /^[a-f0-9]{40}$/.test(value.mergeSha))
+    && (value.awardedAt === undefined || typeof value.awardedAt === "number" && Number.isFinite(value.awardedAt))
+    && (value.releasedAt === undefined || typeof value.releasedAt === "number" && Number.isFinite(value.releasedAt))
+    && (value.releaseReason === undefined || typeof value.releaseReason === "string");
+}
+
+/** @param {unknown} value @returns {value is FeatureRecord} */
+function isFeatureRecord(value) {
+  return isJsonRecord(value)
+    && typeof value.id === "string" && /^ft_[a-f0-9]{16}$/i.test(value.id)
+    && typeof value.title === "string" && typeof value.summary === "string"
+    && typeof value.submittedBy === "string" && parseAgent(value.submittedBy).ok
+    && typeof value.votes === "number" && Number.isSafeInteger(value.votes) && value.votes >= 0
+    && Array.isArray(value.voters) && value.voters.every((voter) => typeof voter === "string")
+    && value.status === "proposed"
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt);
+}
+
+/** @param {unknown} value @returns {value is TileReport} */
+function isTileReport(value) {
+  return isJsonRecord(value)
+    && typeof value.a === "string" && parseAgent(value.a).ok
+    && typeof value.t === "number" && Number.isFinite(value.t)
+    && typeof value.reason === "string";
+}
+
+/** @param {unknown} value @returns {value is PlanRecord["status"]} */
+function isPlanStatus(value) {
+  return typeof value === "string" && ["draft", "proposed", "attested", "active", "paused", "done", "rejected"].includes(value);
+}
+
+/** @param {unknown} value @returns {value is PlanCell} */
+function isPlanCell(value) {
+  return isJsonRecord(value)
+    && typeof value.x === "number" && Number.isSafeInteger(value.x) && value.x >= 0
+    && typeof value.y === "number" && Number.isSafeInteger(value.y) && value.y >= 0
+    && typeof value.c === "number" && Number.isSafeInteger(value.c) && value.c >= 0 && value.c < PALETTE.length
+    && typeof value.color === "string" && value.color === PALETTE[value.c];
+}
+
+/** @param {unknown} value @returns {value is PlanDesign} */
+function isPlanDesign(value) {
+  if (!isJsonRecord(value)) return false;
+  const w = value.w;
+  const h = value.h;
+  const cells = value.cells;
+  return typeof w === "number" && Number.isSafeInteger(w) && w >= 4 && w <= 64
+    && typeof h === "number" && Number.isSafeInteger(h) && h >= 4 && h <= 64
+    && Array.isArray(cells) && cells.length <= 512
+    && cells.every((cell) => isPlanCell(cell) && cell.x < w && cell.y < h);
+}
+
+/** @param {unknown} value @returns {value is PlanStep} */
+function isPlanStep(value) {
+  return isJsonRecord(value)
+    && typeof value.n === "number" && Number.isSafeInteger(value.n) && value.n >= 1 && value.n <= 24
+    && typeof value.text === "string" && value.text.length > 0 && value.text.length <= 200
+    && typeof value.done === "boolean";
+}
+
+/** @param {unknown} value @returns {value is PlanProgress} */
+function isPlanProgress(value) {
+  return isJsonRecord(value)
+    && (value.tilesPlaced === undefined || typeof value.tilesPlaced === "number" && Number.isSafeInteger(value.tilesPlaced) && value.tilesPlaced >= 0 && value.tilesPlaced <= 50_000)
+    && (value.notes === undefined || typeof value.notes === "string" && value.notes.length <= 400);
+}
+
+/** @param {unknown} value @returns {value is PlanRecord} */
+function isPlanRecord(value) {
+  return isJsonRecord(value)
+    && typeof value.id === "string" && /^pl_[a-f0-9]{16}$/i.test(value.id)
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && typeof value.title === "string"
+    && isPlanStatus(value.status)
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt)
+    && (value.clientRequestId === undefined || typeof value.clientRequestId === "string")
+    && (value.summary === undefined || typeof value.summary === "string")
+    && (value.region === undefined || typeof value.region === "string")
+    && (value.steps === undefined || Array.isArray(value.steps) && value.steps.length <= 24 && value.steps.every(isPlanStep))
+    && (value.design === undefined || isPlanDesign(value.design))
+    && (value.tileBudget === undefined || typeof value.tileBudget === "number" && Number.isSafeInteger(value.tileBudget) && value.tileBudget >= 0 && value.tileBudget <= 5_000)
+    && (value.estimatedTurns === undefined || typeof value.estimatedTurns === "number" && Number.isSafeInteger(value.estimatedTurns) && value.estimatedTurns >= 0 && value.estimatedTurns <= 2_000)
+    && (value.ownerConsentAttestedByAgent === undefined || typeof value.ownerConsentAttestedByAgent === "boolean")
+    && (value.attestedAt === undefined || value.attestedAt === null || typeof value.attestedAt === "number" && Number.isFinite(value.attestedAt))
+    && (value.progress === undefined || isPlanProgress(value.progress));
+}
+
+/** @template T @param {T | null | undefined} value @returns {value is T} */
+function isPresent(value) {
+  return value != null;
+}
 
 /**
  * grok/place API — agent-native mosaic on barnlabs
@@ -68,15 +453,18 @@ const PALETTE = [
 ];
 
 /** Board cell: 0 = empty/unpainted; 1..N = palette index + 1 (so white is paintable). */
+/** @param {number} colorIdx */
 function toStoredColor(colorIdx) {
   return colorIdx + 1;
 }
+/** @param {number | null | undefined} stored */
 function fromStoredColor(stored) {
   if (stored == null || stored === 0) return null;
   const ci = stored - 1;
   if (ci < 0 || ci >= PALETTE.length) return null;
   return ci;
 }
+/** @param {number | null | undefined} stored */
 function colorHex(stored) {
   const ci = fromStoredColor(stored);
   return ci === null ? null : PALETTE[ci];
@@ -111,6 +499,8 @@ const IP_PLACE_LIMIT = 80;
 const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
 const IP_NEW_AGENTS_LIMIT = 8;
+const REVIEW_CAPABILITY_TTL_MS = 15 * 60_000;
+const REVIEW_CLEANUP_BATCH = 16;
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
 const WORKERS_DEV_SUFFIX = ".workers.dev";
 const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health", "/see"]);
@@ -131,9 +521,10 @@ const POW_SCOPES = [
   "music:report",
   "feature:submit",
   "feature:vote",
+  "review:claim",
   "review:attest",
 ];
-const CAPABILITY_SHAPED_RE = /gp_a_[a-f0-9]{64}/i;
+const CAPABILITY_SHAPED_RE = /gp_[ar]_[a-f0-9]{64}/i;
 const UNTRUSTED_ACTIVITY = "untrusted_public_agent_activity";
 
 const CONTENT_RULES = [
@@ -178,6 +569,7 @@ const MUSIC_LEGAL = "CC0-1.0 original compositions only: deterministic note data
 const NOTE_RE = /^[A-G](?:#|b)?[0-8]$/;
 const WAVEFORMS = new Set(["sine", "square", "triangle", "sawtooth"]);
 
+/** @param {string} origin */
 function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin || "*",
@@ -197,6 +589,7 @@ function securityHeaders() {
   };
 }
 
+/** @param {unknown} data @param {number} status @param {string} origin @param {HeadersInit} [extraHeaders] */
 function json(data, status, origin, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -210,6 +603,7 @@ function json(data, status, origin, extraHeaders = {}) {
   });
 }
 
+/** @param {unknown} input */
 function normalizeColor(input) {
   if (input == null) return null;
   if (typeof input === "number" && Number.isInteger(input) && input >= 0 && input < PALETTE.length) return input;
@@ -228,12 +622,14 @@ function normalizeColor(input) {
   return null;
 }
 
+/** @param {unknown} v */
 function parseCoord(v) {
   if (typeof v === "number" && Number.isInteger(v)) return v;
   if (typeof v === "string" && /^-?\d+$/.test(v.trim())) return Number(v.trim());
   return null;
 }
 
+/** @param {string} s */
 function normalizeForFilter(s) {
   return s
     .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, "")
@@ -241,6 +637,7 @@ function normalizeForFilter(s) {
     .trim();
 }
 
+/** @param {string} s */
 function normalizeForMatch(s) {
   return normalizeForFilter(s)
     .toLowerCase()
@@ -257,6 +654,7 @@ function normalizeForMatch(s) {
     .trim();
 }
 
+/** @param {string} text */
 function containsNsfwTerm(text) {
   const folded = ` ${normalizeForMatch(text)} `;
   const compact = folded.replace(/\s+/g, "");
@@ -268,6 +666,7 @@ function containsNsfwTerm(text) {
   return null;
 }
 
+/** @param {unknown} raw @param {string} fieldLabel @returns {SafeText} */
 function scanTextSafety(raw, fieldLabel) {
   if (raw == null || raw === "") return { ok: true, value: "" };
   if (typeof raw !== "string") return { ok: false, reason: `${fieldLabel} must be a string` };
@@ -301,12 +700,14 @@ function scanTextSafety(raw, fieldLabel) {
   return { ok: true, value };
 }
 
+/** @param {unknown} raw @returns {{ ok: true, goal: string } | { ok: false, reason: string, code?: string }} */
 function filterGoal(raw) {
   const r = scanTextSafety(raw, "goal");
   if (!r.ok) return r;
   return { ok: true, goal: r.value };
 }
 
+/** @param {unknown} name @returns {ParsedAgent} */
 function parseAgent(name) {
   if (typeof name !== "string") {
     return { ok: false, error: "bad_agent", message: "agent must be 2-32 chars: letters, numbers, _ or -" };
@@ -321,6 +722,7 @@ function parseAgent(name) {
 }
 
 /** Public records are untrusted observations, never executable instructions. */
+/** @param {unknown} value @param {string} label @param {number} [max] */
 function publicText(value, label, max = 200) {
   if (typeof value !== "string" || !value) return { value: null, quarantined: false };
   const normalized = normalizeForFilter(value);
@@ -332,33 +734,60 @@ function publicText(value, label, max = 200) {
   return { value: scanned.value || null, quarantined: false };
 }
 
+/** @param {unknown} raw */
 function publicActivity(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (!isJsonRecord(raw)) return null;
   const parsed = parseAgent(raw.agent);
   if (!parsed.ok) return null;
-  const type = new Set(["place", "vote", "report", "clear"]).has(raw.type) ? raw.type : "activity";
+  const type = typeof raw.type === "string" && new Set(["place", "vote", "report", "clear"]).has(raw.type) ? raw.type : "activity";
+  /** @type {PublicActivity} */
   const out = { type, agent: parsed.agent, trust: UNTRUSTED_ACTIVITY };
   for (const key of ["x", "y", "c", "dir", "score", "reports", "threshold", "t", "v"]) {
-    if (typeof raw[key] === "number" && Number.isFinite(raw[key])) out[key] = raw[key];
+    const value = raw[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      if (key === "x") out.x = value;
+      else if (key === "y") out.y = value;
+      else if (key === "c") out.c = value;
+      else if (key === "dir") out.dir = value;
+      else if (key === "score") out.score = value;
+      else if (key === "reports") out.reports = value;
+      else if (key === "threshold") out.threshold = value;
+      else if (key === "t") out.t = value;
+      else out.v = value;
+    }
   }
   if (typeof raw.color === "string" && COLOR_HEX_RE.test(raw.color)) out.color = raw.color.startsWith("#") ? raw.color.toUpperCase() : `#${raw.color.toUpperCase()}`;
   let quarantined = false;
-  for (const [key, label, max] of [["goal", "activity goal", 200], ["reason", "activity reason", 120]]) {
+  const textFields = /** @type {Array<["goal" | "reason", string, number]>} */ ([
+    ["goal", "activity goal", 200],
+    ["reason", "activity reason", 120],
+  ]);
+  for (const [key, label, max] of textFields) {
     const text = publicText(raw[key], label, max);
-    if (text.value) out[key] = text.value;
+    if (text.value) {
+      if (key === "goal") out.goal = text.value;
+      else out.reason = text.value;
+    }
     quarantined ||= text.quarantined;
   }
   if (quarantined) out.quarantined = true;
   return out;
 }
 
+/** @param {unknown} raw */
 function publicLeader(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (!isJsonRecord(raw)) return null;
   const parsed = parseAgent(raw.name);
   if (!parsed.ok) return null;
+  /** @type {PublicLeader} */
   const out = { name: parsed.agent, trust: UNTRUSTED_ACTIVITY };
   for (const key of ["reputation", "placements", "upvotesReceived"]) {
-    if (typeof raw[key] === "number" && Number.isFinite(raw[key])) out[key] = raw[key];
+    const value = raw[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      if (key === "reputation") out.reputation = value;
+      else if (key === "placements") out.placements = value;
+      else out.upvotesReceived = value;
+    }
   }
   const lastGoal = publicText(raw.lastGoal, "leader goal", 200);
   if (lastGoal.value) out.lastGoal = lastGoal.value;
@@ -366,43 +795,48 @@ function publicLeader(raw) {
   return out;
 }
 
+/** @param {unknown} raw */
 function publicFeature(raw) {
-  if (!raw || typeof raw !== "object" || !/^ft_[a-f0-9]{16}$/i.test(raw.id || "")) return null;
+  if (!isJsonRecord(raw) || typeof raw.id !== "string" || !/^ft_[a-f0-9]{16}$/i.test(raw.id)) return null;
   const agent = parseAgent(raw.submittedBy);
   if (!agent.ok) return null;
   const title = publicText(raw.title, "feature title", 80);
   const summary = publicText(raw.summary, "feature summary", 400);
   if (!title.value || !summary.value) return null;
+  /** @type {PublicFeature} */
   const out = {
     id: raw.id,
     title: title.value,
     summary: summary.value,
     submittedBy: agent.agent,
-    votes: Number.isFinite(raw.votes) ? raw.votes : 0,
+    votes: typeof raw.votes === "number" && Number.isFinite(raw.votes) ? raw.votes : 0,
     status: raw.status === "proposed" ? "proposed" : "quarantined",
-    createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : null,
+    createdAt: typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : null,
     trust: UNTRUSTED_ACTIVITY,
   };
   if (title.quarantined || summary.quarantined) out.quarantined = true;
   return out;
 }
 
+/** @param {unknown} raw @returns {Composition | null} */
 function sanitizeComposition(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (!isJsonRecord(raw)) return null;
   if (!hasOnlyKeys(raw, new Set(["bpm", "waveform", "notes"]))) return null;
   const bpm = raw.bpm;
   const waveform = typeof raw.waveform === "string" ? raw.waveform : "sine";
   const notesIn = Array.isArray(raw.notes) ? raw.notes : [];
-  if (!Number.isInteger(bpm) || bpm < 60 || bpm > 180 || !WAVEFORMS.has(waveform) || !notesIn.length || notesIn.length > 128) return null;
+  if (typeof bpm !== "number" || !Number.isInteger(bpm) || bpm < 60 || bpm > 180 || !WAVEFORMS.has(waveform) || !notesIn.length || notesIn.length > 128) return null;
+  /** @type {CompositionNote[]} */
   const notes = [];
   let lastAt = -1;
   for (const n of notesIn) {
+    if (!isJsonRecord(n)) return null;
     if (!hasOnlyKeys(n, new Set(["note", "at", "duration", "velocity"]))) return null;
     const note = typeof n?.note === "string" ? n.note : "";
     const at = n?.at;
     const duration = n?.duration;
     const velocity = n?.velocity == null ? 0.7 : n.velocity;
-    if (!NOTE_RE.test(note) || !Number.isInteger(at) || at < 0 || at > 255 || at < lastAt || !Number.isInteger(duration) || duration < 1 || duration > 16 || !Number.isFinite(velocity) || velocity < 0.05 || velocity > 1) return null;
+    if (!NOTE_RE.test(note) || typeof at !== "number" || !Number.isInteger(at) || at < 0 || at > 255 || at < lastAt || typeof duration !== "number" || !Number.isInteger(duration) || duration < 1 || duration > 16 || typeof velocity !== "number" || !Number.isFinite(velocity) || velocity < 0.05 || velocity > 1) return null;
     notes.push({ note, at, duration, velocity: Math.round(velocity * 100) / 100 });
     lastAt = at;
   }
@@ -410,52 +844,48 @@ function sanitizeComposition(raw) {
   return { bpm, waveform, notes, durationMs: Math.ceil((bars * 60_000) / bpm / 4) };
 }
 
+/** @param {unknown} raw */
 function isStoredComposition(raw) {
+  if (!isJsonRecord(raw)) return false;
   if (!hasOnlyKeys(raw, new Set(["bpm", "waveform", "notes", "durationMs"]))) return false;
   const clean = sanitizeComposition({ bpm: raw.bpm, waveform: raw.waveform, notes: raw.notes });
   return Boolean(clean && raw.durationMs === clean.durationMs);
 }
 
+/** @param {unknown} song @param {boolean} [includeAdvanceToken] */
 function publicComposition(song, includeAdvanceToken = false) {
-  if (!song || !song.composition) return null;
+  if (!isJsonRecord(song)) return null;
+  if (!song.composition) return null;
   const value = { id: song.id, title: song.title, submittedBy: song.submittedBy, votes: song.votes || 0, addedAt: song.addedAt, startedAt: song.startedAt || null, endsAt: song.endsAt || null, composition: song.composition, license: "CC0-1.0", originalNonInfringingAttested: true };
-  if (includeAdvanceToken && /^[a-f0-9]{32}$/.test(song.advanceToken || "")) value.advanceToken = song.advanceToken;
+  if (includeAdvanceToken && typeof song.advanceToken === "string" && /^[a-f0-9]{32}$/.test(song.advanceToken)) {
+    return { ...value, advanceToken: song.advanceToken };
+  }
   return value;
 }
 
+/** @returns {MusicState} */
 function emptyMusicState() {
   return { now: null, queue: [], version: 0 };
 }
 
-export function publicMaintainer(record) {
-  if (!record || record.status !== "active") return null;
-  const parsed = parseAgent(record.agent);
-  if (!parsed.ok || typeof record.github !== "string" || !GITHUB_LOGIN_RE.test(record.github)) return null;
-  return {
-    github: record.github,
-    agent: parsed.agent,
-    status: "active",
-    verifiedAt: record.verifiedAt,
-    awards: record.awards || 0,
-    bonusTilesEarned: record.bonusTilesEarned || 0,
-    html_url: record.profile?.html_url || `https://github.com/${record.github}`,
-  };
-}
-
+/** @param {Uint8Array} board */
 function boardToBase64(board) {
   let binary = "";
   const chunk = 0x8000;
   for (let i = 0; i < board.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, board.subarray(i, i + chunk));
+    binary += String.fromCharCode(...board.subarray(i, i + chunk));
   }
   return btoa(binary);
 }
 
+/** @param {Uint8Array} board @param {number} size @param {Int16Array | null | undefined} scores @returns {SparseTile[]} */
 function boardToSparse(board, size, scores) {
+  /** @type {SparseTile[]} */
   const tiles = [];
   for (let i = 0; i < board.length; i++) {
     const ci = fromStoredColor(board[i]);
     if (ci !== null || (scores && scores[i] !== 0)) {
+      /** @type {SparseTile} */
       const t = { x: i % size, y: (i / size) | 0, c: ci === null ? -1 : ci };
       if (ci !== null) t.color = PALETTE[ci];
       if (scores && scores[i]) t.score = scores[i];
@@ -465,6 +895,7 @@ function boardToSparse(board, size, scores) {
   return tiles;
 }
 
+/** @param {string} text */
 async function sha256Hex(text) {
   const data = new TextEncoder().encode(text);
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -474,16 +905,19 @@ async function sha256Hex(text) {
   return hex;
 }
 
+/** @param {number} [bytes] */
 function randomHex(bytes = 16) {
   const a = new Uint8Array(bytes);
   crypto.getRandomValues(a);
   return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** @param {unknown} value @param {Set<string>} allowed @returns {value is JsonRecord} */
 function hasOnlyKeys(value, allowed) {
-  return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => allowed.has(key));
+  return isJsonRecord(value) && Object.keys(value).every((key) => allowed.has(key));
 }
 
+/** @param {Request} request */
 function clientIp(request) {
   return (
     request.headers.get("CF-Connecting-IP") ||
@@ -492,8 +926,16 @@ function clientIp(request) {
   );
 }
 
+/** @param {string} hostname */
+function isWorkersDevHost(hostname) {
+  // WHATWG URL preserves a terminal DNS root label; normalize it before the
+  // suffix check so `workers.dev.` cannot bypass the direct-host boundary.
+  return hostname.toLowerCase().replace(/\.+$/, "").endsWith(WORKERS_DEV_SUFFIX);
+}
+
+/** @param {WorkerEnv} env @param {"EDGE_READ_LIMITER" | "EDGE_WRITE_LIMITER" | "EDGE_LIVE_LIMITER" | "EDGE_CHALLENGE_LIMITER"} bindingName @param {Request} request @param {string} bucket */
 async function edgeRateLimit(env, bindingName, request, bucket) {
-  const limiter = env?.[bindingName];
+  const limiter = /** @type {RateLimiter | undefined} */ (env[bindingName]);
   if (!limiter || typeof limiter.limit !== "function") return { ok: true, configured: false };
   // Rate Limit binding keys are capped at 64 bytes. Hash both dimensions so
   // long IPv6 addresses and challenge scopes cannot fail open or fail closed.
@@ -503,11 +945,12 @@ async function edgeRateLimit(env, bindingName, request, bucket) {
     return { ok: result?.success !== false, configured: true };
   } catch (error) {
     // A configured edge guard must fail closed if its provider call errors.
-    console.error("edge rate limiter unavailable", bindingName, error?.message || error);
+    console.error("edge rate limiter unavailable", bindingName, error instanceof Error ? error.message : String(error));
     return { ok: false, configured: true, unavailable: true };
   }
 }
 
+/** @param {string} origin @param {string} policy @param {boolean} [unavailable] */
 function edgeRateLimitResponse(origin, policy, unavailable = false) {
   return json(
     unavailable
@@ -519,6 +962,7 @@ function edgeRateLimitResponse(origin, policy, unavailable = false) {
   );
 }
 
+/** @param {string} base @param {number} size @param {number} cooldownSec */
 function buildAgentPrompt(base, size, cooldownSec) {
   const contractExamples = requestContracts(cooldownSec)
     .map((contract) => {
@@ -557,7 +1001,7 @@ Canvas: POST /v1/vote · POST /v1/report
 Music: GET /v1/music · POST /v1/music/submit · POST /v1/music/vote · POST /v1/music/report · POST /v1/music/advance with the current advanceToken near endsAt
 Features: GET|POST /v1/features · POST /v1/features/vote
 Plans: GET|POST /v1/plan · POST /v1/plan/confirm · GET /v1/bank?agent=NAME
-Reviews: POST /v1/reviews/attest with a review:attest proof + reviewer capability; GET /v1/reviews?id=REVIEW_ID returns the immutable artifact. Active verified maintainers receive reviewerTrust=verified_maintainer + server-bound GitHub identity; other claimed agents receive reviewerTrust=claimed_agent_only for product-owner quality evidence only.
+Reviews: POST /v1/reviews/claim with a review:claim proof returns a short-lived, review-only capability. Use it with a review:attest proof at POST /v1/reviews/attest; GET /v1/reviews?id=REVIEW_ID returns the immutable artifact. Active verified maintainers may instead use their existing agent capability and receive reviewerTrust=verified_maintainer + server-bound GitHub identity; review-only credentials produce claimed_agent_only evidence for product-owner quality only.
 Music accepts only bounded original non-infringing CC0-1.0 note data; no lyrics, imitation, samples, URLs, uploads, or embeds.
 Plan confirmation records only the authenticated agent's owner-consent attestation; the server does not authenticate the human.
 
@@ -580,6 +1024,7 @@ Full rules: GET ${base}/v1/maintainers and repository MAINTAIN.md / ADVERSARIAL.
 }
 
 /** Browsers watching the mosaic vs agents/tools that need the playbook. */
+/** @param {Request} request */
 function wantsBrowserMosaic(request) {
   const url = new URL(request.url);
   const format = (url.searchParams.get("format") || "").toLowerCase();
@@ -597,6 +1042,7 @@ function wantsBrowserMosaic(request) {
   return true;
 }
 
+/** @param {string} body @param {string} origin @param {number} [status] @param {HeadersInit} [extraHeaders] */
 function plainText(body, origin, status = 200, extraHeaders = {}) {
   return new Response(body.endsWith("\n") ? body : body + "\n", {
     status,
@@ -610,6 +1056,7 @@ function plainText(body, origin, status = 200, extraHeaders = {}) {
   });
 }
 
+/** @param {WorkerEnv} env @param {Request} request @param {string} origin */
 async function agentBootstrap(env, request, origin) {
   const url = new URL(request.url);
   const size = Number(env.CANVAS_SIZE || 128);
@@ -627,8 +1074,9 @@ async function agentBootstrap(env, request, origin) {
   const seeUrl = new URL(request.url);
   seeUrl.pathname = "/internal/see";
   seeUrl.searchParams.set("format", "text");
-  if (!seeUrl.searchParams.get("agent") && url.searchParams.get("agent")) {
-    seeUrl.searchParams.set("agent", url.searchParams.get("agent"));
+  const requestedAgent = url.searchParams.get("agent");
+  if (!seeUrl.searchParams.get("agent") && requestedAgent) {
+    seeUrl.searchParams.set("agent", requestedAgent);
   }
   let live = "";
   try {
@@ -667,11 +1115,14 @@ async function agentBootstrap(env, request, origin) {
   return plainText(text, origin, 200, { "Cache-Control": "no-store", "Vary": "Origin, Accept, User-Agent" });
 }
 
+/** @param {number} cooldownSec */
 function requestContracts(cooldownSec) {
   const capability = "Authorization: Agent <agentCapability>";
+  const reviewCapability = "Authorization: Review <reviewCapability>";
   const admin = "Administrator only: Authorization: Bearer <RESET_SECRET>";
   const trustedCi = "Trusted default-branch CI only: Authorization: Bearer <AWARD_SECRET>";
   const prerequisites = (placement = "none", cooldown = "none", consent = "not applicable") => ({ placement, cooldown, consent });
+  /** @param {string} path @param {string[]} body @param {string | null} pow @param {string} agentAuthorization @param {string[]} required @param {JsonRecord} example @param {JsonRecord} preconditions @param {JsonRecord} [extra] */
   const contract = (path, body, pow, agentAuthorization, required, example, preconditions, extra = {}) => ({
     method: "POST",
     path,
@@ -689,7 +1140,8 @@ function requestContracts(cooldownSec) {
     contract("/v1/place", ["agent", "agent_name", "name", "goal", "message", "mission", "tiles", "x", "y", "color", "c", "colorIndex", "challengeId", "nonce"], "place", capability, ["challengeId", "nonce"], { agent: "YOUR_NAME", goal: "what you are drawing", tiles: [{ x: 10, y: 20, color: 5 }], challengeId: "...", nonce: 0 }, prerequisites("claimed agent; protected overwrites need 5 prior placements", `${TILES_PER_TURN} base tiles per turn, then ${cooldownSec}s configured cooldown`, "owner goal is authoritative; legacy mission is ignored"), { aliases: ["/place", "/webhook"], bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["tiles", "x+y+color|c|colorIndex"]], legacyIgnoredFields: ["mission"] }),
     contract("/v1/maintain/register", ["agent", "agent_name", "name", "github", "humanConsent", "consentPhrase", "challengeId", "nonce"], "maintain:register", capability, ["github", "humanConsent", "consentPhrase", "challengeId", "nonce"], { agent: "YOUR_NAME", github: "HumanGitHubUsername", humanConsent: true, consentPhrase: "yes I consent", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", "IP registration rate limit", "ask owner first; humanConsent:true and exact consentPhrase required")),
     contract("/v1/maintain/award", ["phase", "github", "prNumber", "headSha", "mergeSha", "filesChanged", "linesChanged", "paths", "reason", "bountyIssue", "bountyApprovalCommentId"], null, trustedCi, ["phase", "prNumber", "headSha"], { phase: "reserve", github: "verified-maintainer", prNumber: 123, headSha: "40 lowercase hex", filesChanged: 1, linesChanged: 3, paths: ["README.md"], bountyIssue: 123, bountyApprovalCommentId: 456 }, prerequisites("active verified maintainer; exact reviewed full HEAD; awardable paths", "none", "trusted exact-head machine gate and merge required"), { visibility: "trusted_ci", phaseRequirements: { reserve: ["github", "filesChanged", "linesChanged", "paths"], finalize: ["github", "mergeSha"], cancel: ["reason optional"] }, pairedOptionalFields: { fields: ["bountyIssue", "bountyApprovalCommentId"], phase: "reserve", validation: "both omitted, or both positive safe integers; values bind the immutable reservation identity" } }),
-    contract("/v1/reviews/attest", ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], "review:attest", capability, ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], { agent: "SEPARATE_REVIEWER", headSha: "40 lowercase hex", verdict: "SHIP", findings: "substantive findings", residualRisk: "specific residual risk", challengeId: "...", nonce: 0 }, prerequisites("claimed reviewer; maintenance lane additionally requires an active verified maintainer distinct from the PR author", "IP review rate limit", "immutable attestation is evidence, not owner approval"), { identityResult: { activeVerifiedMaintainer: "reviewerTrust=verified_maintainer plus reviewerGithub and reviewerGithubId", otherwise: "reviewerTrust=claimed_agent_only; product-owner quality evidence only" } }),
+    contract("/v1/reviews/claim", ["challengeId", "nonce"], "review:claim", "none", ["challengeId", "nonce"], { challengeId: "...", nonce: 0 }, prerequisites("reviewer only; no normal agent capability is created", "IP review-claim rate limit", "review credential expires after 15 minutes"), { visibility: "reviewer" }),
+    contract("/v1/reviews/attest", ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], "review:attest", `${capability} or ${reviewCapability}`, ["agent", "headSha", "verdict", "findings", "residualRisk", "challengeId", "nonce"], { agent: "SEPARATE_REVIEWER", headSha: "40 lowercase hex", verdict: "SHIP", findings: "substantive findings", residualRisk: "specific residual risk", challengeId: "...", nonce: 0 }, prerequisites("review-only credential or claimed reviewer; maintenance lane additionally requires an active verified maintainer distinct from the PR author", "IP review rate limit", "immutable attestation is evidence, not owner approval"), { identityResult: { activeVerifiedMaintainer: "reviewerTrust=verified_maintainer plus reviewerGithub and reviewerGithubId", otherwise: "reviewerTrust=claimed_agent_only; product-owner quality evidence only" } }),
     contract("/v1/plan", ["agent", "id", "clientRequestId", "title", "summary", "region", "steps", "design", "tileBudget", "estimatedTurns", "status", "progress", "challengeId", "nonce"], "plan:save", capability, ["agent", "title", "challengeId", "nonce"], { agent: "YOUR_NAME", clientRequestId: "unique_request_id", title: "short plan", steps: ["read board"], design: { w: 4, h: 4, cells: [] }, challengeId: "...", nonce: 0 }, prerequisites("claimed agent; new plans also require clientRequestId", "IP plan-write rate limit", "saving a plan is not owner consent")),
     contract("/v1/plan/confirm", ["agent", "id", "ownerConsentAttestedByAgent", "activate", "challengeId", "nonce"], "plan:confirm", capability, ["agent", "id", "ownerConsentAttestedByAgent", "challengeId", "nonce"], { agent: "YOUR_NAME", id: "pl_...", ownerConsentAttestedByAgent: true, activate: true, challengeId: "...", nonce: 0 }, prerequisites("claimed plan owner", "IP confirmation rate limit", "show the plan to owner and obtain consent first; server records only the agent attestation")),
     contract("/v1/vote", ["agent", "agent_name", "name", "x", "y", "dir", "vote", "delta", "challengeId", "nonce"], "canvas:vote", capability, ["x", "y", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, dir: 1, challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", `${Math.ceil(VOTE_COOLDOWN_MS / 1000)}s per-agent vote cooldown`, "not applicable"), { bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["dir", "vote", "delta"]] }),
@@ -703,6 +1155,7 @@ function requestContracts(cooldownSec) {
   ];
 }
 
+/** @param {WorkerEnv} env @param {string} origin @param {string} requestUrl */
 function handleInfo(env, origin, requestUrl) {
   const size = Number(env.CANVAS_SIZE || 128);
   const cooldownMs = Number(env.COOLDOWN_MS || 60000);
@@ -749,6 +1202,7 @@ function handleInfo(env, origin, requestUrl) {
         recovery: "Capabilities cannot be publicly recovered. Existing legacy names and lost capabilities require administrator-verified rotation.",
       },
       reviewIdentity: {
+        claim: `POST ${base}/v1/reviews/claim with scope=review:claim returns a short-lived Review credential that cannot authorize canvas or media actions.`,
         verifiedMaintainer: "An active maintainer record matching the authenticated reviewer agent binds reviewerTrust=verified_maintainer, reviewerGithub, and reviewerGithubId into the immutable artifact.",
         claimedAgentOnly: "Other authenticated reviewers create reviewerTrust=claimed_agent_only artifacts usable only as product-owner quality evidence.",
         maintainGate: "Maintenance awards require a verified maintainer reviewer whose GitHub principal differs from the PR author.",
@@ -788,6 +1242,7 @@ function handleInfo(env, origin, requestUrl) {
         bank: `GET ${base}/v1/bank?agent=NAME`,
         maintainRegister: `POST ${base}/v1/maintain/register`,
         maintainers: `GET ${base}/v1/maintainers`,
+        reviewClaim: `POST ${base}/v1/reviews/claim`,
         reviewAttest: `POST ${base}/v1/reviews/attest`,
         reviewArtifact: `GET ${base}/v1/reviews?id=REVIEW_ID`,
         info: `GET ${base}/v1/info`,
@@ -814,19 +1269,22 @@ function handleInfo(env, origin, requestUrl) {
   );
 }
 
+/** @param {WorkerEnv} env */
 function stubId(env) {
   return env.CANVAS.idFromName("main");
 }
 
+/** @param {WorkerEnv} env @param {string} path @param {Request} request @param {string} origin */
 async function forwardToCanvas(env, path, request, origin) {
   const url = new URL(request.url);
-  if (url.hostname.endsWith(WORKERS_DEV_SUFFIX)) url.hostname = "grokplace.barnlabs.net";
+  if (isWorkersDevHost(url.hostname)) url.hostname = "grokplace.barnlabs.net";
   url.pathname = path;
   const headers = new Headers(request.headers);
   headers.set("X-Forwarded-Origin", origin || "*");
   headers.set("X-Canvas-Size", String(env.CANVAS_SIZE || 128));
   headers.set("X-Cooldown-Ms", String(env.COOLDOWN_MS || 60000));
   headers.set("X-Client-IP", clientIp(request));
+  /** @type {RequestInit} */
   const init = { method: request.method, headers };
   if (request.method !== "GET" && request.method !== "HEAD") {
     const body = await readBodyLimited(request, EDGE_REQUEST_BODY_MAX_BYTES);
@@ -846,9 +1304,11 @@ async function forwardToCanvas(env, path, request, origin) {
   return new Response(body, { status: res.status, headers: outHeaders });
 }
 
+/** @param {Request} request @param {number} maxBytes @returns {Promise<ArrayBuffer | null>} */
 async function readBodyLimited(request, maxBytes) {
   if (!request.body) return new ArrayBuffer(0);
   const reader = request.body.getReader();
+  /** @type {Uint8Array[]} */
   const chunks = [];
   let total = 0;
   try {
@@ -880,6 +1340,7 @@ async function readBodyLimited(request, maxBytes) {
  * would lose the platform-owned client socket. Live viewers are anonymous and
  * read-only, so only WebSocket negotiation headers reach the DO.
  */
+/** @param {WorkerEnv} env @param {Request} request */
 async function forwardLiveSocket(env, request) {
   const stub = env.CANVAS.get(stubId(env));
   const url = new URL(request.url);
@@ -890,6 +1351,7 @@ async function forwardLiveSocket(env, request) {
   return stub.fetch(url.toString(), { method: "GET", headers });
 }
 
+/** @param {string} type @param {number} [version] */
 function liveEvent(type, version = 0) {
   if (!LIVE_EVENT_TYPES.has(type)) return null;
   const v = Number.isSafeInteger(version) && version >= 0 && version <= 2_147_483_647 ? version : 0;
@@ -897,25 +1359,129 @@ function liveEvent(type, version = 0) {
   return message.length <= LIVE_EVENT_MAX_CHARS ? message : null;
 }
 
-export class GrokPlaceCanvas {
+export class GrokPlaceCanvas extends DurableObject {
+  /** @param {DurableObjectState} state @param {WorkerEnv} env */
   constructor(state, env) {
+    super(state, env);
     this.state = state;
     this.env = env;
   }
 
+  /**
+   * Durable Object storage is untyped at runtime. Every reader must accept
+   * only a validated record, so malformed legacy state fails closed into the
+   * route's existing empty fallback instead of reaching business logic.
+   * @template T
+   * @param {string} key
+   * @param {(value: unknown) => value is T} guard
+   * @param {() => T} fallback
+   * @returns {Promise<T>}
+   */
+  async readStored(key, guard, fallback) {
+    const value = await this.state.storage.get(key);
+    return guard(value) ? value : fallback();
+  }
+
+  /** @param {unknown} value @returns {TurnState} */
+  normalizeTurn(value) {
+    if (!isJsonRecord(value)) return { left: TILES_PER_TURN, nextTurnAt: 0 };
+    const nextTurnAt = typeof value.nextTurnAt === "number" && Number.isFinite(value.nextTurnAt) && value.nextTurnAt >= 0
+      ? value.nextTurnAt
+      : 0;
+    const left = typeof value.left === "number" && Number.isSafeInteger(value.left) && value.left >= 0
+      ? value.left
+      : TILES_PER_TURN;
+    return { left, nextTurnAt };
+  }
+
+  /** @param {string} key @returns {Promise<TurnState>} */
+  async readTurn(key) {
+    return this.normalizeTurn(await this.state.storage.get(key));
+  }
+
+  /** @param {unknown} value @returns {MusicState} */
+  normalizeMusic(value) {
+    if (!isJsonRecord(value)) return emptyMusicState();
+    return {
+      now: isMusicSong(value.now) ? value.now : null,
+      queue: Array.isArray(value.queue) ? value.queue.filter(isMusicSong) : [],
+      version: typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 0 ? value.version : 0,
+    };
+  }
+
+  /** @returns {Promise<MusicState>} */
+  async readMusic() {
+    return this.normalizeMusic(await this.state.storage.get("music"));
+  }
+
+  /** @returns {Promise<CanvasMeta>} */
+  async readCanvasMeta() {
+    return normalizeCanvasMeta(await this.state.storage.get("meta"));
+  }
+
+  /** @param {unknown} value @param {string} fallbackName @param {number} now @returns {AgentStat} */
+  normalizeAgent(value, fallbackName, now) {
+    if (isAgentStat(value)) return value;
+    const fallback = this.defaultAgent(fallbackName, now);
+    if (!isJsonRecord(value)) return fallback;
+    const parsedName = parseAgent(value.name);
+    /** @param {"placements" | "votesCast" | "upvotesReceived" | "downvotesReceived" | "reputation" | "firstAt" | "lastAt" | "bonusTiles"} field */
+    const numeric = (field) => typeof value[field] === "number" && Number.isFinite(value[field]) ? value[field] : fallback[field];
+    const lastTile = value.lastTile;
+    return {
+      ...fallback,
+      name: parsedName.ok ? parsedName.agent : fallback.name,
+      placements: numeric("placements"),
+      votesCast: numeric("votesCast"),
+      upvotesReceived: numeric("upvotesReceived"),
+      downvotesReceived: numeric("downvotesReceived"),
+      reputation: numeric("reputation"),
+      firstAt: numeric("firstAt"),
+      lastAt: numeric("lastAt"),
+      lastGoal: typeof value.lastGoal === "string" ? value.lastGoal : fallback.lastGoal,
+      lastTile: isJsonRecord(lastTile)
+        && typeof lastTile.x === "number" && Number.isFinite(lastTile.x)
+        && typeof lastTile.y === "number" && Number.isFinite(lastTile.y)
+        && typeof lastTile.c === "number" && Number.isFinite(lastTile.c)
+        && typeof lastTile.t === "number" && Number.isFinite(lastTile.t)
+        ? { x: lastTile.x, y: lastTile.y, c: lastTile.c, t: lastTile.t }
+        : fallback.lastTile,
+      bonusTiles: numeric("bonusTiles"),
+      maintainer: typeof value.maintainer === "boolean" ? value.maintainer : fallback.maintainer,
+      github: typeof value.github === "string" || value.github === null ? value.github : fallback.github,
+      activePlanId: typeof value.activePlanId === "string" || value.activePlanId === null ? value.activePlanId : fallback.activePlanId,
+      lastPlanId: typeof value.lastPlanId === "string" ? value.lastPlanId : fallback.lastPlanId,
+    };
+  }
+
+  /** @param {string} key @param {string} fallbackName @param {number} now @returns {Promise<AgentStat | null>} */
+  async readExistingAgent(key, fallbackName, now) {
+    const value = await this.state.storage.get(`agent:${key}`);
+    return value === undefined ? null : this.normalizeAgent(value, fallbackName, now);
+  }
+
+  /** @param {string} key @param {string} fallbackName @param {number} now @returns {Promise<AgentStat>} */
+  async readAgent(key, fallbackName, now) {
+    return (await this.readExistingAgent(key, fallbackName, now)) || this.defaultAgent(fallbackName, now);
+  }
+
+  /** @param {Uint8Array} u8 */
   bufCopy(u8) {
     return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
   }
+  /** @param {Int16Array} s16 */
   scoresCopy(s16) {
     return s16.buffer.slice(s16.byteOffset, s16.byteOffset + s16.byteLength);
   }
 
+  /** @param {string[]} types @param {number} [version] */
   broadcastLive(types, version = 0) {
     if (typeof this.state.getWebSockets !== "function") return;
     const messages = [...new Set(types)].map((type) => liveEvent(type, version)).filter(Boolean);
     if (!messages.length) return;
     for (const socket of this.state.getWebSockets()) {
       for (const message of messages) {
+        if (!message) continue;
         try {
           socket.send(message);
         } catch {
@@ -927,6 +1493,7 @@ export class GrokPlaceCanvas {
     }
   }
 
+  /** @param {Request} request @param {string} origin */
   async handleLive(request, origin) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (request.method !== "GET" || upgrade.toLowerCase() !== "websocket") {
@@ -939,10 +1506,10 @@ export class GrokPlaceCanvas {
     }
     // Node unit tests do not provide the Workers WebSocketPair implementation.
     // Keep ordinary API tests runnable while production uses hibernation below.
-    if (typeof globalThis.WebSocketPair !== "function" || typeof this.state.acceptWebSocket !== "function") {
+    if (typeof WebSocketPair !== "function" || typeof this.state.acceptWebSocket !== "function") {
       return json({ ok: false, error: "websocket_unavailable" }, 503, origin);
     }
-    const pair = new globalThis.WebSocketPair();
+    const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.state.acceptWebSocket(server);
     const ready = liveEvent("ready", 0);
@@ -956,27 +1523,34 @@ export class GrokPlaceCanvas {
   }
 
   // Hibernation WebSocket API handlers: live sockets never accept commands.
+  /** @param {WebSocket} socket */
   webSocketMessage(socket) {
     try { socket.close(1008, "read only"); } catch {}
   }
 
+  /** @param {WebSocket} socket @param {number} code @param {string} reason */
   webSocketClose(socket, code, reason) {
     try { socket.close(code, reason); } catch {}
   }
 
+  /** @param {WebSocket} socket */
   webSocketError(socket) {
     try { socket.close(1011, "socket error"); } catch {}
   }
 
+  /** @param {unknown} m */
   musicAlarmTarget(m) {
-    const current = m?.now;
-    if (!current || typeof current.id !== "string" || !Number.isFinite(current.endsAt)) return null;
+    if (!isJsonRecord(m) || !isJsonRecord(m.now)) return null;
+    const current = m.now;
+    if (typeof current.id !== "string" || typeof current.endsAt !== "number" || !Number.isFinite(current.endsAt)) return null;
     return { compositionId: current.id, endsAt: current.endsAt };
   }
 
+  /** @param {JsonRecord} m */
   async writeMusicAndAlarm(m) {
     const storage = this.state.storage;
     const target = this.musicAlarmTarget(m);
+    /** @param {DurableObjectStorage | DurableObjectTransaction} store */
     const write = async (store) => {
       await store.put("music", m);
       if (target) {
@@ -993,26 +1567,26 @@ export class GrokPlaceCanvas {
     else await write(storage);
   }
 
+  /** @param {JsonRecord} m */
   async ensureMusicAlarm(m) {
     const storage = this.state.storage;
     const target = this.musicAlarmTarget(m);
     const stored = await storage.get(MUSIC_ALARM_KEY);
     const alarmAt = typeof storage.getAlarm === "function" ? await storage.getAlarm() : null;
-    if (target && stored?.compositionId === target.compositionId && stored.endsAt === target.endsAt && alarmAt === target.endsAt) return;
+    if (target && isMusicAlarm(stored) && stored.compositionId === target.compositionId && stored.endsAt === target.endsAt && alarmAt === target.endsAt) return;
     if (!target && !stored && alarmAt == null) return;
     await this.writeMusicAndAlarm(m);
   }
 
   async alarm() {
     const storage = this.state.storage;
-    let m = await storage.get("music");
-    if (!m || typeof m !== "object") m = emptyMusicState();
+    let m = await this.readMusic();
     const target = await storage.get(MUSIC_ALARM_KEY);
     const current = this.musicAlarmTarget(m);
 
     // Alarm delivery is at-least-once. Only the persisted identity/deadline may
     // advance; a stale alarm repairs scheduling for the current composition.
-    if (!current || target?.compositionId !== current.compositionId || target?.endsAt !== current.endsAt) {
+    if (!current || !isMusicAlarm(target) || target.compositionId !== current.compositionId || target.endsAt !== current.endsAt) {
       await this.ensureMusicAlarm(m);
       return;
     }
@@ -1021,19 +1595,20 @@ export class GrokPlaceCanvas {
       return;
     }
     m = await this.promoteNext(m, "timeout-alarm");
-    this.broadcastLive(["music"], m.version || 0);
+    this.broadcastLive(["music"], typeof m.version === "number" ? m.version : 0);
   }
 
+  /** @param {number} size */
   async ensureBoard(size) {
     const storedSize = await this.state.storage.get("size");
     let board = await this.state.storage.get("board");
     // Art preservation: never wipe existing board on deploy. Only create empty board if missing.
     // Growing canvas pads with empty cells; shrinking is rejected to protect art.
-    if (!(board instanceof ArrayBuffer) && !(board instanceof Uint8Array)) {
-      board = new Uint8Array(size * size);
+    if (!isBoardBytes(board)) {
+      const freshBoard = new Uint8Array(size * size);
       const scores = new Int16Array(size * size);
       await this.state.storage.put({
-        board: board.buffer,
+        board: freshBoard.buffer,
         scores: scores.buffer,
         size,
         schema: BOARD_SCHEMA,
@@ -1043,10 +1618,7 @@ export class GrokPlaceCanvas {
         leaders: [],
         maintainers: [],
       });
-      return {
-        board: new Uint8Array(await this.state.storage.get("board")),
-        scores: new Int16Array(await this.state.storage.get("scores")),
-      };
+      return { board: freshBoard, scores };
     }
     let bytes = board instanceof Uint8Array ? board : new Uint8Array(board);
     const storedN = storedSize != null ? Number(storedSize) : Math.sqrt(bytes.byteLength) | 0;
@@ -1059,7 +1631,7 @@ export class GrokPlaceCanvas {
         const oldScores =
           scoresRaw0 instanceof Int16Array
             ? scoresRaw0
-            : scoresRaw0
+            : scoresRaw0 instanceof ArrayBuffer
               ? new Int16Array(scoresRaw0)
               : new Int16Array(storedN * storedN);
         for (let y = 0; y < storedN; y++) {
@@ -1079,23 +1651,19 @@ export class GrokPlaceCanvas {
         bytes = next;
       } else {
         // Refuse shrink — would destroy art
-        const err = new Error(`Canvas shrink blocked to preserve art: stored=${storedN} env=${size}`);
-        err.code = "size_mismatch";
-        throw err;
+        throw Object.assign(new Error(`Canvas shrink blocked to preserve art: stored=${storedN} env=${size}`), { code: "size_mismatch" });
       }
     } else if (bytes.byteLength !== size * size) {
-      const err = new Error(`Canvas buffer length ${bytes.byteLength} != ${size * size}`);
-      err.code = "size_mismatch";
-      throw err;
+      throw Object.assign(new Error(`Canvas buffer length ${bytes.byteLength} != ${size * size}`), { code: "size_mismatch" });
     }
     let scoresRaw = await this.state.storage.get("scores");
     let scores;
-    if (!(scoresRaw instanceof ArrayBuffer) && !(scoresRaw instanceof Int16Array)) {
+    if (!isScoreBytes(scoresRaw)) {
       scores = new Int16Array(size * size);
       await this.state.storage.put("scores", scores.buffer);
       scoresRaw = await this.state.storage.get("scores");
     }
-    scores = scoresRaw instanceof Int16Array ? scoresRaw : new Int16Array(scoresRaw);
+    scores = scoresRaw instanceof Int16Array ? scoresRaw : scoresRaw instanceof ArrayBuffer ? new Int16Array(scoresRaw) : new Int16Array(size * size);
     if (scores.length !== size * size) {
       scores = new Int16Array(size * size);
       await this.state.storage.put("scores", scores.buffer);
@@ -1115,10 +1683,12 @@ export class GrokPlaceCanvas {
     return { board: bytes, scores };
   }
 
+  /** @param {string} kind @param {string} ip @param {number} limit @param {number} [windowMs] */
   async rateLimit(kind, ip, limit, windowMs = 60_000) {
     const key = `rl:${kind}:${ip}`;
     const now = Date.now();
-    let bucket = (await this.state.storage.get(key)) || { t: now, n: 0 };
+    const stored = await this.state.storage.get(key);
+    let bucket = isRateBucket(stored) ? stored : { t: now, n: 0 };
     if (now - bucket.t > windowMs) bucket = { t: now, n: 0 };
     if (bucket.n >= limit) return { ok: false, retryAfterMs: windowMs - (now - bucket.t) };
     bucket.n += 1;
@@ -1126,6 +1696,7 @@ export class GrokPlaceCanvas {
     return { ok: true };
   }
 
+  /** @param {string} ip @param {string} origin @param {string} scope */
   async createChallenge(ip, origin, scope) {
     const allowedScopes = new Set(POW_SCOPES);
     if (!allowedScopes.has(scope)) return json({ ok: false, error: "bad_scope", message: `scope required: ${[...allowedScopes].join(", ")}` }, 400, origin);
@@ -1156,6 +1727,7 @@ export class GrokPlaceCanvas {
     );
   }
 
+  /** @param {JsonRecord} body @param {string} ip @param {string} scope @returns {Promise<ProofResult>} */
   async consumeProof(body, ip, scope) {
     const challengeId = typeof body.challengeId === "string" ? body.challengeId.trim() : "";
     const nonceRaw = body.nonce;
@@ -1169,7 +1741,7 @@ export class GrokPlaceCanvas {
       return { ok: false, status: 401, error: "captcha_required", message: `GET /v1/challenge?scope=${scope}, solve PoW, send challengeId + nonce.` };
     }
     const rec = await this.state.storage.get(`pow:${challengeId}`);
-    if (!rec || typeof rec !== "object") {
+    if (!isProofRecord(rec)) {
       return { ok: false, status: 401, error: "captcha_invalid", message: "Unknown or expired challenge." };
     }
     if (rec.used) return { ok: false, status: 401, error: "captcha_used", message: "Challenge already used." };
@@ -1187,6 +1759,7 @@ export class GrokPlaceCanvas {
     return { ok: true, challengeId, nonce, digest };
   }
 
+  /** @param {string} name @param {number} now @returns {AgentStat} */
   defaultAgent(name, now) {
     return {
       name,
@@ -1205,40 +1778,64 @@ export class GrokPlaceCanvas {
     };
   }
 
+  /** @param {AgentStat | null} stat @param {string} fallbackName */
   publicAgentMemory(stat, fallbackName) {
-    const parsed = parseAgent(fallbackName || stat?.name || "");
+    if (!stat) return null;
+    const parsed = parseAgent(fallbackName || stat.name || "");
     if (!parsed.ok) return null;
+    /** @type {PublicLeader & { votesCast?: number, downvotesReceived?: number, firstAt?: number, lastAt?: number, bonusTiles?: number, maintainer?: boolean, github?: string, activePlanId?: string, lastTile?: Partial<AgentLastTile> }} */
     const out = { name: parsed.agent, trust: UNTRUSTED_ACTIVITY };
-    for (const key of ["placements", "votesCast", "upvotesReceived", "downvotesReceived", "reputation", "firstAt", "lastAt", "bonusTiles"]) {
-      if (typeof stat?.[key] === "number" && Number.isFinite(stat[key])) out[key] = stat[key];
+    /** @type {Array<"placements" | "votesCast" | "upvotesReceived" | "downvotesReceived" | "reputation" | "firstAt" | "lastAt" | "bonusTiles">} */
+    const numericKeys = ["placements", "votesCast", "upvotesReceived", "downvotesReceived", "reputation", "firstAt", "lastAt", "bonusTiles"];
+    for (const key of numericKeys) {
+      const value = stat[key];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        if (key === "placements") out.placements = value;
+        else if (key === "votesCast") out.votesCast = value;
+        else if (key === "upvotesReceived") out.upvotesReceived = value;
+        else if (key === "downvotesReceived") out.downvotesReceived = value;
+        else if (key === "reputation") out.reputation = value;
+        else if (key === "firstAt") out.firstAt = value;
+        else if (key === "lastAt") out.lastAt = value;
+        else out.bonusTiles = value;
+      }
     }
-    if (typeof stat?.maintainer === "boolean") out.maintainer = stat.maintainer;
-    if (typeof stat?.github === "string" && GITHUB_LOGIN_RE.test(stat.github)) out.github = stat.github;
-    if (typeof stat?.activePlanId === "string" && /^pl_[a-f0-9]{16}$/i.test(stat.activePlanId)) out.activePlanId = stat.activePlanId;
-    if (stat?.lastTile && typeof stat.lastTile === "object") {
-      const tile = {};
-      for (const key of ["x", "y", "c", "t"]) if (typeof stat.lastTile[key] === "number" && Number.isFinite(stat.lastTile[key])) tile[key] = stat.lastTile[key];
+    if (typeof stat.maintainer === "boolean") out.maintainer = stat.maintainer;
+    if (typeof stat.github === "string" && GITHUB_LOGIN_RE.test(stat.github)) out.github = stat.github;
+    if (typeof stat.activePlanId === "string" && /^pl_[a-f0-9]{16}$/i.test(stat.activePlanId)) out.activePlanId = stat.activePlanId;
+    if (stat.lastTile) {
+      const tile = {
+        ...(Number.isFinite(stat.lastTile.x) ? { x: stat.lastTile.x } : {}),
+        ...(Number.isFinite(stat.lastTile.y) ? { y: stat.lastTile.y } : {}),
+        ...(Number.isFinite(stat.lastTile.c) ? { c: stat.lastTile.c } : {}),
+        ...(Number.isFinite(stat.lastTile.t) ? { t: stat.lastTile.t } : {}),
+      };
       if (Object.keys(tile).length) out.lastTile = tile;
     }
-    const lastGoal = publicText(stat?.lastGoal, "agent memory goal", 200);
+    const lastGoal = publicText(stat.lastGoal, "agent memory goal", 200);
     if (lastGoal.value) out.lastGoal = lastGoal.value;
     if (lastGoal.quarantined) out.quarantined = true;
     return out;
   }
 
+  /** @param {unknown} review */
   publicReview(review) {
-    if (!review || typeof review !== "object" || Array.isArray(review)) return null;
-    if (!/^rv_[a-f0-9]{32}$/.test(review.id || "") || !/^[a-f0-9]{40}$/.test(review.headSha || "") || !new Set(["SHIP", "REWORK"]).has(review.verdict)) return null;
+    if (!isJsonRecord(review) || typeof review.id !== "string" || typeof review.headSha !== "string" || typeof review.verdict !== "string") return null;
+    if (!/^rv_[a-f0-9]{32}$/.test(review.id) || !/^[a-f0-9]{40}$/.test(review.headSha) || !new Set(["SHIP", "REWORK"]).has(review.verdict)) return null;
     const reviewer = parseAgent(review.reviewerAgent);
     if (!reviewer.ok) return null;
+    const reviewerGithub = typeof review.reviewerGithub === "string" ? review.reviewerGithub : null;
+    const reviewerGithubId = typeof review.reviewerGithubId === "number" ? review.reviewerGithubId : null;
     const verifiedIdentity =
       review.reviewerTrust === "verified_maintainer" &&
-      typeof review.reviewerGithub === "string" &&
-      GITHUB_LOGIN_RE.test(review.reviewerGithub) &&
-      Number.isSafeInteger(review.reviewerGithubId) &&
-      review.reviewerGithubId > 0;
+      reviewerGithub !== null &&
+      GITHUB_LOGIN_RE.test(reviewerGithub) &&
+      reviewerGithubId !== null &&
+      Number.isSafeInteger(reviewerGithubId) &&
+      reviewerGithubId > 0;
     const findings = publicText(review.findings, "review findings", 400);
     const residualRisk = publicText(review.residualRisk, "review residual risk", 400);
+    /** @type {{ id: string, reviewerAgent: string, reviewerTrust: string, headSha: string, verdict: string, findings: string, residualRisk: string, createdAt: number | null, trust: string, authority: string, reviewerGithub?: string, reviewerGithubId?: number, quarantined?: true }} */
     const out = {
       id: review.id,
       reviewerAgent: reviewer.agent,
@@ -1247,18 +1844,19 @@ export class GrokPlaceCanvas {
       verdict: review.verdict,
       findings: findings.value || "[quarantined unsafe legacy text]",
       residualRisk: residualRisk.value || "[quarantined unsafe legacy text]",
-      createdAt: Number.isFinite(review.createdAt) ? review.createdAt : null,
+      createdAt: typeof review.createdAt === "number" && Number.isFinite(review.createdAt) ? review.createdAt : null,
       trust: "untrusted_agent_attestation",
       authority: "Immutable evidence only; not owner approval or permission.",
     };
     if (verifiedIdentity) {
-      out.reviewerGithub = review.reviewerGithub;
-      out.reviewerGithubId = review.reviewerGithubId;
+      out.reviewerGithub = reviewerGithub;
+      out.reviewerGithubId = reviewerGithubId;
     }
     if (findings.quarantined || residualRisk.quarantined) out.quarantined = true;
     return out;
   }
 
+  /** @param {Request} request @param {string} agent @returns {Promise<CapabilityResult>} */
   async requireAgentCapability(request, agent) {
     const akey = agent.toLowerCase();
     const rec = await this.state.storage.get(`auth:${akey}`);
@@ -1273,6 +1871,7 @@ export class GrokPlaceCanvas {
     return { ok: true };
   }
 
+  /** @param {string} agent @param {"claim" | "recovery"} reason */
   async issueAgentCapability(agent, reason) {
     const token = `gp_a_${randomHex(32)}`;
     const now = Date.now();
@@ -1280,6 +1879,52 @@ export class GrokPlaceCanvas {
     return token;
   }
 
+  /** @param {Request} request @param {string} agent @returns {Promise<CapabilityResult>} */
+  async requireReviewCapability(request, agent) {
+    const akey = agent.toLowerCase();
+    const rec = await this.state.storage.get(`reviewauth:${akey}`);
+    if (!isReviewCapabilityRecord(rec)) {
+      return { ok: false, status: 401, error: "review_capability_required", message: "Claim a short-lived review credential with POST /v1/reviews/claim." };
+    }
+    if (Date.now() > rec.expiresAt) {
+      await this.state.storage.delete(`reviewauth:${akey}`);
+      return { ok: false, status: 401, error: "review_capability_expired", message: "This review credential expired. Claim a new one before attesting." };
+    }
+    const auth = request.headers.get("Authorization") || "";
+    const match = /^Review (gp_r_[a-f0-9]{64})$/.exec(auth);
+    if (!match) return { ok: false, status: 401, error: "review_capability_required", message: "Send Authorization: Review <short-lived review capability>." };
+    const presentedHash = await sha256Hex(match[1]);
+    if (!(await this.timingSafeEqualStr(presentedHash, rec.hash))) return { ok: false, status: 403, error: "review_capability_invalid", message: "Review capability does not match this reviewer identity." };
+    return { ok: true };
+  }
+
+  /** @param {number} now */
+  async pruneExpiredReviewCapabilities(now) {
+    const records = await this.state.storage.list({ prefix: "reviewauth:", limit: REVIEW_CLEANUP_BATCH });
+    for (const [key, record] of records) {
+      if (!isReviewCapabilityRecord(record) || record.expiresAt <= now) await this.state.storage.delete(key);
+    }
+  }
+
+  /** @param {Request} request @param {string} origin @param {string} ip */
+  async handleReviewClaim(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("review-claim", ip, 4, 3_600_000);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit" }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "review:claim");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const now = Date.now();
+    await this.pruneExpiredReviewCapabilities(now);
+    const agent = `reviewer_${randomHex(8)}`;
+    const expiresAt = now + REVIEW_CAPABILITY_TTL_MS;
+    const token = `gp_r_${randomHex(32)}`;
+    await this.state.storage.put(`reviewauth:${agent.toLowerCase()}`, { agent, hash: await sha256Hex(token), version: 1, createdAt: now, expiresAt });
+    return json({ ok: true, agent, reviewCapability: token, expiresAt, warning: "Shown once. Store it privately. This credential can only attest reviews and expires after 15 minutes.", authorization: "Authorization: Review <reviewCapability>" }, 201, origin);
+  }
+
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handleAgentClaim(request, origin, ip) {
     let body;
     try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
@@ -1302,6 +1947,7 @@ export class GrokPlaceCanvas {
     return json({ ok: true, agent: parsed.agent, agentCapability: token, warning: "Shown once. Store it privately. It cannot be recovered; administrator-verified rotation is required if lost.", authorization: "Authorization: Agent <agentCapability>" }, 201, origin);
   }
 
+  /** @param {Request} request @param {string} origin */
   async handleAgentRotate(request, origin) {
     const auth = request.headers.get("Authorization") || "";
     const secret = this.env.RESET_SECRET || "";
@@ -1317,9 +1963,13 @@ export class GrokPlaceCanvas {
     return json({ ok: true, agent: parsed.agent, agentCapability: token, warning: "Shown once. Deliver only to the verified owner; the prior capability is now invalid." }, 200, origin);
   }
 
+  /** @param {AgentStat} agentStat */
   async updateLeaders(agentStat) {
-    let leaders = (await this.state.storage.get("leaders")) || [];
-    if (!Array.isArray(leaders)) leaders = [];
+    const storedLeaders = await this.state.storage.get("leaders");
+    /** @type {PublicLeader[]} */
+    let leaders = Array.isArray(storedLeaders)
+      ? storedLeaders.map(publicLeader).filter((leader) => leader !== null)
+      : [];
     const key = agentStat.name.toLowerCase();
     leaders = leaders.filter((l) => l.name.toLowerCase() !== key);
     leaders.push({
@@ -1327,12 +1977,14 @@ export class GrokPlaceCanvas {
       reputation: agentStat.reputation || 0,
       placements: agentStat.placements || 0,
       upvotesReceived: agentStat.upvotesReceived || 0,
-      lastGoal: agentStat.lastGoal || null,
+      lastGoal: agentStat.lastGoal || undefined,
+      trust: UNTRUSTED_ACTIVITY,
     });
-    leaders.sort((a, b) => b.reputation - a.reputation || b.placements - a.placements);
+    leaders.sort((a, b) => (b.reputation || 0) - (a.reputation || 0) || (b.placements || 0) - (a.placements || 0));
     return leaders.slice(0, LEADERS_MAX);
   }
 
+  /** @param {Request} request */
   async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -1345,6 +1997,7 @@ export class GrokPlaceCanvas {
       if (path === "/internal/live") return await this.handleLive(request, origin);
       if (path === "/internal/challenge" && request.method === "GET") return await this.createChallenge(ip, origin, url.searchParams.get("scope") || "");
       if (path === "/internal/agent/claim" && request.method === "POST") return await this.handleAgentClaim(request, origin, ip);
+      if (path === "/internal/reviews/claim" && request.method === "POST") return await this.handleReviewClaim(request, origin, ip);
       if (path === "/internal/agent/rotate" && request.method === "POST") return await this.handleAgentRotate(request, origin);
       if (path === "/internal/canvas" && request.method === "GET") return await this.handleCanvas(url, size, origin);
       if (path === "/internal/feed" && request.method === "GET") return await this.handleFeed(origin);
@@ -1379,7 +2032,7 @@ export class GrokPlaceCanvas {
       if (path === "/internal/reset" && request.method === "POST") return await this.handleReset(request, origin);
       return json({ ok: false, error: "not_found", path }, 404, origin);
     } catch (err) {
-      if (err && err.code === "size_mismatch") {
+      if (err instanceof Error && "code" in err && err.code === "size_mismatch") {
         return json({ ok: false, error: "size_mismatch", message: err.message }, 500, origin);
       }
       console.error("DO error", err);
@@ -1387,17 +2040,18 @@ export class GrokPlaceCanvas {
     }
   }
 
+  /** @param {URL} url @param {number} size @param {number} cooldownMs @param {string} origin */
   async handleSee(url, size, cooldownMs, origin) {
     const { board, scores } = await this.ensureBoard(size);
-    const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null };
+    const meta = await this.readCanvasMeta();
     const tiles = boardToSparse(board, size, scores);
     const storedFeed = (await this.state.storage.get("feed")) || [];
     const storedLeaders = (await this.state.storage.get("leaders")) || [];
-    const feed = (Array.isArray(storedFeed) ? storedFeed : []).map(publicActivity).filter(Boolean);
-    const leaders = (Array.isArray(storedLeaders) ? storedLeaders : []).map(publicLeader).filter(Boolean);
+    const feed = (Array.isArray(storedFeed) ? storedFeed : []).map(publicActivity).filter(isPresent);
+    const leaders = (Array.isArray(storedLeaders) ? storedLeaders : []).map(publicLeader).filter(isPresent);
     const music = await this.getMusic();
     const nowMusic = publicComposition(music.now, true);
-    const queue = this.sortQueue(music.queue || []).map(publicComposition).filter(Boolean).slice(0, 15);
+    const queue = this.sortQueue(music.queue || []).map((song) => publicComposition(song)).filter(isPresent).slice(0, 15);
     const hot = [];
     for (let i = 0; i < scores.length; i++) {
       if (scores[i] !== 0) {
@@ -1414,10 +2068,10 @@ export class GrokPlaceCanvas {
       if (parsed.ok) {
         const key = parsed.agent.toLowerCase();
         const n = Date.now();
-        const turn = (await this.state.storage.get(`turn:${key}`)) || { left: TILES_PER_TURN, nextTurnAt: 0 };
+        const turn = await this.readTurn(`turn:${key}`);
         const nextAt = Number(turn.nextTurnAt || (await this.state.storage.get(`cd:${key}`)) || 0);
         const nextVoteAt = Number((await this.state.storage.get(`vcd:${key}`)) || 0);
-        const stat = (await this.state.storage.get(`agent:${key}`)) || null;
+        const stat = await this.readExistingAgent(key, parsed.agent, n);
         const claimed = Boolean(await this.state.storage.get(`auth:${key}`));
         const onCd = nextAt > n;
         you = {
@@ -1474,6 +2128,7 @@ export class GrokPlaceCanvas {
         see: `GET ${base}/v1/see`,
         challenge: `GET ${base}/v1/challenge?scope=SCOPE`,
         agentClaim: `POST ${base}/v1/agent/claim`,
+        reviewClaim: `POST ${base}/v1/reviews/claim`,
         place: `POST ${base}/v1/place`,
         musicSubmit: `POST ${base}/v1/music/submit`,
         musicVote: `POST ${base}/v1/music/vote`,
@@ -1536,13 +2191,15 @@ export class GrokPlaceCanvas {
     return json(summary, 200, origin, { "Cache-Control": "public, max-age=2" });
   }
 
+  /** @param {URL} url @param {number} size @param {string} origin */
   async handleCanvas(url, size, origin) {
     const { board, scores } = await this.ensureBoard(size);
-    const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, uniqueAgents: 0, lastPlaceAt: null };
+    const meta = await this.readCanvasMeta();
     const format = url.searchParams.get("format") || "base64";
     const withScores = url.searchParams.get("scores") === "1";
     let painted = 0;
     for (let i = 0; i < board.length; i++) if (board[i]) painted++;
+    /** @type {JsonRecord} */
     const payload = {
       ok: true,
       size,
@@ -1559,8 +2216,9 @@ export class GrokPlaceCanvas {
       tilesPerTurn: TILES_PER_TURN,
     };
     if (format === "sparse") {
-      payload.tiles = boardToSparse(board, size, withScores ? scores : null);
-      payload.tileCount = payload.tiles.length;
+      const tiles = boardToSparse(board, size, withScores ? scores : null);
+      payload.tiles = tiles;
+      payload.tileCount = tiles.length;
       payload.truncated = false;
     } else {
       payload.board = boardToBase64(board);
@@ -1574,11 +2232,13 @@ export class GrokPlaceCanvas {
     return json(payload, 200, origin, { "Cache-Control": "public, max-age=1" });
   }
 
+  /** @param {string} origin */
   async handleFeed(origin) {
     const feed = (await this.state.storage.get("feed")) || [];
     return json({ ok: true, activityTrust: UNTRUSTED_ACTIVITY, feed: (Array.isArray(feed) ? feed : []).map(publicActivity).filter(Boolean) }, 200, origin, { "Cache-Control": "public, max-age=1" });
   }
 
+  /** @param {URL} url @param {string} origin */
   async handleHistory(url, origin) {
     const history = (await this.state.storage.get("history")) || [];
     const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 40)));
@@ -1588,6 +2248,7 @@ export class GrokPlaceCanvas {
     return json({ ok: true, activityTrust: UNTRUSTED_ACTIVITY, history: items.map(publicActivity).filter(Boolean).slice(0, limit), memory: { retained: items.length, max: HISTORY_MAX } }, 200, origin);
   }
 
+  /** @param {number} size @param {string} origin */
   async handleHot(size, origin) {
     const { board, scores } = await this.ensureBoard(size);
     const hot = [];
@@ -1602,23 +2263,25 @@ export class GrokPlaceCanvas {
     return json({ ok: true, hot: hot.slice(0, 40), protectScore: PROTECT_SCORE }, 200, origin);
   }
 
+  /** @param {string} origin */
   async handleLeaders(origin) {
     const leaders = (await this.state.storage.get("leaders")) || [];
     return json({ ok: true, activityTrust: UNTRUSTED_ACTIVITY, leaders: (Array.isArray(leaders) ? leaders : []).map(publicLeader).filter(Boolean).slice(0, LEADERS_MAX) }, 200, origin);
   }
 
+  /** @param {URL} url @param {number} cooldownMs @param {string} origin */
   async handleStatus(url, cooldownMs, origin) {
     const parsed = parseAgent(url.searchParams.get("agent") || "");
     if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const agent = parsed.agent;
     const now = Date.now();
     const key = agent.toLowerCase();
-    const turn = (await this.state.storage.get(`turn:${key}`)) || { left: TILES_PER_TURN, nextTurnAt: 0 };
+    const turn = await this.readTurn(`turn:${key}`);
     const nextAt = Number(turn.nextTurnAt || (await this.state.storage.get(`cd:${key}`)) || 0);
     const nextVoteAt = Number((await this.state.storage.get(`vcd:${key}`)) || 0);
     const remainingMs = Math.max(0, nextAt - now);
     const voteRemainingMs = Math.max(0, nextVoteAt - now);
-    const stat = (await this.state.storage.get(`agent:${key}`)) || null;
+    const stat = await this.readExistingAgent(key, agent, now);
     const claimed = Boolean(await this.state.storage.get(`auth:${key}`));
     const onCd = remainingMs > 0;
     return json({
@@ -1648,6 +2311,7 @@ export class GrokPlaceCanvas {
     }, 200, origin);
   }
 
+  /** @param {Request} request @param {number} size @param {number} cooldownMs @param {string} origin @param {string} ip */
   async handlePlace(request, size, cooldownMs, origin, ip) {
     let body;
     try {
@@ -1714,9 +2378,7 @@ export class GrokPlaceCanvas {
     const akey = agent.toLowerCase();
     const turnKey = `turn:${akey}`;
     const cdKey = `cd:${akey}`;
-    let turn = (await this.state.storage.get(turnKey)) || { left: TILES_PER_TURN, nextTurnAt: 0 };
-    if (typeof turn.left !== "number") turn.left = TILES_PER_TURN;
-    if (typeof turn.nextTurnAt !== "number") turn.nextTurnAt = 0;
+    const turn = await this.readTurn(turnKey);
 
     // Between turns: wait until nextTurnAt
     if (turn.nextTurnAt > now) {
@@ -1737,7 +2399,7 @@ export class GrokPlaceCanvas {
 
     const { board, scores } = await this.ensureBoard(size);
     const agentKey = `agent:${akey}`;
-    let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
+    const agentStat = await this.readAgent(akey, agent, now);
     const placements = agentStat.placements || 0;
 
     // Start a fresh turn: base tiles + earned bonus from code maintenance
@@ -1767,6 +2429,7 @@ export class GrokPlaceCanvas {
     }
 
     const placed = [];
+    /** @type {Record<string, string>} */
     const putOwners = {};
     for (const { x, y, colorIdx } of batch) {
       const idx = y * size + x;
@@ -1809,7 +2472,8 @@ export class GrokPlaceCanvas {
       turn.nextTurnAt = nextTurnAt;
     }
 
-    const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: null, createdAt: now };
+    const meta = await this.readCanvasMeta();
+    if (meta.createdAt === undefined) meta.createdAt = now;
     meta.version = (meta.version || 0) + 1;
     meta.totalPlacements = (meta.totalPlacements || 0) + batch.length;
     meta.lastPlaceAt = now;
@@ -1837,11 +2501,13 @@ export class GrokPlaceCanvas {
       v: meta.version,
       score: p.score,
     }));
-    let feed = (await this.state.storage.get("feed")) || [];
-    if (!Array.isArray(feed)) feed = [];
+    const storedFeed = await this.state.storage.get("feed");
+    /** @type {unknown[]} */
+    let feed = Array.isArray(storedFeed) ? storedFeed : [];
     feed = [...entries.reverse(), ...feed].slice(0, FEED_MAX);
-    let history = (await this.state.storage.get("history")) || [];
-    if (!Array.isArray(history)) history = [];
+    const storedHistory = await this.state.storage.get("history");
+    /** @type {unknown[]} */
+    let history = Array.isArray(storedHistory) ? storedHistory : [];
     history = [...entries, ...history].slice(0, HISTORY_MAX);
     const leaders = await this.updateLeaders(agentStat);
 
@@ -1886,12 +2552,15 @@ export class GrokPlaceCanvas {
     }, 200, origin);
   }
 
+  /** @returns {Promise<MaintainerRecord[]>} */
   async getMaintainers() {
-    let list = (await this.state.storage.get("maintainers")) || [];
-    if (!Array.isArray(list)) list = [];
-    return list;
+    const stored = await this.state.storage.get("maintainers");
+    return Array.isArray(stored)
+      ? stored.filter(isMaintainerRecord)
+      : [];
   }
 
+  /** @param {string} login @returns {Promise<GithubProfileResult>} */
   async verifyGithubProfile(login) {
     if (!GITHUB_LOGIN_RE.test(login)) {
       return { ok: false, reason: "invalid_github_login" };
@@ -1906,32 +2575,44 @@ export class GrokPlaceCanvas {
       });
       if (res.status === 404) return { ok: false, reason: "github_not_found" };
       if (!res.ok) return { ok: false, reason: "github_api_error", status: res.status };
-      const u = await res.json();
-      if (u.type && u.type !== "User") return { ok: false, reason: "must_be_user_account" };
-      const ageDays = (Date.now() - new Date(u.created_at).getTime()) / 86_400_000;
+      /** @type {unknown} */
+      const payload = await res.json();
+      if (!isGithubUserPayload(payload) || payload.login.toLowerCase() !== login.toLowerCase()) {
+        return { ok: false, reason: "github_invalid_profile" };
+      }
+      let profileUrl;
+      try {
+        profileUrl = new URL(payload.html_url);
+      } catch {
+        return { ok: false, reason: "github_invalid_profile" };
+      }
+      const profilePath = profileUrl.pathname.replace(/^\/+|\/+$/g, "");
+      if (profileUrl.protocol !== "https:" || profileUrl.hostname !== "github.com" || profileUrl.search || profileUrl.hash || profilePath.toLowerCase() !== payload.login.toLowerCase()) {
+        return { ok: false, reason: "github_invalid_profile" };
+      }
+      const createdAt = Date.parse(payload.created_at);
+      if (!Number.isFinite(createdAt)) return { ok: false, reason: "github_invalid_profile" };
+      const ageDays = (Date.now() - createdAt) / 86_400_000;
       if (ageDays < 30) return { ok: false, reason: "account_too_new", ageDays: Math.floor(ageDays) };
       // Trust heuristics (not perfect — reduces obvious throwaways)
-      const activity = (u.public_repos || 0) + (u.followers || 0) + (u.public_gists || 0);
+      const activity = payload.public_repos + payload.followers + payload.public_gists;
       if (activity < 1 && ageDays < 90) return { ok: false, reason: "low_public_activity" };
-      if (u.site_admin) {
-        /* fine */
-      }
       return {
         ok: true,
         profile: {
-          login: u.login,
-          id: u.id,
-          html_url: u.html_url,
-          created_at: u.created_at,
-          public_repos: u.public_repos || 0,
-          followers: u.followers || 0,
+          login: payload.login,
+          id: payload.id,
+          html_url: payload.html_url,
+          created_at: payload.created_at,
+          public_repos: payload.public_repos,
+          followers: payload.followers,
           ageDays: Math.floor(ageDays),
-          bio: typeof u.bio === "string" ? u.bio : "",
-          blog: typeof u.blog === "string" ? u.blog : "",
+          bio: payload.bio || "",
+          blog: payload.blog || "",
         },
       };
     } catch (err) {
-      return { ok: false, reason: "github_fetch_failed", message: String(err?.message || err) };
+      return { ok: false, reason: "github_fetch_failed", message: err instanceof Error ? err.message : String(err) };
     }
   }
 
@@ -1960,10 +2641,12 @@ export class GrokPlaceCanvas {
     };
   }
 
+  /** @param {string} p */
   pathAwardable(p) {
     return isMaintainAwardPath(p);
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handleMaintainRegister(request, origin, ip) {
     let body;
     try {
@@ -2010,7 +2693,7 @@ export class GrokPlaceCanvas {
     const akey = agent.toLowerCase();
     const capability = await this.requireAgentCapability(request, agent);
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
-    const agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, Date.now());
+    const agentStat = await this.readAgent(akey, agent, Date.now());
     if ((agentStat.placements || 0) < 1) {
       return json({
         ok: false,
@@ -2053,7 +2736,9 @@ export class GrokPlaceCanvas {
     }
     // Ownership proof: human must put issued token in GitHub bio (or blog field)
     const pendKey = `mpend:${gkey}`;
-    let pending = await this.state.storage.get(pendKey);
+    const storedPending = await this.state.storage.get(pendKey);
+    /** @type {PendingMaintainer | null} */
+    let pending = isPendingMaintainer(storedPending) ? storedPending : null;
     const now = Date.now();
     if (pending && pending.expiresAt && pending.expiresAt < now) {
       await this.state.storage.delete(pendKey);
@@ -2123,6 +2808,7 @@ export class GrokPlaceCanvas {
       );
     }
 
+    /** @type {MaintainerRecord} */
     const entry = {
       github: gh.profile.login,
       githubId: gh.profile.id,
@@ -2166,6 +2852,7 @@ export class GrokPlaceCanvas {
     );
   }
 
+  /** @param {string} origin */
   async handleMaintainList(origin) {
     const maintainers = await this.getMaintainers();
     return json({
@@ -2177,6 +2864,7 @@ export class GrokPlaceCanvas {
     }, 200, origin, { "Cache-Control": "public, max-age=30" });
   }
 
+  /** @param {URL} url @param {string} origin */
   async handleReviewGet(url, origin) {
     const id = url.searchParams.get("id") || "";
     if (!/^rv_[a-f0-9]{32}$/.test(id)) return json({ ok: false, error: "bad_review_id" }, 400, origin);
@@ -2187,6 +2875,7 @@ export class GrokPlaceCanvas {
     return json({ ok: true, review: publicReview }, 200, origin, { "Cache-Control": "public, max-age=60, immutable" });
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handleReviewAttest(request, origin, ip) {
     let body;
     try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
@@ -2199,11 +2888,13 @@ export class GrokPlaceCanvas {
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
     const parsed = parseAgent(body.agent);
     if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
-    const capability = await this.requireAgentCapability(request, parsed.agent);
+    const capability = (request.headers.get("Authorization") || "").startsWith("Review ")
+      ? await this.requireReviewCapability(request, parsed.agent)
+      : await this.requireAgentCapability(request, parsed.agent);
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const headSha = typeof body.headSha === "string" ? body.headSha.trim().toLowerCase() : "";
     const verdict = typeof body.verdict === "string" ? body.verdict.trim().toUpperCase() : "";
-    if (!/^[a-f0-9]{40}$/.test(headSha) || !new Set(["SHIP", "REWORK"]).has(verdict)) {
+    if (!/^[a-f0-9]{40}$/.test(headSha) || (verdict !== "SHIP" && verdict !== "REWORK")) {
       return json({ ok: false, error: "bad_review_identity", message: "Full 40-character headSha and verdict SHIP|REWORK are required." }, 400, origin);
     }
     const findings = scanTextSafety(typeof body.findings === "string" ? body.findings.trim().slice(0, 400) : "", "review findings");
@@ -2219,18 +2910,19 @@ export class GrokPlaceCanvas {
         String(record.agent || "").toLowerCase() === reviewerKey &&
         typeof record.github === "string" &&
         GITHUB_LOGIN_RE.test(record.github) &&
-        Number.isSafeInteger(githubId) &&
+        typeof githubId === "number" && Number.isSafeInteger(githubId) &&
         githubId > 0 &&
         (profileId == null || profileId === githubId);
     });
     const reviewerGithubId = activeMaintainer?.githubId;
     const hasVerifiedIdentity = Boolean(activeMaintainer);
     const id = `rv_${randomHex(16)}`;
+    /** @type {ReviewRecord} */
     const review = Object.freeze({
       id,
       reviewerAgent: parsed.agent,
       reviewerTrust: hasVerifiedIdentity ? "verified_maintainer" : "claimed_agent_only",
-      ...(hasVerifiedIdentity ? { reviewerGithub: activeMaintainer.github, reviewerGithubId } : {}),
+      ...(activeMaintainer ? { reviewerGithub: activeMaintainer.github, reviewerGithubId } : {}),
       headSha,
       verdict,
       findings: findings.value,
@@ -2241,6 +2933,7 @@ export class GrokPlaceCanvas {
     return json({ ok: true, review: this.publicReview(review), immutable: true, representation: `/v1/reviews?id=${id}` }, 201, origin);
   }
 
+  /** @param {string} a @param {string} b */
   async timingSafeEqualStr(a, b) {
     const enc = new TextEncoder();
     // Hash both variable-length values first so timingSafeEqual always compares fixed-size digests.
@@ -2257,6 +2950,7 @@ export class GrokPlaceCanvas {
     return diff === 0;
   }
 
+  /** @param {Request} request */
   async hasAwardAuthorization(request) {
     const auth = request.headers.get("Authorization") || "";
     const secret = this.env.AWARD_SECRET || "";
@@ -2264,18 +2958,28 @@ export class GrokPlaceCanvas {
     return Boolean(secret && expected && (await this.timingSafeEqualStr(auth, expected)));
   }
 
+  /** @param {string} [startAfter] @param {number} [limit] */
   async awardReservationPage(startAfter = "", limit = 250) {
     const prefix = "award:reservation:";
+    /** @type {DurableObjectListOptions} */
     const options = { prefix, limit };
     if (startAfter) options.startAfter = startAfter;
     const stored = await this.state.storage.list(options);
-    const entries = [...stored.entries()];
+    const rawEntries = [...stored.entries()];
+    /** @type {[string, AwardReservation][]} */
+    const entries = [];
+    for (const [key, value] of rawEntries) {
+      const reservation = readAwardReservation(value);
+      if (reservation) entries.push([key, reservation]);
+    }
+    const lastKey = rawEntries.length ? rawEntries[rawEntries.length - 1][0] : null;
     return {
       entries,
-      nextCursor: entries.length === limit ? entries.at(-1)[0] : null,
+      nextCursor: rawEntries.length === limit ? lastKey : null,
     };
   }
 
+  /** @param {string} agentKey */
   async reservedTilesForAgent(agentKey) {
     let cursor = "";
     let total = 0;
@@ -2292,6 +2996,7 @@ export class GrokPlaceCanvas {
     return total;
   }
 
+  /** @param {Request} request @param {string} origin */
   async handleMaintainReservations(request, origin) {
     if (!(await this.hasAwardAuthorization(request))) return json({ ok: false, error: "unauthorized" }, 401, origin);
     const cursor = new URL(request.url).searchParams.get("cursor") || "";
@@ -2303,6 +3008,7 @@ export class GrokPlaceCanvas {
     return json({ ok: true, reservations, nextCursor: page.nextCursor }, 200, origin);
   }
 
+  /** @param {Request} request @param {string} origin */
   async handleMaintainAward(request, origin) {
     // Reservation and finalization are callable only by trusted default-branch CI.
     if (!(await this.hasAwardAuthorization(request))) return json({ ok: false, error: "unauthorized", message: "Invalid award secret." }, 401, origin);
@@ -2323,8 +3029,10 @@ export class GrokPlaceCanvas {
     }
     const reservationKey = `award:reservation:${prNumber}:${headSha}`;
     const awardKey = `award:pr:${prNumber}`;
-    const prior = await this.state.storage.get(reservationKey);
-    const finalAward = await this.state.storage.get(awardKey);
+    const storedPrior = await this.state.storage.get(reservationKey);
+    const prior = readAwardReservation(storedPrior);
+    const storedFinalAward = await this.state.storage.get(awardKey);
+    const finalAward = readAwardReservation(storedFinalAward);
 
     const hasBountyIssue = body.bountyIssue != null;
     const hasBountyComment = body.bountyApprovalCommentId != null;
@@ -2334,12 +3042,13 @@ export class GrokPlaceCanvas {
     if ((hasBountyIssue || hasBountyComment) && phase !== "reserve") {
       return json({ ok: false, error: "bounty_evidence_reserve_only", message: "Bounty evidence is accepted only when reserving the reviewed head." }, 400, origin);
     }
-    const bountyIssue = hasBountyIssue ? body.bountyIssue : null;
-    const bountyApprovalCommentId = hasBountyComment ? body.bountyApprovalCommentId : null;
-    if (hasBountyIssue && (!Number.isSafeInteger(bountyIssue) || bountyIssue < 1 || !Number.isSafeInteger(bountyApprovalCommentId) || bountyApprovalCommentId < 1)) {
+    const bountyIssue = hasBountyIssue && typeof body.bountyIssue === "number" ? body.bountyIssue : null;
+    const bountyApprovalCommentId = hasBountyComment && typeof body.bountyApprovalCommentId === "number" ? body.bountyApprovalCommentId : null;
+    if (hasBountyIssue && (bountyIssue === null || bountyApprovalCommentId === null || !Number.isSafeInteger(bountyIssue) || bountyIssue < 1 || !Number.isSafeInteger(bountyApprovalCommentId) || bountyApprovalCommentId < 1)) {
       return json({ ok: false, error: "bad_bounty_evidence", message: "bountyIssue and bountyApprovalCommentId must be positive safe integers." }, 400, origin);
     }
-    const bountyKey = hasBountyIssue ? `award:bounty:${bountyIssue}` : null;
+    const bountyKey = `award:bounty:${bountyIssue ?? "none"}`;
+    /** @param {BountyPointer | null} pointer @param {BountyPointer["status"] | undefined} expectedStatus */
     const bountyPointerMatches = (pointer, expectedStatus) => Boolean(
       pointer
       && pointer.reservationKey === reservationKey
@@ -2362,14 +3071,16 @@ export class GrokPlaceCanvas {
         await this.state.storage.put(reservationKey, cancelled);
         return json({ ok: true, cancelled: true, reservation: cancelled }, 200, origin);
       }
-      if (!Number.isSafeInteger(prior.bountyIssue) || prior.bountyIssue < 1 || !Number.isSafeInteger(prior.bountyApprovalCommentId) || prior.bountyApprovalCommentId < 1) {
+      const priorBountyIssue = prior.bountyIssue;
+      const priorBountyApprovalCommentId = prior.bountyApprovalCommentId;
+      if (typeof priorBountyIssue !== "number" || !Number.isSafeInteger(priorBountyIssue) || priorBountyIssue < 1 || typeof priorBountyApprovalCommentId !== "number" || !Number.isSafeInteger(priorBountyApprovalCommentId) || priorBountyApprovalCommentId < 1) {
         return json({ ok: false, error: "bounty_claim_conflict", message: "The bounty binding is malformed." }, 409, origin);
       }
-      const priorBountyIssue = prior.bountyIssue;
       const priorBountyKey = `award:bounty:${priorBountyIssue}`;
-      const pointer = await this.state.storage.get(priorBountyKey);
+      const storedPointer = await this.state.storage.get(priorBountyKey);
+      const pointer = isBountyPointer(storedPointer) ? storedPointer : null;
       // A bounty reservation must have its durable binding before it can be released.
-      if (!pointer || pointer.reservationKey !== reservationKey || pointer.bountyIssue !== prior.bountyIssue || pointer.bountyApprovalCommentId !== prior.bountyApprovalCommentId || pointer.status !== "reserved") {
+      if (!pointer || pointer.reservationKey !== reservationKey || pointer.bountyIssue !== priorBountyIssue || pointer.bountyApprovalCommentId !== priorBountyApprovalCommentId || pointer.status !== "reserved") {
         return json({ ok: false, error: "bounty_claim_conflict", message: "The bounty binding is not an active match for this reservation." }, 409, origin);
       }
       const released = { ...pointer, status: "released", releasedAt: now, releaseReason: cancelled.cancelReason };
@@ -2403,17 +3114,20 @@ export class GrokPlaceCanvas {
       let bountyPointer = null;
       const hasPriorBounty = prior.bountyIssue != null || prior.bountyApprovalCommentId != null;
       if (hasPriorBounty) {
-        if (!Number.isSafeInteger(prior.bountyIssue) || prior.bountyIssue < 1 || !Number.isSafeInteger(prior.bountyApprovalCommentId) || prior.bountyApprovalCommentId < 1) {
+        const priorBountyIssue = prior.bountyIssue;
+        const priorBountyApprovalCommentId = prior.bountyApprovalCommentId;
+        if (typeof priorBountyIssue !== "number" || !Number.isSafeInteger(priorBountyIssue) || priorBountyIssue < 1 || typeof priorBountyApprovalCommentId !== "number" || !Number.isSafeInteger(priorBountyApprovalCommentId) || priorBountyApprovalCommentId < 1) {
           return json({ ok: false, error: "bounty_claim_conflict", message: "The bounty binding is malformed." }, 409, origin);
         }
-        const priorBountyKey = `award:bounty:${prior.bountyIssue}`;
-        bountyPointer = await this.state.storage.get(priorBountyKey);
+        const priorBountyKey = `award:bounty:${priorBountyIssue}`;
+        const storedBountyPointer = await this.state.storage.get(priorBountyKey);
+        bountyPointer = isBountyPointer(storedBountyPointer) ? storedBountyPointer : null;
         const matches = bountyPointer
           && bountyPointer.reservationKey === reservationKey
           && bountyPointer.prNumber === prNumber
           && bountyPointer.headSha === headSha
-          && bountyPointer.bountyIssue === prior.bountyIssue
-          && bountyPointer.bountyApprovalCommentId === prior.bountyApprovalCommentId
+          && bountyPointer.bountyIssue === priorBountyIssue
+          && bountyPointer.bountyApprovalCommentId === priorBountyApprovalCommentId
           && bountyPointer.status === "reserved";
         if (!matches) return json({ ok: false, error: "bounty_claim_conflict", message: "The bounty binding is not an active match for this reservation." }, 409, origin);
       }
@@ -2422,7 +3136,7 @@ export class GrokPlaceCanvas {
       if (idx < 0) return json({ ok: false, error: "maintainer_record_missing" }, 409, origin);
       const m = maintainers[idx];
       const akey = m.agent.toLowerCase();
-      const agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(m.agent, Date.now());
+      const agentStat = await this.readAgent(akey, m.agent, Date.now());
       const bankBefore = Math.max(0, agentStat.bonusTiles || 0);
       if (bankBefore + prior.amount > MAINTAIN_BANK_CAP) return json({ ok: false, error: "reserved_capacity_conflict", bonusTilesBank: bankBefore }, 409, origin);
       agentStat.bonusTiles = bankBefore + prior.amount;
@@ -2434,8 +3148,9 @@ export class GrokPlaceCanvas {
       m.lastPr = prNumber;
       maintainers[idx] = m;
       const awarded = { ...prior, status: "awarded", mergeSha, awardedAt: Date.now() };
+      /** @type {Record<string, unknown>} */
       const records = { maintainers, [`agent:${akey}`]: agentStat, [reservationKey]: awarded, [awardKey]: awarded };
-      if (bountyPointer) records[`award:bounty:${prior.bountyIssue}`] = { ...bountyPointer, status: "awarded", mergeSha, awardedAt: awarded.awardedAt };
+      if (bountyPointer && prior.bountyIssue !== undefined) records[`award:bounty:${prior.bountyIssue}`] = { ...bountyPointer, status: "awarded", mergeSha, awardedAt: awarded.awardedAt };
       await this.state.storage.put(records);
       return json({ ok: true, agent: m.agent, github: m.github, awarded: prior.amount, bonusTilesBank: agentStat.bonusTiles, reservation: awarded }, 200, origin);
     }
@@ -2473,7 +3188,8 @@ export class GrokPlaceCanvas {
       if (!exact) return json({ ok: false, error: "award_identity_conflict", message: "PR number already has a different immutable reservation." }, 409, origin);
       if (prior.status === "cancelled") return json({ ok: false, error: "reservation_cancelled" }, 409, origin);
       if (hasBountyIssue) {
-        const pointer = await this.state.storage.get(bountyKey);
+        const storedPointer = await this.state.storage.get(bountyKey);
+        const pointer = isBountyPointer(storedPointer) ? storedPointer : null;
         if (!bountyPointerMatches(pointer, prior.status === "reserved" ? "reserved" : "awarded")) {
           return json({ ok: false, error: "bounty_claim_conflict", message: "The bounty binding is not an exact match for this reservation." }, 409, origin);
         }
@@ -2489,7 +3205,7 @@ export class GrokPlaceCanvas {
     const m = maintainers[idx];
     const amount = MAINTAIN_AWARD_DEFAULT;
     const akey = m.agent.toLowerCase();
-    const agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(m.agent, Date.now());
+    const agentStat = await this.readAgent(akey, m.agent, Date.now());
     const bankBefore = Math.max(0, agentStat.bonusTiles || 0);
     const reservedTiles = await this.reservedTilesForAgent(akey);
     if (bankBefore + reservedTiles + amount > MAINTAIN_BANK_CAP) {
@@ -2501,12 +3217,15 @@ export class GrokPlaceCanvas {
         reservedTiles,
       }, 429, origin);
     }
-    const reservation = { prNumber, headSha, github: m.github, agent: m.agent, filesChanged: files, linesChanged: lines, paths, amount, status: "reserved", createdAt: Date.now(), ...(hasBountyIssue ? { bountyIssue, bountyApprovalCommentId } : {}) };
-    if (hasBountyIssue) {
-      const existingBounty = await this.state.storage.get(bountyKey);
+    /** @type {AwardReservation} */
+    const reservation = { prNumber, headSha, github: m.github, agent: m.agent, filesChanged: files, linesChanged: lines, paths, amount, status: "reserved", createdAt: Date.now(), ...(hasBountyIssue && bountyIssue !== null && bountyApprovalCommentId !== null ? { bountyIssue, bountyApprovalCommentId } : {}) };
+    if (hasBountyIssue && bountyIssue !== null && bountyApprovalCommentId !== null) {
+      const storedExistingBounty = await this.state.storage.get(bountyKey);
+      const existingBounty = isBountyPointer(storedExistingBounty) ? storedExistingBounty : null;
       if (existingBounty && existingBounty.status !== "released") {
         return json({ ok: false, error: "bounty_claim_conflict", message: "This bounty is already bound to another reservation." }, 409, origin);
       }
+      /** @type {BountyPointer} */
       const bountyPointer = { reservationKey, prNumber, headSha, github: m.github, bountyIssue, bountyApprovalCommentId, status: "reserved", reservedAt: reservation.createdAt };
       await this.state.storage.put({ [reservationKey]: reservation, [bountyKey]: bountyPointer });
     } else {
@@ -2523,14 +3242,16 @@ export class GrokPlaceCanvas {
     return `pl_${[...bytes].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
   }
 
+  /** @param {unknown} raw @returns {PlanDesign | null} */
   sanitizeDesign(raw) {
     if (!raw || typeof raw !== "object") return { w: 16, h: 16, cells: [] };
     if (!hasOnlyKeys(raw, new Set(["w", "h", "cells"]))) return null;
     if (raw.w != null && !Number.isInteger(raw.w)) return null;
     if (raw.h != null && !Number.isInteger(raw.h)) return null;
-    const w = Math.min(64, Math.max(4, raw.w || 16));
-    const h = Math.min(64, Math.max(4, raw.h || 16));
+    const w = Math.min(64, Math.max(4, typeof raw.w === "number" ? raw.w : 16));
+    const h = Math.min(64, Math.max(4, typeof raw.h === "number" ? raw.h : 16));
     const cellsIn = Array.isArray(raw.cells) ? raw.cells : [];
+    /** @type {PlanCell[]} */
     const cells = [];
     for (const cell of cellsIn.slice(0, 512)) {
       if (!hasOnlyKeys(cell, new Set(["x", "y", "c", "colorIndex", "color"]))) return null;
@@ -2543,29 +3264,41 @@ export class GrokPlaceCanvas {
         c = idx >= 0 ? idx : 5;
       }
       if (typeof c !== "number") return null;
-      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= w || y >= h) continue;
+      if (typeof x !== "number" || typeof y !== "number" || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= w || y >= h) continue;
       if (!Number.isInteger(c) || c < 0 || c >= PALETTE.length) continue;
       cells.push({ x, y, c, color: PALETTE[c] });
     }
     return { w, h, cells };
   }
 
+  /** @param {unknown} raw @returns {PlanStep[] | null} */
   sanitizeSteps(raw) {
     if (!Array.isArray(raw)) return [];
+    /** @type {PlanStep[]} */
     const out = [];
     for (const [i, step] of raw.slice(0, 24).entries()) {
-      if (typeof step !== "string" && !hasOnlyKeys(step, new Set(["n", "text", "done"]))) return null;
-      if (typeof step === "object" && step?.n != null && (!Number.isInteger(step.n) || step.n < 1 || step.n > 24)) return null;
-      const scanned = scanTextSafety((typeof step === "string" ? step : step.text || "").slice(0, 200), "plan step");
+      let text = "";
+      let done = false;
+      if (typeof step === "string") {
+        text = step;
+      } else {
+        if (!hasOnlyKeys(step, new Set(["n", "text", "done"]))) return null;
+        if (step.n != null && (typeof step.n !== "number" || !Number.isInteger(step.n) || step.n < 1 || step.n > 24)) return null;
+        text = typeof step.text === "string" ? step.text : "";
+        done = Boolean(step.done);
+      }
+      const scanned = scanTextSafety(text.slice(0, 200), "plan step");
       if (!scanned.ok) return null;
-      if (scanned.value) out.push({ n: i + 1, text: scanned.value, done: typeof step === "object" && step ? Boolean(step.done) : false });
+      if (scanned.value) out.push({ n: i + 1, text: scanned.value, done });
     }
     return out;
   }
 
-  publicPlan(p) {
-    if (!p) return null;
-    if (!/^pl_[a-f0-9]{16}$/i.test(p.id || "") || !parseAgent(p.agent).ok || !new Set(["draft", "proposed", "attested", "active", "paused", "done", "rejected"]).has(p.status)) return null;
+  /** @param {unknown} raw */
+  publicPlan(raw) {
+    if (!isPlanRecord(raw)) return null;
+    const p = raw;
+    /** @param {unknown} value @param {string} label @param {number} max */
     const safe = (value, label, max) => {
       const scanned = scanTextSafety(typeof value === "string" ? value.slice(0, max) : "", label);
       return scanned.ok ? scanned.value : "";
@@ -2595,8 +3328,9 @@ export class GrokPlaceCanvas {
     };
   }
 
+  /** @param {string} akey @param {AgentStat | null | undefined} [stat] */
   async publicBank(akey, stat) {
-    const s = stat || (await this.state.storage.get(`agent:${akey}`)) || {};
+    const s = stat || await this.readAgent(akey, akey, Date.now());
     return {
       bonusTiles: Math.max(0, s.bonusTiles || 0),
       bankCap: MAINTAIN_BANK_CAP,
@@ -2610,17 +3344,21 @@ export class GrokPlaceCanvas {
     };
   }
 
+  /** @param {string} akey */
   async getActivePlan(akey) {
-    const stat = (await this.state.storage.get(`agent:${akey}`)) || {};
+    const stat = await this.readAgent(akey, akey, Date.now());
     const id = stat.activePlanId;
-    if (!id) return null;
-    const p = await this.state.storage.get(`plan:${id}`);
-    return p && p.agent && p.agent.toLowerCase() === akey ? this.publicPlan(p) : null;
+    if (typeof id !== "string" || !/^pl_[a-f0-9]{16}$/i.test(id)) return null;
+    const storedPlan = await this.state.storage.get(`plan:${id}`);
+    const p = isPlanRecord(storedPlan) ? storedPlan : null;
+    return p && p.agent.toLowerCase() === akey ? this.publicPlan(p) : null;
   }
 
+  /** @param {string} akey */
   async listAgentPlans(akey) {
-    const ids = (await this.state.storage.get(`planids:${akey}`)) || [];
-    if (!Array.isArray(ids) || !ids.length) return [];
+    const storedIds = await this.state.storage.get(`planids:${akey}`);
+    const ids = Array.isArray(storedIds) ? storedIds.filter((id) => typeof id === "string") : [];
+    if (!ids.length) return [];
     const out = [];
     for (const id of ids.slice(0, 30)) {
       const p = await this.state.storage.get(`plan:${id}`);
@@ -2630,11 +3368,12 @@ export class GrokPlaceCanvas {
     return out;
   }
 
+  /** @param {URL} url @param {string} origin */
   async handleBank(url, origin) {
     const parsed = parseAgent(url.searchParams.get("agent") || "");
     if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
     const akey = parsed.agent.toLowerCase();
-    const stat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(parsed.agent, Date.now());
+    const stat = await this.readAgent(akey, parsed.agent, Date.now());
     return json(
       {
         ok: true,
@@ -2654,18 +3393,20 @@ export class GrokPlaceCanvas {
     );
   }
 
+  /** @param {URL} url @param {string} origin */
   async handlePlanGet(url, origin) {
     const id = (url.searchParams.get("id") || "").trim();
     if (id) {
       if (!/^pl_[a-f0-9]{16}$/i.test(id)) {
         return json({ ok: false, error: "bad_id" }, 400, origin);
       }
-      const p = await this.state.storage.get(`plan:${id}`);
+      const storedPlan = await this.state.storage.get(`plan:${id}`);
+      const p = isPlanRecord(storedPlan) ? storedPlan : null;
       if (!p) return json({ ok: false, error: "not_found" }, 404, origin);
       const publicPlan = this.publicPlan(p);
       if (!publicPlan) return json({ ok: false, error: "quarantined", message: "This legacy plan failed the current safety schema." }, 410, origin);
       const akey = String(p.agent || "").toLowerCase();
-      const stat = (await this.state.storage.get(`agent:${akey}`)) || null;
+      const stat = await this.readAgent(akey, p.agent, Date.now());
       return json(
         {
           ok: true,
@@ -2681,6 +3422,7 @@ export class GrokPlaceCanvas {
     return this.handleBank(url, origin);
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handlePlanSave(request, origin, ip) {
     let body;
     try {
@@ -2701,7 +3443,7 @@ export class GrokPlaceCanvas {
     const capability = await this.requireAgentCapability(request, agent);
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const now = Date.now();
-    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, now);
+    const agentStat = await this.readAgent(akey, agent, now);
 
     const titleScan = scanTextSafety(typeof body.title === "string" ? body.title.trim().slice(0, 80) : "", "plan title");
     const summaryScan = scanTextSafety(typeof body.summary === "string" ? body.summary.trim().slice(0, 600) : "", "plan summary");
@@ -2717,16 +3459,20 @@ export class GrokPlaceCanvas {
     if (!design) return json({ ok: false, error: "bad_design", message: "design accepts only w, h and bounded cells." }, 400, origin);
     const steps = this.sanitizeSteps(body.steps);
     if (steps === null) return json({ ok: false, error: "bad_steps", message: "Each step must contain only clean text and optional done." }, 400, origin);
-    if (body.tileBudget != null && (!Number.isInteger(body.tileBudget) || body.tileBudget < 0)) return json({ ok: false, error: "bad_tile_budget" }, 400, origin);
-    if (body.estimatedTurns != null && (!Number.isInteger(body.estimatedTurns) || body.estimatedTurns < 0)) return json({ ok: false, error: "bad_estimated_turns" }, 400, origin);
-    const tileBudget = Math.min(5000, body.tileBudget ?? design.cells.length);
-    const estimatedTurns = Math.min(2000, body.estimatedTurns ?? Math.ceil(tileBudget / TILES_PER_TURN));
+    const requestedTileBudget = typeof body.tileBudget === "number" ? body.tileBudget : null;
+    const requestedEstimatedTurns = typeof body.estimatedTurns === "number" ? body.estimatedTurns : null;
+    if (body.tileBudget != null && (requestedTileBudget === null || !Number.isInteger(requestedTileBudget) || requestedTileBudget < 0)) return json({ ok: false, error: "bad_tile_budget" }, 400, origin);
+    if (body.estimatedTurns != null && (requestedEstimatedTurns === null || !Number.isInteger(requestedEstimatedTurns) || requestedEstimatedTurns < 0)) return json({ ok: false, error: "bad_estimated_turns" }, 400, origin);
+    const tileBudget = Math.min(5000, requestedTileBudget ?? design.cells.length);
+    const estimatedTurns = Math.min(2000, requestedEstimatedTurns ?? Math.ceil(tileBudget / TILES_PER_TURN));
 
     let id = typeof body.id === "string" ? body.id.trim() : "";
+    /** @type {PlanRecord | null} */
     let existing = null;
     if (id) {
       if (!/^pl_[a-f0-9]{16}$/i.test(id)) return json({ ok: false, error: "bad_id" }, 400, origin);
-      existing = await this.state.storage.get(`plan:${id}`);
+      const storedPlan = await this.state.storage.get(`plan:${id}`);
+      existing = isPlanRecord(storedPlan) ? storedPlan : null;
       if (!existing || String(existing.agent).toLowerCase() !== akey) {
         return json({ ok: false, error: "not_yours", message: "Plan not found for this agent." }, 404, origin);
       }
@@ -2736,27 +3482,35 @@ export class GrokPlaceCanvas {
       const ids = (await this.state.storage.get(`planids:${akey}`)) || [];
       for (const priorId of Array.isArray(ids) ? ids.slice(0, 30) : []) {
         const priorRaw = await this.state.storage.get(`plan:${priorId}`);
-        if (priorRaw?.clientRequestId === clientRequestId) return json({ ok: true, already: true, plan: this.publicPlan(priorRaw), bank: await this.publicBank(akey, agentStat) }, 200, origin);
+        const prior = isPlanRecord(priorRaw) ? priorRaw : null;
+        if (prior?.clientRequestId === clientRequestId) return json({ ok: true, already: true, plan: this.publicPlan(prior), bank: await this.publicBank(akey, agentStat) }, 200, origin);
       }
       id = this.newPlanId();
     }
 
     // Activation is only possible through the separate consent-attestation mutation.
-    let status = typeof body.status === "string" ? body.status.trim().toLowerCase() : existing?.status || "draft";
+    let status = existing?.status || "draft";
+    if (typeof body.status === "string") {
+      const requestedStatus = body.status.trim().toLowerCase();
+      if (isPlanStatus(requestedStatus)) status = requestedStatus;
+    }
     const allowed = new Set(["draft", "proposed", "paused", "done", "rejected"]);
     if (existing?.ownerConsentAttestedByAgent) allowed.add("active").add("attested");
     if (!allowed.has(status)) status = "draft";
 
     if (body.progress != null && !hasOnlyKeys(body.progress, new Set(["tilesPlaced", "notes"]))) return json({ ok: false, error: "bad_progress" }, 400, origin);
-    const progressIn = body.progress && typeof body.progress === "object" ? body.progress : existing?.progress || {};
-    const progressScan = scanTextSafety(String(progressIn.notes || existing?.progress?.notes || "").slice(0, 400), "plan progress");
+    const progressIn = isJsonRecord(body.progress) ? body.progress : existing?.progress || {};
+    const progressNotes = typeof progressIn.notes === "string" ? progressIn.notes : existing?.progress?.notes || "";
+    const progressScan = scanTextSafety(progressNotes.slice(0, 400), "plan progress");
     if (!progressScan.ok) return json({ ok: false, error: "content_filtered", message: progressScan.reason }, 400, origin);
-    if (progressIn.tilesPlaced != null && (!Number.isInteger(progressIn.tilesPlaced) || progressIn.tilesPlaced < 0)) return json({ ok: false, error: "bad_progress" }, 400, origin);
+    const progressTilesPlaced = typeof progressIn.tilesPlaced === "number" ? progressIn.tilesPlaced : null;
+    if (progressIn.tilesPlaced != null && (progressTilesPlaced === null || !Number.isInteger(progressTilesPlaced) || progressTilesPlaced < 0)) return json({ ok: false, error: "bad_progress" }, 400, origin);
     const progress = {
-      tilesPlaced: Math.min(50000, progressIn.tilesPlaced ?? existing?.progress?.tilesPlaced ?? 0),
+      tilesPlaced: Math.min(50000, progressTilesPlaced ?? existing?.progress?.tilesPlaced ?? 0),
       notes: progressScan.value,
     };
 
+    /** @type {PlanRecord} */
     const plan = {
       id,
       agent,
@@ -2768,7 +3522,7 @@ export class GrokPlaceCanvas {
       tileBudget,
       estimatedTurns,
       status,
-      clientRequestId: existing?.clientRequestId || body.clientRequestId,
+      clientRequestId: existing?.clientRequestId || (typeof body.clientRequestId === "string" ? body.clientRequestId : undefined),
       ownerConsentAttestedByAgent: Boolean(existing?.ownerConsentAttestedByAgent),
       attestedAt: existing?.attestedAt || null,
       progress,
@@ -2776,19 +3530,21 @@ export class GrokPlaceCanvas {
       updatedAt: now,
     };
 
-    let ids = (await this.state.storage.get(`planids:${akey}`)) || [];
-    if (!Array.isArray(ids)) ids = [];
+    const storedIds = await this.state.storage.get(`planids:${akey}`);
+    let ids = Array.isArray(storedIds) ? storedIds.filter((storedId) => typeof storedId === "string") : [];
     if (!ids.includes(id)) ids = [id, ...ids].slice(0, 30);
 
+    /** @type {AgentStat} */
+    const updatedAgent = {
+      ...agentStat,
+      lastAt: now,
+      lastPlanId: id,
+      activePlanId: agentStat.activePlanId === id && status !== "active" ? null : agentStat.activePlanId,
+    };
     const put = {
       [`plan:${id}`]: plan,
       [`planids:${akey}`]: ids,
-      [`agent:${akey}`]: {
-        ...agentStat,
-        lastAt: now,
-        lastPlanId: id,
-        activePlanId: agentStat.activePlanId === id && status !== "active" ? null : agentStat.activePlanId,
-      },
+      [`agent:${akey}`]: updatedAgent,
     };
     await this.state.storage.put(put);
 
@@ -2797,7 +3553,7 @@ export class GrokPlaceCanvas {
       {
         ok: true,
         plan: pub,
-        bank: await this.publicBank(akey, put[`agent:${akey}`]),
+        bank: await this.publicBank(akey, updatedAgent),
         message:
           plan.status === "proposed" ? "Plan saved as proposed. Show the JSON representation to the owner, ask for consent, then attest via POST /v1/plan/confirm." : "Plan saved.",
         next: {
@@ -2811,6 +3567,7 @@ export class GrokPlaceCanvas {
     );
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handlePlanConfirm(request, origin, ip) {
     let body;
     try {
@@ -2844,7 +3601,8 @@ export class GrokPlaceCanvas {
     if (!/^pl_[a-f0-9]{16}$/i.test(id)) return json({ ok: false, error: "bad_id" }, 400, origin);
 
     const akey = parsed.agent.toLowerCase();
-    const plan = await this.state.storage.get(`plan:${id}`);
+    const storedPlan = await this.state.storage.get(`plan:${id}`);
+    const plan = isPlanRecord(storedPlan) ? storedPlan : null;
     if (!plan || String(plan.agent).toLowerCase() !== akey) {
       return json({ ok: false, error: "not_found" }, 404, origin);
     }
@@ -2855,7 +3613,7 @@ export class GrokPlaceCanvas {
     plan.status = body.activate === false ? "attested" : "active";
     plan.updatedAt = now;
 
-    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(parsed.agent, now);
+    const agentStat = await this.readAgent(akey, parsed.agent, now);
     if (plan.status === "active") agentStat.activePlanId = id;
     agentStat.lastAt = now;
 
@@ -2876,6 +3634,7 @@ export class GrokPlaceCanvas {
     );
   }
 
+  /** @param {Request} request @param {number} size @param {string} origin @param {string} ip */
   async handleVote(request, size, origin, ip) {
     let body;
     try {
@@ -2920,9 +3679,10 @@ export class GrokPlaceCanvas {
     if (prevVote !== 0) delta = dir - prevVote;
     const nextScore = Math.max(-50, Math.min(50, (scores[idx] || 0) + delta));
     scores[idx] = nextScore;
-    const ownerKey = await this.state.storage.get(`owner:${idx}`);
+    const ownerRaw = await this.state.storage.get(`owner:${idx}`);
+    const ownerKey = typeof ownerRaw === "string" ? ownerRaw : null;
     const agentKey = `agent:${akey}`;
-    let agentStat = (await this.state.storage.get(agentKey)) || this.defaultAgent(agent, now);
+    const agentStat = await this.readAgent(akey, agent, now);
     if ((agentStat.placements || 0) < 1) {
       return json({ ok: false, error: "vote_locked", message: "Place at least one tile before voting." }, 403, origin);
     }
@@ -2930,7 +3690,7 @@ export class GrokPlaceCanvas {
     agentStat.lastAt = now;
     agentStat.reputation = Math.round(((agentStat.reputation || 0) + (dir === 1 ? 0.25 : 0)) * 100) / 100;
     if (ownerKey && ownerKey !== akey) {
-      const ownerStat = (await this.state.storage.get(`agent:${ownerKey}`)) || this.defaultAgent(ownerKey, now);
+      const ownerStat = await this.readAgent(ownerKey, ownerKey, now);
       if (prevVote === 1) {
         ownerStat.upvotesReceived = Math.max(0, (ownerStat.upvotesReceived || 0) - 1);
         ownerStat.reputation = Math.max(0, (ownerStat.reputation || 0) - 2);
@@ -2949,17 +3709,19 @@ export class GrokPlaceCanvas {
       await this.state.storage.put(`agent:${ownerKey}`, ownerStat);
       await this.state.storage.put("leaders", await this.updateLeaders(ownerStat));
     }
-    const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0 };
+    const meta = await this.readCanvasMeta();
     meta.totalVotes = (meta.totalVotes || 0) + 1;
     meta.version = (meta.version || 0) + 1;
     const tileCi = fromStoredColor(board[idx]);
     const tileColor = tileCi === null ? null : PALETTE[tileCi];
     const entry = { type: "vote", x, y, dir, c: tileCi, color: tileColor || "#FFFFFF", agent, score: nextScore, t: now, v: meta.version };
-    let feed = (await this.state.storage.get("feed")) || [];
-    if (!Array.isArray(feed)) feed = [];
+    const storedFeed = await this.state.storage.get("feed");
+    /** @type {unknown[]} */
+    let feed = Array.isArray(storedFeed) ? storedFeed : [];
     feed = [entry, ...feed].slice(0, FEED_MAX);
-    let history = (await this.state.storage.get("history")) || [];
-    if (!Array.isArray(history)) history = [];
+    const storedHistory = await this.state.storage.get("history");
+    /** @type {unknown[]} */
+    let history = Array.isArray(storedHistory) ? storedHistory : [];
     history = [entry, ...history].slice(0, HISTORY_MAX);
     const leaders = await this.updateLeaders(agentStat);
     const newVoteCd = now + VOTE_COOLDOWN_MS;
@@ -2977,6 +3739,7 @@ export class GrokPlaceCanvas {
     }, 200, origin);
   }
 
+  /** @param {Request} request @param {number} size @param {string} origin @param {string} ip */
   async handleReport(request, size, origin, ip) {
     let body;
     try {
@@ -3011,13 +3774,14 @@ export class GrokPlaceCanvas {
     if (nextReportAt > now) {
       return json({ ok: false, error: "cooldown", message: `Wait ${Math.ceil((nextReportAt - now) / 1000)}s`, remainingMs: nextReportAt - now }, 429, origin);
     }
-    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, now);
+    const agentStat = await this.readAgent(akey, agent, now);
     if ((agentStat.placements || 0) < 1) {
       return json({ ok: false, error: "report_locked", message: "Place at least one clean tile before reporting." }, 403, origin);
     }
     const reportKey = `rpt:${x},${y}`;
-    let reporters = (await this.state.storage.get(reportKey)) || [];
-    if (!Array.isArray(reporters)) reporters = [];
+    const storedReporters = await this.state.storage.get(reportKey);
+    /** @type {TileReport[]} */
+    const reporters = Array.isArray(storedReporters) ? storedReporters.filter(isTileReport) : [];
     if (reporters.some((r) => r.a === akey)) {
       return json({ ok: false, error: "already_reported", message: `Already reported (${x},${y}).`, reports: reporters.length, threshold: REPORT_THRESHOLD }, 409, origin);
     }
@@ -3031,25 +3795,28 @@ export class GrokPlaceCanvas {
       cleared = true;
       await this.state.storage.delete(`owner:${idx}`);
       await this.state.storage.delete(reportKey);
-      const meta = (await this.state.storage.get("meta")) || { version: 0, totalPlacements: 0 };
+      const meta = await this.readCanvasMeta();
       meta.version = (meta.version || 0) + 1;
       meta.totalReportsCleared = (meta.totalReportsCleared || 0) + 1;
       const entry = { type: "clear", x, y, agent, reason, t: now, v: meta.version, reports: reporters.length };
-      let feed = (await this.state.storage.get("feed")) || [];
-      if (!Array.isArray(feed)) feed = [];
+      const storedFeed = await this.state.storage.get("feed");
+      /** @type {unknown[]} */
+      let feed = Array.isArray(storedFeed) ? storedFeed : [];
       feed = [entry, ...feed].slice(0, FEED_MAX);
-      let history = (await this.state.storage.get("history")) || [];
-      if (!Array.isArray(history)) history = [];
+      const storedHistory = await this.state.storage.get("history");
+      /** @type {unknown[]} */
+      let history = Array.isArray(storedHistory) ? storedHistory : [];
       history = [entry, ...history].slice(0, HISTORY_MAX);
       await this.state.storage.put({ board: this.bufCopy(board), scores: this.scoresCopy(scores), meta, feed, history, [rcdKey]: now + REPORT_COOLDOWN_MS });
     } else {
       const entry = { type: "report", x, y, agent, reason, t: now, reports: reporters.length, threshold: REPORT_THRESHOLD };
-      let feed = (await this.state.storage.get("feed")) || [];
-      if (!Array.isArray(feed)) feed = [];
+      const storedFeed = await this.state.storage.get("feed");
+      /** @type {unknown[]} */
+      let feed = Array.isArray(storedFeed) ? storedFeed : [];
       feed = [entry, ...feed].slice(0, FEED_MAX);
       await this.state.storage.put({ [reportKey]: reporters, feed, [rcdKey]: now + REPORT_COOLDOWN_MS });
     }
-    const currentMeta = (await this.state.storage.get("meta")) || {};
+    const currentMeta = await this.readCanvasMeta();
     this.broadcastLive(cleared ? ["canvas", "activity"] : ["activity"], currentMeta.version || 0);
     return json({
       ok: true,
@@ -3062,15 +3829,19 @@ export class GrokPlaceCanvas {
   }
 
   async getMusic() {
-    let m = await this.state.storage.get("music");
-    if (!m || typeof m !== "object") m = emptyMusicState();
-    if (!Array.isArray(m.queue)) m.queue = [];
+    const raw = await this.state.storage.get("music");
+    let m = this.normalizeMusic(raw);
     let changed = false;
-    const valid = (song) => song && typeof song === "object" && typeof song.id === "string" && typeof song.title === "string" && scanTextSafety(song.title, "composition title").ok && parseAgent(song.submittedBy).ok && isStoredComposition(song.composition) && song.license === "CC0-1.0" && song.originalNonInfringingAttested === true && !Object.keys(song).some((key) => ["url", "link", "href", "audio", "file", "source", "ref", "embedUrl", "canonical", "lyrics", "style", "sample"].includes(key));
+    /** @param {unknown} song @returns {song is MusicSong} */
+    const valid = (song) => isMusicSong(song) && scanTextSafety(song.title, "composition title").ok && parseAgent(song.submittedBy).ok && !Object.keys(song).some((key) => ["url", "link", "href", "audio", "file", "source", "ref", "embedUrl", "canonical", "lyrics", "style", "sample"].includes(key));
+    const normalizedDropped = isJsonRecord(raw)
+      ? (raw.now === undefined || raw.now === null || isMusicSong(raw.now) ? 0 : 1)
+        + (Array.isArray(raw.queue) ? raw.queue.filter((song) => !isMusicSong(song)).length : 0)
+      : 0;
     const before = m.queue.length + (m.now ? 1 : 0);
     m.queue = m.queue.filter(valid).slice(0, MUSIC_QUEUE_MAX);
     if (!valid(m.now)) m.now = null;
-    const dropped = before - m.queue.length - (m.now ? 1 : 0);
+    const dropped = normalizedDropped + before - m.queue.length - (m.now ? 1 : 0);
     if (dropped > 0) {
       m.version = (m.version || 0) + 1;
       await this.state.storage.put("musicQuarantine", { dropped, at: Date.now(), reason: "legacy_or_invalid_external_media" });
@@ -3096,10 +3867,12 @@ export class GrokPlaceCanvas {
     return m;
   }
 
+  /** @param {MusicSong[]} queue @returns {MusicSong[]} */
   sortQueue(queue) {
     return [...queue].sort((a, b) => (b.votes || 0) - (a.votes || 0) || (a.addedAt || 0) - (b.addedAt || 0));
   }
 
+  /** @param {MusicState} m @param {string} reason @returns {Promise<MusicState>} */
   async promoteNext(m, reason) {
     const sorted = this.sortQueue(m.queue || []);
     const next = sorted[0] || null;
@@ -3122,10 +3895,11 @@ export class GrokPlaceCanvas {
     return m;
   }
 
+  /** @param {string} origin */
   async handleMusicGet(origin) {
     const m = await this.getMusic();
     const now = publicComposition(m.now, true);
-    const queue = this.sortQueue(m.queue || []).map(publicComposition).filter(Boolean);
+    const queue = this.sortQueue(m.queue || []).map((song) => publicComposition(song)).filter(isPresent);
     return json({
       ok: true,
       now,
@@ -3143,6 +3917,7 @@ export class GrokPlaceCanvas {
     }, 200, origin, { "Cache-Control": "public, max-age=2" });
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handleMusicSubmit(request, origin, ip) {
     let body;
     try {
@@ -3177,7 +3952,7 @@ export class GrokPlaceCanvas {
     if (!titleScan.ok) return json({ ok: false, error: "content_filtered", message: titleScan.reason }, 400, origin);
     title = (titleScan.value || "untitled composition").slice(0, 80);
     const now = Date.now();
-    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, now);
+    const agentStat = await this.readAgent(akey, agent, now);
     if ((agentStat.placements || 0) < MUSIC_SUBMIT_MIN_PLACEMENTS) {
       return json({
         ok: false,
@@ -3202,6 +3977,7 @@ export class GrokPlaceCanvas {
     if ((m.queue || []).length >= MUSIC_QUEUE_MAX) {
       return json({ ok: false, error: "queue_full", message: `Queue full (${MUSIC_QUEUE_MAX}).` }, 400, origin);
     }
+    /** @type {MusicSong} */
     const song = {
       id: randomHex(8),
       title,
@@ -3220,9 +3996,10 @@ export class GrokPlaceCanvas {
     else await this.writeMusicAndAlarm(m);
     await this.state.storage.put(scd, String(now + MUSIC_SUBMIT_CD_MS));
     this.broadcastLive(["music"], m.version || 0);
-    return json({ ok: true, song: publicComposition(song), now: publicComposition(m.now, true), queue: this.sortQueue(m.queue || []).map(publicComposition), message: `Queued “${title}”.` }, 200, origin);
+    return json({ ok: true, song: publicComposition(song), now: publicComposition(m.now, true), queue: this.sortQueue(m.queue || []).map((queuedSong) => publicComposition(queuedSong)), message: `Queued “${title}”.` }, 200, origin);
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handleMusicVote(request, origin, ip) {
     let body;
     try {
@@ -3242,7 +4019,7 @@ export class GrokPlaceCanvas {
     const songId = typeof body.songId === "string" ? body.songId.trim() : "";
     if (!songId) return json({ ok: false, error: "bad_song", message: "songId required" }, 400, origin);
     const now = Date.now();
-    let agentStat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(agent, now);
+    const agentStat = await this.readAgent(akey, agent, now);
     if ((agentStat.placements || 0) < 1) {
       return json({
         ok: false,
@@ -3268,9 +4045,10 @@ export class GrokPlaceCanvas {
     await this.writeMusicAndAlarm(m);
     await this.state.storage.put(vcd, String(now + MUSIC_VOTE_CD_MS));
     this.broadcastLive(["music"], m.version || 0);
-    return json({ ok: true, song: publicComposition(song), queue: this.sortQueue(m.queue).map(publicComposition), message: `Voted for “${song.title}” (${song.votes} votes).` }, 200, origin);
+    return json({ ok: true, song: publicComposition(song), queue: this.sortQueue(m.queue).map((queuedSong) => publicComposition(queuedSong)), message: `Voted for “${song.title}” (${song.votes} votes).` }, 200, origin);
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handleMusicReport(request, origin, ip) {
     let body;
     try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
@@ -3284,8 +4062,8 @@ export class GrokPlaceCanvas {
     const capability = await this.requireAgentCapability(request, parsed.agent);
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const akey = parsed.agent.toLowerCase();
-    const stat = await this.state.storage.get(`agent:${akey}`);
-    if (!stat || (stat.placements || 0) < 1) return json({ ok: false, error: "placement_required" }, 403, origin);
+    const stat = await this.readAgent(akey, parsed.agent, Date.now());
+    if (stat.placements < 1) return json({ ok: false, error: "placement_required" }, 403, origin);
     const reason = scanTextSafety(typeof body.reason === "string" ? body.reason.slice(0, 120) : "suspected infringement", "music report");
     if (!reason.ok) return json({ ok: false, error: "content_filtered", message: reason.reason }, 400, origin);
     const songId = typeof body.songId === "string" ? body.songId.trim() : "";
@@ -3313,6 +4091,7 @@ export class GrokPlaceCanvas {
     return json({ ok: true, songId, reports: cleared ? MUSIC_REPORT_THRESHOLD : song.reporters.length, threshold: MUSIC_REPORT_THRESHOLD, cleared, message: cleared ? "Composition suppressed after three unique infringement reports." : "Infringement report recorded." }, 200, origin);
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handleMusicAdvance(request, origin, ip) {
     let body = {};
     try {
@@ -3357,8 +4136,9 @@ export class GrokPlaceCanvas {
       if (!(await this.timingSafeEqualStr(presented, m.now.advanceToken || ""))) {
         return json({ ok: false, error: "advance_token_invalid", message: "advanceToken does not match the current composition." }, 403, origin);
       }
-      const opensAt = m.now.endsAt - MUSIC_ADVANCE_WINDOW_MS;
-      if (Date.now() < opensAt) return json({ ok: false, error: "too_early", message: "Public advance opens shortly before the deterministic end time.", opensAt, endsAt: m.now.endsAt }, 429, origin);
+      const endsAt = typeof m.now.endsAt === "number" ? m.now.endsAt : (m.now.startedAt || Date.now()) + m.now.composition.durationMs;
+      const opensAt = endsAt - MUSIC_ADVANCE_WINDOW_MS;
+      if (Date.now() < opensAt) return json({ ok: false, error: "too_early", message: "Public advance opens shortly before the deterministic end time.", opensAt, endsAt }, 429, origin);
     }
     m = await this.promoteNext(m, adminForce ? "admin-force" : "ended");
     this.broadcastLive(["music"], m.version || 0);
@@ -3366,17 +4146,19 @@ export class GrokPlaceCanvas {
       ok: true,
       advanced: true,
       now: publicComposition(m.now, true),
-      queue: this.sortQueue(m.queue || []).map(publicComposition),
+      queue: this.sortQueue(m.queue || []).map((song) => publicComposition(song)),
       message: m.now ? `Now playing “${m.now.title}”` : "Queue finished.",
     }, 200, origin);
   }
 
+  /** @param {string} origin */
   async handleFeatures(origin) {
-    let features = (await this.state.storage.get("features")) || [];
-    if (!Array.isArray(features)) features = [];
-    return json({ ok: true, activityTrust: UNTRUSTED_ACTIVITY, features: [...features].sort((a, b) => b.votes - a.votes || a.createdAt - b.createdAt).map(publicFeature).filter(Boolean) }, 200, origin, { "Cache-Control": "public, max-age=2" });
+    const storedFeatures = await this.state.storage.get("features");
+    const features = Array.isArray(storedFeatures) ? storedFeatures.filter(isFeatureRecord) : [];
+    return json({ ok: true, activityTrust: UNTRUSTED_ACTIVITY, features: [...features].sort((a, b) => b.votes - a.votes || a.createdAt - b.createdAt).map(publicFeature).filter(isPresent) }, 200, origin, { "Cache-Control": "public, max-age=2" });
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handleFeatureSubmit(request, origin, ip) {
     let body;
     try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
@@ -3390,20 +4172,22 @@ export class GrokPlaceCanvas {
     const akey = parsed.agent.toLowerCase();
     const capability = await this.requireAgentCapability(request, parsed.agent);
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
-    const stat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(parsed.agent, Date.now());
+    const stat = await this.readAgent(akey, parsed.agent, Date.now());
     if ((stat.placements || 0) < 1) return json({ ok: false, error: "placement_required", message: "Place one tile before proposing a feature." }, 403, origin);
     const title = scanTextSafety(typeof body.title === "string" ? body.title.trim().slice(0, 80) : "", "feature title");
     const summary = scanTextSafety(typeof body.summary === "string" ? body.summary.trim().slice(0, 400) : "", "feature summary");
     if (!title.ok || !summary.ok || title.value.length < 3 || summary.value.length < 8) return json({ ok: false, error: "bad_feature", message: "Clean title (3-80 chars) and summary (8-400 chars) required." }, 400, origin);
-    let features = (await this.state.storage.get("features")) || [];
-    if (!Array.isArray(features)) features = [];
+    const storedFeatures = await this.state.storage.get("features");
+    const features = Array.isArray(storedFeatures) ? storedFeatures.filter(isFeatureRecord) : [];
     if (features.some((f) => f.title.toLowerCase() === title.value.toLowerCase())) return json({ ok: false, error: "duplicate" }, 409, origin);
     if (features.length >= FEATURE_QUEUE_MAX) return json({ ok: false, error: "queue_full" }, 429, origin);
+    /** @type {FeatureRecord} */
     const feature = { id: `ft_${randomHex(8)}`, title: title.value, summary: summary.value, submittedBy: parsed.agent, votes: 1, voters: [akey], status: "proposed", createdAt: Date.now() };
     await this.state.storage.put("features", [...features, feature]);
     return json({ ok: true, feature: publicFeature(feature) }, 201, origin);
   }
 
+  /** @param {Request} request @param {string} origin @param {string} ip */
   async handleFeatureVote(request, origin, ip) {
     let body;
     try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400, origin); }
@@ -3415,12 +4199,13 @@ export class GrokPlaceCanvas {
     const akey = parsed.agent.toLowerCase();
     const capability = await this.requireAgentCapability(request, parsed.agent);
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
-    const stat = (await this.state.storage.get(`agent:${akey}`)) || this.defaultAgent(parsed.agent, Date.now());
+    const stat = await this.readAgent(akey, parsed.agent, Date.now());
     if ((stat.placements || 0) < 1) return json({ ok: false, error: "placement_required" }, 403, origin);
     const nextAt = Number((await this.state.storage.get(`fvcd:${akey}`)) || 0);
     if (nextAt > Date.now()) return json({ ok: false, error: "cooldown", remainingMs: nextAt - Date.now() }, 429, origin);
     const id = typeof body.featureId === "string" ? body.featureId.trim() : "";
-    let features = (await this.state.storage.get("features")) || [];
+    const storedFeatures = await this.state.storage.get("features");
+    const features = Array.isArray(storedFeatures) ? storedFeatures.filter(isFeatureRecord) : [];
     const index = features.findIndex((f) => f.id === id && f.status === "proposed");
     if (index < 0) return json({ ok: false, error: "not_found" }, 404, origin);
     const feature = features[index];
@@ -3431,6 +4216,7 @@ export class GrokPlaceCanvas {
     return json({ ok: true, feature: publicFeature(feature) }, 200, origin);
   }
 
+  /** @param {Request} request @param {string} origin */
   async handleReset(request, origin) {
     const auth = request.headers.get("Authorization") || "";
     const secret = this.env.RESET_SECRET || "";
@@ -3463,7 +4249,7 @@ export class GrokPlaceCanvas {
     if (clearedMusic) await this.writeMusicAndAlarm(clearedMusic);
     // Drop rate-limit / cooldown / challenge buckets so admin reset fully unsticks ops/tests
     if (body.clearLimits !== false) {
-      const prefixes = ["rl:", "pow:", "cd:", "vcd:", "mscd:", "mvcd:", "rcd:"];
+      const prefixes = ["rl:", "pow:", "reviewauth:", "cd:", "vcd:", "mscd:", "mvcd:", "rcd:"];
       for (const prefix of prefixes) {
         const listed = await this.state.storage.list({ prefix, limit: 1000 });
         const keys = [...listed.keys()];
@@ -3476,6 +4262,7 @@ export class GrokPlaceCanvas {
 }
 
 export default {
+  /** @param {Request} request @param {WorkerEnv} env */
   async fetch(request, env) {
     const origin = request.headers.get("Origin") || "*";
     const url = new URL(request.url);
@@ -3486,7 +4273,7 @@ export default {
     // GitHub-hosted runners can be denied by the branded zone's edge policy.
     // Keep the alternate workers.dev origin read-only and path-scoped so it
     // cannot become a bypass for the application or mutation controls.
-    if (url.hostname.endsWith(WORKERS_DEV_SUFFIX) && !(method === "GET" && path === "/v1/reviews")) {
+    if (isWorkersDevHost(url.hostname) && !(method === "GET" && path === "/v1/reviews")) {
       return plainText("Not found", origin, 404);
     }
     if (method === "OPTIONS") {
@@ -3568,6 +4355,7 @@ export default {
       if (path === "/v1/reset" && request.method === "POST") return forwardToCanvas(env, "/internal/reset", request, origin);
       if (path === "/v1/challenge" && request.method === "GET") return forwardToCanvas(env, "/internal/challenge", request, origin);
       if (path === "/v1/agent/claim" && request.method === "POST") return forwardToCanvas(env, "/internal/agent/claim", request, origin);
+      if (path === "/v1/reviews/claim" && request.method === "POST") return forwardToCanvas(env, "/internal/reviews/claim", request, origin);
       if (path === "/v1/agent/rotate" && request.method === "POST") return forwardToCanvas(env, "/internal/agent/rotate", request, origin);
       if (path === "/v1/canvas" && request.method === "GET") return forwardToCanvas(env, "/internal/canvas", request, origin);
       if (path === "/v1/feed" && request.method === "GET") return forwardToCanvas(env, "/internal/feed", request, origin);

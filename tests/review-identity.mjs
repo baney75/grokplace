@@ -64,6 +64,10 @@ class MemoryStorage {
     if (key && typeof key === "object") for (const [name, item] of Object.entries(key)) this.values.set(name, item);
     else this.values.set(key, value);
   }
+  async delete(key) { this.values.delete(key); }
+  async list({ prefix = "", limit = 1_000 } = {}) {
+    return new Map([...this.values.entries()].filter(([key]) => key.startsWith(prefix)).slice(0, limit));
+  }
 }
 
 async function attest(storageValues, agent = "critic-agent") {
@@ -112,19 +116,110 @@ check(
   JSON.stringify(claimedAttestation.data)
 );
 
+const reviewStorage = new MemoryStorage();
+const reviewCanvas = new GrokPlaceCanvas({ storage: reviewStorage }, {});
+reviewCanvas.consumeProof = async () => ({ ok: true });
+const reviewClaimResponse = await reviewCanvas.handleReviewClaim(
+  new Request("https://test/internal/reviews/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ challengeId: "test", nonce: 0 }),
+  }),
+  "*",
+  "review-ip"
+);
+const reviewClaim = await reviewClaimResponse.json();
+const reviewAgent = typeof reviewClaim.agent === "string" ? reviewClaim.agent : "";
+const reviewCapability = typeof reviewClaim.reviewCapability === "string" ? reviewClaim.reviewCapability : "";
+const reviewRecord = reviewAgent ? await reviewStorage.get(`reviewauth:${reviewAgent.toLowerCase()}`) : null;
+check(
+  "review claim issues only a short-lived review credential",
+  reviewClaimResponse.status === 201 &&
+    /^reviewer_[a-f0-9]{16}$/.test(reviewAgent) &&
+    /^gp_r_[a-f0-9]{64}$/.test(reviewCapability) &&
+    reviewRecord?.agent === reviewAgent &&
+    !await reviewStorage.get(`auth:${reviewAgent.toLowerCase()}`) &&
+    !await reviewStorage.get(`agent:${reviewAgent.toLowerCase()}`),
+  JSON.stringify(reviewClaim)
+);
+
+await reviewStorage.put("reviewauth:expired-review", {
+  agent: "expired-review",
+  hash: "a".repeat(64),
+  version: 1,
+  createdAt: 0,
+  expiresAt: 0,
+});
+await reviewCanvas.handleReviewClaim(
+  new Request("https://test/internal/reviews/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ challengeId: "cleanup", nonce: 0 }),
+  }),
+  "*",
+  "review-ip"
+);
+check("validated review claims reclaim expired review credentials in a bounded batch", !await reviewStorage.get("reviewauth:expired-review"));
+
+const reviewAttestResponse = await reviewCanvas.handleReviewAttest(
+  new Request("https://test/internal/reviews/attest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Review ${reviewCapability}` },
+    body: JSON.stringify({
+      agent: reviewAgent,
+      headSha,
+      verdict: "SHIP",
+      findings: "No blocking findings in the bounded review.",
+      residualRisk: "A later dependency change could alter behavior.",
+      challengeId: "test",
+      nonce: 0,
+    }),
+  }),
+  "*",
+  "review-ip"
+);
+check(
+  "review-only credential can attest but remains claimed-only",
+  reviewAttestResponse.status === 201 && (await reviewAttestResponse.clone().json()).review?.reviewerAgent === reviewAgent && (await reviewAttestResponse.clone().json()).review?.reviewerTrust === "claimed_agent_only"
+);
+
+const reviewPlaceResponse = await reviewCanvas.handlePlace(
+  new Request("https://test/internal/place", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Review ${reviewCapability}` },
+    body: JSON.stringify({ agent: reviewAgent, goal: "test tile", x: 0, y: 0, color: 0, challengeId: "test", nonce: 0 }),
+  }),
+  2,
+  30_000,
+  "*",
+  "review-ip"
+);
+check(
+  "review-only credential cannot place tiles",
+  reviewPlaceResponse.status === 401 && (await reviewPlaceResponse.json()).error === "agent_claim_required"
+);
+
+await reviewStorage.put(`reviewauth:${reviewAgent.toLowerCase()}`, { ...reviewRecord, expiresAt: 0 });
+const expiredReview = await reviewCanvas.requireReviewCapability(
+  new Request("https://test/internal/reviews/attest", { headers: { Authorization: `Review ${reviewCapability}` } }),
+  reviewAgent
+);
+check("expired review capability is deleted and rejected", !expiredReview.ok && expiredReview.error === "review_capability_expired" && !await reviewStorage.get(`reviewauth:${reviewAgent.toLowerCase()}`));
+
 const capability = `gp_a_${"a".repeat(64)}`;
+const reviewCapabilityLeak = `gp_r_${"b".repeat(64)}`;
 const legacyPublic = claimedAttestation.canvas.publicReview({
   id: artifactId,
   reviewerAgent: "critic-agent",
   headSha,
   verdict: "SHIP",
-  findings: `legacy ${capability}`,
+  findings: `legacy ${capability} ${reviewCapabilityLeak}`,
   residualRisk: "Legacy review identity has limited assurance.",
   createdAt: 1,
 });
 check(
   "legacy claimed artifact is token-safe",
-  legacyPublic?.reviewerTrust === "claimed_agent_only" && !/gp_a_[a-f0-9]{64}/i.test(JSON.stringify(legacyPublic)),
+  legacyPublic?.reviewerTrust === "claimed_agent_only" && !/gp_[ar]_[a-f0-9]{64}/i.test(JSON.stringify(legacyPublic)),
   JSON.stringify(legacyPublic)
 );
 

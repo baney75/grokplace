@@ -29,12 +29,15 @@ jobs:
       - name: Static syntax and governance regression checks
         run: |
           npm run check:static
+          npm run types:check
           npm run test:frontend
           npm run test:governance
           npm run test:award
           npm run test:review-identity
           npm run test:realtime
           npm run test:security
+          npm run test:worker-compatibility
+          npm run test:maintenance-containment
 
       - name: Dependency audit
         run: npm audit --audit-level=high
