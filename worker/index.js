@@ -2412,6 +2412,11 @@ export class GrokPlaceCanvas extends DurableObject {
     return typeof meta.tileEpoch === "string" && /^[a-f0-9]{16}$/.test(meta.tileEpoch) ? meta.tileEpoch : "0000000000000000";
   }
 
+  /** @param {CanvasMeta} meta @param {number} x @param {number} y */
+  tileReportKey(meta, x, y) {
+    return meta.tileEpoch ? `rpt:${this.tileEpoch(meta)}:${x},${y}` : `rpt:${x},${y}`;
+  }
+
   /** @param {TileProvenance | null | undefined} provenance @returns {TileProvenanceSnapshot | null} */
   provenanceSnapshot(provenance) {
     if (!provenance || !isTileProvenanceSnapshot(provenance)) return null;
@@ -3770,6 +3775,7 @@ export class GrokPlaceCanvas extends DurableObject {
         put[provenanceRowKey(y)] = provenanceRow;
         put[ownerCellKey(x, y)] = akey;
         await this.revokeRestorationForTile(storage, this.tileEpoch(meta), priorProvenance, x, y);
+        await storage.delete(this.tileReportKey(meta, x, y));
         await storage.delete(protectionKey(x, y));
       }
 
@@ -4136,6 +4142,7 @@ export class GrokPlaceCanvas extends DurableObject {
       }
       const epoch = this.tileEpoch(meta);
       for (const placedTile of placed) {
+        await storage.delete(this.tileReportKey(meta, placedTile.x, placedTile.y));
         await this.revokeRestorationForTile(storage, epoch, placedTile.priorProvenance, placedTile.x, placedTile.y);
         const prior = this.provenanceSnapshot(placedTile.priorProvenance);
         const overwritten = this.provenanceSnapshot(provenanceRows.get(placedTile.y)?.[placedTile.x]);
@@ -4417,6 +4424,7 @@ export class GrokPlaceCanvas extends DurableObject {
           board[idx] = toStoredColor(source.colorIndex);
           if (scores[idx] < 0) scores[idx] = 0;
           put[ownerCellKey(tile.x, tile.y)] = akey;
+          await storage.delete(this.tileReportKey(meta, tile.x, tile.y));
           await this.revokeRestorationForTile(storage, activeEpoch, current, tile.x, tile.y);
           entries.push({ type: "reclaim", x: tile.x, y: tile.y, c: source.colorIndex, color: PALETTE[source.colorIndex], agent, goal: source.goal, t: now, v: (meta.version || 0) + 1, batchOrder: entries.length });
         }
@@ -4464,6 +4472,7 @@ export class GrokPlaceCanvas extends DurableObject {
         put[provenanceRowKey(event.y)] = row;
         put[ownerCellKey(event.x, event.y)] = akey;
         put[protectionKey(event.x, event.y)] = protection;
+        await storage.delete(this.tileReportKey(meta, event.x, event.y));
         await this.removeRestorationEvent(storage, activeEpoch, akey, event.id);
         entries.push({ type: "restore", x: event.x, y: event.y, c: event.prior.colorIndex, color: PALETTE[event.prior.colorIndex], agent, goal: event.prior.goal, t: now, v: meta.version, batchOrder: 0 });
         bodyResult = { ok: true, action, agent, eventId: event.id, restored: { x: event.x, y: event.y, colorIndex: event.prior.colorIndex, color: PALETTE[event.prior.colorIndex] }, chargedCredits: 0, spentTurnTiles: 0, protection: publicProtection(protection), version: meta.version, rewards: { placements: 0, reputation: 0, transferableCredits: 0 } };
@@ -6957,7 +6966,7 @@ export class GrokPlaceCanvas extends DurableObject {
       const idx = y * size + x;
       if (fromStoredColor(board[idx]) === null) return { status: 409, body: { ok: false, error: "empty_tile", message: "Only painted tiles can be reported." }, cleared: false, version: 0 };
       const meta = normalizeCanvasMeta(await storage.get("meta"));
-      const reportKey = meta.tileEpoch ? `rpt:${meta.tileEpoch}:${x},${y}` : `rpt:${x},${y}`;
+      const reportKey = this.tileReportKey(meta, x, y);
       const storedReporters = await storage.get(reportKey);
       const reporters = Array.isArray(storedReporters) ? storedReporters.filter(isTileReport) : [];
       if (reporters.some((reporter) => reporter.a === akey)) return { status: 409, body: { ok: false, error: "already_reported", message: `Already reported (${x},${y}).`, reports: reporters.length, threshold: REPORT_THRESHOLD }, cleared: false, version: meta.version || 0 };

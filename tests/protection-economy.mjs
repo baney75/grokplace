@@ -144,6 +144,16 @@ async function reportOn(targetCanvas, body, targetSize = size) {
   return { response, data: await response.json() };
 }
 
+async function placeOn(targetCanvas, body, targetSize = size) {
+  const request = new Request("https://test/internal/place", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await targetCanvas.handlePlace(request, targetSize, 60_000, "*", "test-ip");
+  return { response, data: await response.json() };
+}
+
 try {
   let result = await protect({ agent: "protector", x: 1, y: 1, action: "protect", clientRequestId: "protect-cell-1" });
   const firstProtection = await storage.get("protection:cell:1:1");
@@ -375,20 +385,22 @@ try {
   const mutationBoard = new Uint8Array(size * size);
   mutationBoard[0] = 6;
   mutationBoard[1] = 7;
+  mutationBoard[2] = 8;
   const mutationValues = {
     board: mutationBoard.buffer,
     scores: new Int16Array(size * size).buffer,
     size,
     schema: 4,
-    meta: { version: 1, tileEpoch: 1, totalPlacements: 2, totalVotes: 0, totalReportsCleared: 0, uniqueAgents: 1, lastPlaceAt: now },
+    meta: { version: 1, tileEpoch: "1111111111111111", totalPlacements: 2, totalVotes: 0, totalReportsCleared: 0, uniqueAgents: 1, lastPlaceAt: now },
     feed: [],
     history: [],
     leaders: [],
     "owner:cell:0:0": "artist",
     "owner:cell:1:0": "artist",
+    "owner:cell:2:0": "artist",
     "agent:artist": { name: "artist", placements: 2, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 2, firstAt: now, lastAt: now },
   };
-  for (const agent of ["voter-a", "voter-b", "duplicate-voter", "reporter-a", "reporter-b", "reporter-c"]) {
+  for (const agent of ["voter-a", "voter-b", "duplicate-voter", "reporter-a", "reporter-b", "reporter-c", "reporter-d"]) {
     mutationValues[`agent:${agent}`] = { name: agent, placements: 1, votesCast: 0, upvotesReceived: 0, downvotesReceived: 0, reputation: 1, firstAt: now, lastAt: now };
   }
   const mutationStorage = new TransactionalMemoryStorage(mutationValues);
@@ -438,6 +450,25 @@ try {
       && (await mutationStorage.get("meta"))?.totalReportsCleared === 1
       && clears.length === 1,
     JSON.stringify({ reports: reports.map((item) => item.data), meta: await mutationStorage.get("meta"), clears })
+  );
+
+  const currentEpoch = mutationCanvas.tileEpoch(await mutationStorage.get("meta"));
+  await mutationStorage.put(`rpt:${currentEpoch}:2,0`, [
+    { a: "reporter-a", t: now, reason: "unsafe" },
+    { a: "reporter-b", t: now, reason: "unsafe" },
+  ]);
+  const replacement = await placeOn(mutationCanvas, { agent: "artist", goal: "safe replacement", x: 2, y: 0, color: 9 });
+  const replacementReport = await reportOn(mutationCanvas, { agent: "reporter-d", x: 2, y: 0, reason: "unsafe" });
+  check(
+    "reports against an overwritten tile cannot clear its replacement",
+    replacement.response.status === 200
+      && replacementReport.response.status === 200
+      && replacementReport.data.report?.count === 1
+      && replacementReport.data.report?.cleared === false
+      && new Uint8Array(await mutationStorage.get("board"))[2] === 10
+      && (await mutationStorage.get(`rpt:${currentEpoch}:2,0`))?.length === 1
+      && (await mutationStorage.get(`rpt:${currentEpoch}:2,0`))?.[0]?.a === "reporter-d",
+    JSON.stringify({ replacement: replacement.data, report: replacementReport.data, reports: await mutationStorage.get(`rpt:${currentEpoch}:2,0`) })
   );
 
   const racePlanId = "pl_cccccccccccccccc";
