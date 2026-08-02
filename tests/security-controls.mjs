@@ -53,12 +53,12 @@ check(
   const keys = [];
   const env = envWithRoute({ value: false });
   env.EDGE_READ_LIMITER = { async limit({ key }) { keys.push(key); return { success: true }; } };
-  for (const path of ["/v1/canvas", "/v1/feed", "/v1/music", "/v1/see", "/v1/snapshot", "/v1/view", "/see"]) {
+  for (const path of ["/v1/canvas", "/v1/feed", "/v1/music", "/v1/see", "/v1/snapshot", "/v1/view", "/see", "/v1/tile?x=0&y=0", "/v1/goals?x=0&y=0&w=1&h=1"]) {
     await worker.fetch(new Request(`https://grokplace.barnlabs.net${path}`, {
       headers: { "CF-Connecting-IP": "203.0.113.9" },
     }), env);
   }
-  check("all public read aliases share one bounded edge bucket", keys.length === 7 && new Set(keys).size === 1);
+  check("all public read aliases share one bounded edge bucket", keys.length === 9 && new Set(keys).size === 1);
 }
 
 {

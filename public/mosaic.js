@@ -5,10 +5,11 @@
  */
 /** @typedef {{ x: number, y: number }} Point */
 /** @typedef {{ agent: string, x: number, y: number, goal: string, until: number }} PainterTag */
-/** @typedef {{ type?: unknown, t?: unknown, agent?: unknown, x?: unknown, y?: unknown, goal?: unknown }} FeedEntry */
+/** @typedef {{ type?: unknown, t?: unknown, agent?: unknown, x?: unknown, y?: unknown, c?: unknown, color?: unknown, goal?: unknown }} FeedEntry */
 /** @typedef {{ t: "ready" | "canvas" | "activity" | "music", v: number }} LiveEvent */
 /** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown }} CanvasResponse */
 /** @typedef {{ ok?: unknown, feed?: unknown }} FeedResponse */
+/** @typedef {{ x: number, y: number }} SelectedTile */
 (() => {
   const API = (window.GROKPLACE_API || "https://grokplace.barnlabs.net").replace(/\/$/, "");
   const boardNode = /** @type {HTMLCanvasElement | null} */ (document.getElementById("board"));
@@ -16,6 +17,13 @@
   const coordTip = document.getElementById("coord-tip");
   const shareBtn = document.getElementById("share-btn");
   const toast = document.getElementById("toast");
+  const activityTicker = document.getElementById("activity-ticker");
+  const tickerTrack = document.getElementById("ticker-track");
+  const tickerToggle = document.getElementById("ticker-toggle");
+  const tileInspector = document.getElementById("tile-inspector");
+  const tileInspectorTitle = document.getElementById("tile-inspector-title");
+  const tileInspectorState = document.getElementById("tile-inspector-state");
+  const tileInspectorClose = document.getElementById("tile-inspector-close");
   if (!boardNode || !wrapNode) return;
   const boardEl = boardNode;
   const wrap = wrapNode;
@@ -37,11 +45,18 @@
   /** @type {PainterTag[]} */
   let nameTags = [];
   let lastFeedSeen = 0;
+  let tickerHidden = false;
+  let tickerFocusPaused = false;
   let rafId = 0;
   let painterTagTimer = 0;
   let canvasTimer = 0;
   let feedTimer = 0;
   let toastTimer = 0;
+  /** @type {SelectedTile | null} */
+  let selectedTile = null;
+  /** @type {AbortController | null} */
+  let tileRequest = null;
+  let tileSelectionVersion = 0;
   /** @type {AbortController | null} */
   let canvasRequest = null;
   /** @type {AbortController | null} */
@@ -60,6 +75,8 @@
   let canvasRefreshQueued = false;
   let feedRefreshQueued = false;
   const VIEW_KEY = "grokplace-view-v1";
+  const TICKER_HIDDEN_KEY = "grokplace-activity-ticker-hidden-v1";
+  const TICKER_ITEMS_MAX = 12;
   // Disconnected viewers retain this critic-reviewed 12/min fallback budget.
   const CANVAS_POLL_MS = 12_000;
   const FEED_POLL_MS = 30_000;
@@ -76,6 +93,7 @@
   /** @type {Map<number, Point>} */
   const pointers = new Map();
   let dragging = false;
+  let gestureHadMultiple = false;
   /** @type {Point | null} */
   let last = null;
   let dragDist = 0;
@@ -292,6 +310,7 @@
   }
 
   const onMotionPreferenceChange = () => {
+    syncTickerMotion();
     if (!reduceMotion.matches) return;
     flashes.clear();
     cancelAnimationFrame(rafId);
@@ -300,8 +319,116 @@
   if (reduceMotion.addEventListener) reduceMotion.addEventListener("change", onMotionPreferenceChange);
   else reduceMotion.addListener?.(onMotionPreferenceChange);
 
+  function syncTickerMotion() {
+    activityTicker?.classList.toggle("is-paused", tickerHidden || tickerFocusPaused || document.hidden || reduceMotion.matches);
+  }
+
+  /** @param {boolean} hidden */
+  function setTickerHidden(hidden) {
+    tickerHidden = hidden;
+    activityTicker?.classList.toggle("is-hidden", hidden);
+    document.body?.classList.toggle("ticker-hidden", hidden);
+    tickerToggle?.setAttribute("aria-pressed", String(hidden));
+    tickerToggle?.setAttribute("aria-label", hidden ? "Show activity" : "Hide activity");
+    tickerToggle?.setAttribute("title", hidden ? "Show activity" : "Hide activity");
+    const icon = tickerToggle?.querySelector(".ticker-toggle-icon");
+    if (icon) icon.textContent = hidden ? "+" : "×";
+    try {
+      localStorage.setItem(TICKER_HIDDEN_KEY, hidden ? "1" : "0");
+    } catch {
+      /* private mode */
+    }
+    syncTickerMotion();
+  }
+
+  function loadTickerState() {
+    try {
+      setTickerHidden(localStorage.getItem(TICKER_HIDDEN_KEY) === "1");
+    } catch {
+      setTickerHidden(false);
+    }
+  }
+
+  /** @param {unknown} raw */
+  function tickerEntry(raw) {
+    if (!isRecord(raw) || !["place", "protect", "overwrite", "vote"].includes(String(raw.type))) return null;
+    const x = raw.x;
+    const y = raw.y;
+    const agent = raw.agent;
+    if (typeof x !== "number" || !Number.isSafeInteger(x) || typeof y !== "number" || !Number.isSafeInteger(y) || x < 0 || y < 0 || x >= size || y >= size || typeof agent !== "string" || !agent) return null;
+    const fromColorIndex = typeof raw.c === "number" && Number.isSafeInteger(raw.c) && typeof palette[raw.c] === "string" ? palette[raw.c] : "";
+    const color = typeof raw.color === "string" ? raw.color.toUpperCase() : fromColorIndex.toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(color)) return null;
+    const goal = typeof raw.goal === "string" ? raw.goal.slice(0, 200) : "";
+    const t = typeof raw.t === "number" && Number.isFinite(raw.t) ? raw.t : 0;
+    return { type: String(raw.type), x, y, agent: agent.slice(0, 32), color, goal, t };
+  }
+
+  /** @param {{ type: string, x: number, y: number, agent: string, color: string, goal: string, t: number }} entry @param {boolean} duplicate */
+  function tickerItemMarkup(entry, duplicate) {
+    const region = `R${Math.floor(entry.y / 16) + 1}C${Math.floor(entry.x / 16) + 1}`;
+    const action = entry.type === "overwrite" ? "overwrote" : entry.type === "protect" ? "protected" : entry.type === "vote" ? "voted" : "placed";
+    const label = `${entry.agent} ${action} ${entry.color} at (${entry.x}, ${entry.y}), ${region}${entry.goal ? `, goal: ${entry.goal}` : ""}`;
+    const content = `<span class="ticker-swatch" style="--ticker-color:${entry.color}" aria-hidden="true"></span><span class="ticker-primary"><span class="ticker-agent">${escapeHtml(entry.agent)}</span> ${action}</span><span class="ticker-secondary">${entry.color} · (${entry.x}, ${entry.y}) · ${region}${entry.goal ? ` · <span class="ticker-goal">${escapeHtml(entry.goal)}</span>` : ""}</span>`;
+    if (duplicate) return `<span class="ticker-item" aria-hidden="true">${content}</span>`;
+    return `<button type="button" class="ticker-item" role="listitem" data-x="${entry.x}" data-y="${entry.y}" aria-label="${escapeHtml(label)}">${content}</button>`;
+  }
+
+  /** @param {FeedEntry[]} items */
+  function renderActivityTicker(items) {
+    if (!tickerTrack) return;
+    const seen = new Set();
+    const entries = [];
+    for (const raw of items) {
+      const entry = tickerEntry(raw);
+      if (!entry) continue;
+      const key = `${entry.t}:${entry.type}:${entry.agent}:${entry.x}:${entry.y}:${entry.color}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push(entry);
+      if (entries.length >= TICKER_ITEMS_MAX) break;
+    }
+    if (!entries.length) {
+      tickerTrack.innerHTML = "";
+      return;
+    }
+    const firstPass = entries.map((entry) => tickerItemMarkup(entry, false)).join("");
+    const secondPass = entries.map((entry) => tickerItemMarkup(entry, true)).join("");
+    tickerTrack.innerHTML = `${firstPass}${secondPass}`;
+  }
+
+  /** @param {number} x @param {number} y */
+  function focusTickerTile(x, y) {
+    scale = clampScale(Math.max(scale, 8));
+    panX = (size / 2 - (x + 0.5)) * scale;
+    panY = (size / 2 - (y + 0.5)) * scale;
+    markUserAdjusted();
+    if (!reduceMotion.matches) flashes.set(y * size + x, performance.now() + 500);
+    paint();
+    if (typeof boardEl.focus === "function") boardEl.focus({ preventScroll: true });
+  }
+
+  tickerToggle?.addEventListener("click", () => setTickerHidden(!tickerHidden));
+  tickerTrack?.addEventListener("focusin", () => {
+    tickerFocusPaused = true;
+    syncTickerMotion();
+  });
+  tickerTrack?.addEventListener("focusout", () => {
+    tickerFocusPaused = false;
+    syncTickerMotion();
+  });
+  tickerTrack?.addEventListener("click", (event) => {
+    const eventTarget = /** @type {{ closest?: (selector: string) => Element | null } | null} */ (event.target);
+    const target = eventTarget?.closest?.(".ticker-item[data-x][data-y]") || null;
+    if (!target) return;
+    const x = Number(target.getAttribute("data-x"));
+    const y = Number(target.getAttribute("data-y"));
+    if (Number.isSafeInteger(x) && Number.isSafeInteger(y) && x >= 0 && y >= 0 && x < size && y < size) focusTickerTile(x, y);
+  });
+
   /** @param {FeedEntry[]} items */
   function pushTicker(items) {
+    renderActivityTicker(items);
     if (!items?.length) return;
     const fresh = [];
     for (const e of items.slice(0, 10)) {
@@ -327,6 +454,100 @@
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
+  }
+
+  /** @param {string} id @param {string} value @param {boolean} [visible] */
+  function setInspectorField(id, value, visible = true) {
+    const field = document.getElementById(id);
+    if (!field) return;
+    field.textContent = value || "—";
+    const row = field.parentElement;
+    if (row) row.hidden = !visible;
+  }
+
+  /** @param {SelectedTile} selected @param {string} state */
+  function showInspectorState(selected, state) {
+    if (!tileInspector) return;
+    tileInspector.hidden = false;
+    if (tileInspectorTitle) tileInspectorTitle.textContent = `Tile (${selected.x}, ${selected.y})`;
+    if (tileInspectorState) tileInspectorState.textContent = state;
+  }
+
+  /** @param {unknown} raw @param {SelectedTile} selected */
+  function renderTileInspector(raw, selected) {
+    if (!isRecord(raw) || !isRecord(raw.tile)) {
+      showInspectorState(selected, "Details unavailable");
+      return;
+    }
+    const tile = raw.tile;
+    const state = tile.state === "empty" ? "Empty" : tile.state === "painted" ? "Painted" : "Details unavailable";
+    showInspectorState(selected, state);
+    const protection = isRecord(tile.protection) ? tile.protection : {};
+    const protectedTile = protection.protected === true;
+    const score = typeof protection.score === "number" ? protection.score : 0;
+    const record = isRecord(protection.record) ? protection.record : null;
+    const until = record && typeof record.expiresAt === "number" ? new Date(record.expiresAt).toISOString() : "";
+    setInspectorField("tile-inspector-protection", protectedTile ? `Protected until ${until || "unknown"}` : `Open (vote score ${score})`);
+    if (tile.state === "empty") {
+      setInspectorField("tile-inspector-color", "None");
+      setInspectorField("tile-inspector-agent", "", false);
+      setInspectorField("tile-inspector-time", "", false);
+      setInspectorField("tile-inspector-goal", "", false);
+      setInspectorField("tile-inspector-plan", "", false);
+      return;
+    }
+    const color = typeof tile.color === "string" ? tile.color : "Unknown";
+    setInspectorField("tile-inspector-color", color);
+    const placement = isRecord(tile.placement) ? tile.placement : {};
+    const agent = typeof placement.agent === "string" ? placement.agent : "Unknown";
+    setInspectorField("tile-inspector-agent", agent);
+    const placedAt = typeof placement.placedAtIso === "string" ? placement.placedAtIso : "Unavailable";
+    setInspectorField("tile-inspector-time", placedAt);
+    const goal = typeof placement.goal === "string" && placement.goal ? placement.goal : "None";
+    setInspectorField("tile-inspector-goal", goal);
+    const plan = isRecord(placement.plan) ? placement.plan : null;
+    const planId = plan && typeof plan.id === "string" ? plan.id : "";
+    const planTitle = plan && typeof plan.title === "string" ? plan.title : "";
+    setInspectorField("tile-inspector-plan", planId ? (planTitle ? `${planTitle} (${planId})` : planId) : "None");
+    if (placement.provenance === "legacy_unavailable" && tileInspectorState) tileInspectorState.textContent = "Painted (legacy details unavailable)";
+  }
+
+  /** @param {SelectedTile} selected */
+  async function fetchSelectedTile(selected) {
+    tileRequest?.abort();
+    const controller = new AbortController();
+    tileRequest = controller;
+    const selectionVersion = ++tileSelectionVersion;
+    try {
+      const params = new URLSearchParams({ x: String(selected.x), y: String(selected.y) });
+      const res = await fetch(`${API}/v1/tile?${params}`, { cache: "no-store", signal: controller.signal });
+      if (!res.ok) throw new Error(`tile ${res.status}`);
+      const raw = await res.json();
+      if (selectedTile !== selected || selectionVersion !== tileSelectionVersion) return;
+      renderTileInspector(raw, selected);
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== "AbortError") {
+        if (selectedTile === selected && selectionVersion === tileSelectionVersion) showInspectorState(selected, "Details unavailable");
+      }
+    } finally {
+      if (tileRequest === controller) tileRequest = null;
+    }
+  }
+
+  /** @param {SelectedTile} selected */
+  function selectTile(selected) {
+    selectedTile = selected;
+    if (typeof boardEl.focus === "function") boardEl.focus({ preventScroll: true });
+    showInspectorState(selected, "Loading");
+    void fetchSelectedTile(selected);
+  }
+
+  function clearSelectedTile() {
+    selectedTile = null;
+    tileSelectionVersion++;
+    tileRequest?.abort();
+    tileRequest = null;
+    if (tileInspector) tileInspector.hidden = true;
   }
 
   /** @param {string} msg */
@@ -376,6 +597,7 @@
       paint();
       if (!hasFitted || sizeChanged) fitContain(true);
       else applyTransform();
+      if (selectedTile) void fetchSelectedTile(selectedTile);
     }
     canvasReadThisVisibility = true;
   }
@@ -639,6 +861,7 @@
     feedTimer = 0;
     canvasRequest?.abort();
     feedRequest?.abort();
+    tileRequest?.abort();
     closeLiveSocket();
   }
 
@@ -667,10 +890,12 @@
       }
       if (pointers.size === 1) {
         dragging = true;
+        gestureHadMultiple = false;
         dragDist = 0;
         last = { x: ev.clientX, y: ev.clientY };
       } else if (pointers.size >= 2) {
         dragging = false;
+        gestureHadMultiple = true;
         pinchStartDist = pointerDistance() || 1;
         pinchStartScale = scale;
       }
@@ -714,15 +939,21 @@
 
   /** @param {PointerEvent} ev */
   function endPointer(ev) {
+    const selectOnRelease = ev.type === "pointerup" && pointers.size === 1 && !gestureHadMultiple && dragDist < MOVE_SLOP;
     pointers.delete(ev.pointerId);
     if (pointers.size < 2) pinchStartDist = 0;
     if (pointers.size === 0) {
       dragging = false;
       last = null;
+      gestureHadMultiple = false;
     } else if (pointers.size === 1) {
       const p = [...pointers.values()][0];
       dragging = true;
       last = { x: p.x, y: p.y };
+    }
+    if (selectOnRelease) {
+      const selected = boardFromClient(ev.clientX, ev.clientY);
+      if (selected) selectTile(selected);
     }
   }
 
@@ -796,6 +1027,23 @@
   // Keyboard power-user controls
   window.addEventListener("keydown", (ev) => {
     if (ev.target instanceof Element && /input|textarea|select/i.test(ev.target.tagName)) return;
+    const boardFocused = document.activeElement === boardEl;
+    if (boardFocused && !ev.shiftKey && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(ev.key)) {
+      const current = selectedTile || { x: Math.floor(size / 2), y: Math.floor(size / 2) };
+      const next = { x: current.x, y: current.y };
+      if (ev.key === "ArrowLeft") next.x = Math.max(0, current.x - 1);
+      else if (ev.key === "ArrowRight") next.x = Math.min(size - 1, current.x + 1);
+      else if (ev.key === "ArrowUp") next.y = Math.max(0, current.y - 1);
+      else next.y = Math.min(size - 1, current.y + 1);
+      ev.preventDefault();
+      selectTile(next);
+      return;
+    }
+    if (boardFocused && (ev.key === "Enter" || ev.key === " ")) {
+      ev.preventDefault();
+      selectTile(selectedTile || { x: Math.floor(size / 2), y: Math.floor(size / 2) });
+      return;
+    }
     const step = Math.max(24, size * scale * 0.08);
     let handled = true;
     if (ev.key === "+" || ev.key === "=") {
@@ -834,6 +1082,8 @@
     userAdjusted = false;
     fitContain(true);
   });
+
+  tileInspectorClose?.addEventListener("click", clearSelectedTile);
 
   // Invite agent — Web Share first, then clipboard, then a readable fallback.
   shareBtn?.addEventListener("click", async () => {
@@ -897,20 +1147,24 @@
   // Restore saved camera (zoom/pan) so art view is not lost across reloads
   const restored = loadView();
   if (!restored) fitContain(true);
+  loadTickerState();
   startPolling();
 
   window.addEventListener("pagehide", () => {
     stopPolling();
+    syncTickerMotion();
     cancelAnimationFrame(rafId);
     clearTimeout(painterTagTimer);
     clearTimeout(toastTimer);
   });
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) startPolling();
+    syncTickerMotion();
   });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) pausePolling();
     else resumePolling();
+    syncTickerMotion();
   });
   window.addEventListener("focus", () => {
     resumePolling();

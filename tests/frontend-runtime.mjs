@@ -14,8 +14,30 @@ function check(name, condition, detail = "") {
   }
 }
 
+const mosaicSource = readFileSync(new URL("../public/mosaic.js", import.meta.url), "utf8");
+const mosaicHtml = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+check(
+  "viewer includes a focusable read-only tile inspector without mutation controls",
+  /id="board"[^>]*tabindex="0"/.test(mosaicHtml)
+    && /id="tile-inspector"/.test(mosaicHtml)
+    && /id="tile-inspector-close"/.test(mosaicHtml)
+    && !/\/v1\/(place|vote|report)/.test(mosaicSource.slice(mosaicSource.indexOf("function fetchSelectedTile"), mosaicSource.indexOf("function clearSelectedTile"))),
+  "tile inspector markup or read-only fetch contract missing"
+);
+check(
+  "tile selection uses the existing canvas refresh path rather than a second polling loop",
+  mosaicSource.includes("/v1/tile?")
+    && mosaicSource.includes("if (selectedTile) void fetchSelectedTile(selectedTile);")
+    && !mosaicSource.includes("tileTimer")
+    && mosaicSource.includes('ev.type === "pointerup"')
+    && mosaicSource.includes("document.activeElement === boardEl"),
+  "selection or reconciliation contract missing"
+);
+
 function element(id = "") {
   const listeners = new Map();
+  const attributes = new Map();
+  const classes = new Set();
   return {
     id,
     width: 128,
@@ -24,15 +46,25 @@ function element(id = "") {
     style: {},
     textContent: "",
     className: "",
-    classList: { toggle() {} },
+    classList: {
+      toggle(name, force) {
+        const next = force === undefined ? !classes.has(name) : Boolean(force);
+        if (next) classes.add(name);
+        else classes.delete(name);
+        return next;
+      },
+      contains(name) { return classes.has(name); },
+    },
     addEventListener(type, handler) { listeners.set(type, handler); },
     appendChild() {},
     closest() { return null; },
     getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 800 }; },
     getContext() { return { createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }), putImageData() {} }; },
     querySelector() { return null; },
-    setAttribute() {},
+    setAttribute(name, value) { attributes.set(name, String(value)); },
+    getAttribute(name) { return attributes.get(name) || null; },
     setPointerCapture() {},
+    focus() { this.focused = true; },
     _listeners: listeners,
   };
 }
@@ -44,10 +76,10 @@ class CustomEventMock {
   }
 }
 
-function browserHarness(elements) {
+function browserHarness(elements, initialStorage = []) {
   const windowListeners = new Map();
   const documentListeners = new Map();
-  const local = new Map();
+  const local = new Map(initialStorage);
   const document = {
     title: "grok/place · live mosaic",
     hidden: false,
@@ -466,6 +498,123 @@ async function flush(ms = 0) {
   await timers.tick(270_000);
   const byPath = calls.reduce((counts, call) => ({ ...counts, [call.path]: (counts[call.path] || 0) + 1 }), {});
   check("a healthy live socket holds the five-minute budget to twenty reads", calls.length === 20 && byPath["/v1/canvas"] === 6 && byPath["/v1/feed"] === 3 && byPath["/v1/music"] === 11, JSON.stringify({ calls: calls.length, byPath }));
+  emit(harness.windowListeners, "pagehide", { persisted: false });
+}
+
+{
+  const board = element("board");
+  const wrap = element("canvas-wrap");
+  const activityTicker = element("activity-ticker");
+  const tickerTrack = element("ticker-track");
+  const tickerToggle = element("ticker-toggle");
+  const harness = browserHarness(new Map([
+    ["board", board], ["canvas-wrap", wrap], ["activity-ticker", activityTicker], ["ticker-track", tickerTrack], ["ticker-toggle", tickerToggle],
+  ]));
+  const timers = fakeTimers();
+  const motionListeners = [];
+  const reduceMotion = {
+    matches: false,
+    addEventListener(type, listener) { if (type === "change") motionListeners.push(listener); },
+  };
+  harness.window.matchMedia = () => reduceMotion;
+  const feed = Array.from({ length: 30 }, (_, index) => ({
+    type: index === 0 ? "protect" : "place",
+    agent: index === 0 ? "<agent&name>" : `agent-${index}`,
+    x: index % 8,
+    y: Math.floor(index / 8),
+    c: 0,
+    color: "#A1B2C3",
+    goal: index === 0 ? "<make this safe>" : `goal-${index}`,
+    t: 500 - index,
+  }));
+  const calls = [];
+  const context = vm.createContext({
+    ...harness,
+    fetch: async (url) => {
+      const path = new URL(url).pathname;
+      calls.push(path);
+      if (path === "/v1/canvas") return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#A1B2C3"], version: 1 }) };
+      if (path === "/v1/feed") return { ok: true, json: async () => ({ ok: true, feed }) };
+      return { ok: false, status: 404, json: async () => ({ ok: false }) };
+    },
+    AbortController,
+    URL,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
+    Math,
+    JSON,
+    Date,
+    performance,
+    atob,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), context, { filename: "public/mosaic.js" });
+  await timers.tick(0);
+  check("activity ticker renders escaped agent, exact color, coordinate, region, and goal fields", tickerTrack.innerHTML.includes("&lt;agent&amp;name&gt;") && tickerTrack.innerHTML.includes("#A1B2C3") && tickerTrack.innerHTML.includes("(0, 0)") && tickerTrack.innerHTML.includes("R1C1") && tickerTrack.innerHTML.includes("&lt;make this safe&gt;"), tickerTrack.innerHTML);
+  check("activity ticker never injects raw feed HTML", !tickerTrack.innerHTML.includes("<agent&name>") && !tickerTrack.innerHTML.includes("<make this safe>"), tickerTrack.innerHTML);
+  check("activity ticker duplicates only a bounded first pass for horizontal motion", (tickerTrack.innerHTML.match(/data-x=/g) || []).length === 12 && readFileSync(new URL("public/styles.css", root), "utf8").includes("ticker-slide") && readFileSync(new URL("public/styles.css", root), "utf8").includes("translateX(-50%)"), tickerTrack.innerHTML);
+  tickerTrack._listeners.get("click")({
+    target: {
+      closest() {
+        return { getAttribute(name) { return name === "data-x" ? "3" : name === "data-y" ? "4" : null; } };
+      },
+    },
+  });
+  check("selecting an activity item focuses its board tile without a new polling route", board.focused === true && board.style.transform.includes("px") && calls.filter((path) => path === "/v1/tile").length === 0, JSON.stringify({ style: board.style, calls }));
+  tickerToggle._listeners.get("click")();
+  check("ticker hides in place and persists its state", activityTicker.classList.contains("is-hidden") && harness.localStorage.getItem("grokplace-activity-ticker-hidden-v1") === "1", JSON.stringify({ hidden: activityTicker.classList.contains("is-hidden"), stored: harness.localStorage.getItem("grokplace-activity-ticker-hidden-v1") }));
+  const reloadBoard = element("board");
+  const reloadWrap = element("canvas-wrap");
+  const reloadTicker = element("activity-ticker");
+  const reloadTrack = element("ticker-track");
+  const reloadToggle = element("ticker-toggle");
+  const reloadHarness = browserHarness(
+    new Map([["board", reloadBoard], ["canvas-wrap", reloadWrap], ["activity-ticker", reloadTicker], ["ticker-track", reloadTrack], ["ticker-toggle", reloadToggle]]),
+    [["grokplace-activity-ticker-hidden-v1", "1"]]
+  );
+  const reloadTimers = fakeTimers();
+  reloadHarness.window.matchMedia = () => ({ matches: false, addEventListener() {} });
+  const reloadContext = vm.createContext({
+    ...reloadHarness,
+    fetch: async (url) => {
+      const path = new URL(url).pathname;
+      if (path === "/v1/canvas") return { ok: true, json: async () => ({ ok: true, board: "AA==", size: 128, palette: ["#A1B2C3"], version: 1 }) };
+      if (path === "/v1/feed") return { ok: true, json: async () => ({ ok: true, feed: [] }) };
+      return { ok: false, status: 404, json: async () => ({ ok: false }) };
+    },
+    AbortController,
+    URL,
+    Uint8Array,
+    Uint8ClampedArray,
+    Map,
+    Math,
+    JSON,
+    Date,
+    performance,
+    atob,
+    setTimeout: reloadTimers.setTimeout,
+    clearTimeout: reloadTimers.clearTimeout,
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  });
+  vm.runInContext(readFileSync(new URL("public/mosaic.js", root), "utf8"), reloadContext, { filename: "public/mosaic.js" });
+  await reloadTimers.tick(0);
+  check("ticker restores its persisted hidden state after reload", reloadTicker.classList.contains("is-hidden") && reloadToggle.getAttribute("aria-pressed") === "true", JSON.stringify({ hidden: reloadTicker.classList.contains("is-hidden"), pressed: reloadToggle.getAttribute("aria-pressed") }));
+  emit(reloadHarness.windowListeners, "pagehide", { persisted: false });
+  tickerToggle._listeners.get("click")();
+  harness.document.hidden = true;
+  emit(harness.documentListeners, "visibilitychange");
+  check("ticker pauses while backgrounded", activityTicker.classList.contains("is-paused"), "ticker did not pause");
+  harness.document.hidden = false;
+  emit(harness.documentListeners, "visibilitychange");
+  reduceMotion.matches = true;
+  for (const listener of motionListeners) listener({ matches: true });
+  check("ticker pauses when reduced motion is requested", activityTicker.classList.contains("is-paused"), "ticker did not respect reduced motion");
+  check("ticker interactions do not create a polling loop", calls.filter((path) => path === "/v1/canvas").length === 1 && calls.filter((path) => path === "/v1/feed").length === 1, JSON.stringify(calls));
   emit(harness.windowListeners, "pagehide", { persisted: false });
 }
 
