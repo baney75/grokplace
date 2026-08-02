@@ -1783,13 +1783,19 @@ function isTrustedWorkersDevHost(hostname) {
 /** @param {WorkerEnv} env @param {"EDGE_READ_LIMITER" | "EDGE_WRITE_LIMITER" | "EDGE_LIVE_LIMITER" | "EDGE_CHALLENGE_LIMITER"} bindingName @param {Request} request @param {string} bucket */
 async function edgeRateLimit(env, bindingName, request, bucket) {
   const limiter = /** @type {RateLimiter | undefined} */ (env[bindingName]);
-  if (!limiter || typeof limiter.limit !== "function") return { ok: true, configured: false };
+  if (!limiter || typeof limiter.limit !== "function") {
+    console.error("edge rate limiter binding unavailable", bindingName);
+    return { ok: false, configured: false, unavailable: true };
+  }
   // Rate Limit binding keys are capped at 64 bytes. Hash both dimensions so
   // long IPv6 addresses and challenge scopes cannot fail open or fail closed.
   const key = (await sha256Hex(`${clientIp(request)}:${bucket}`)).slice(0, 32);
   try {
     const result = await limiter.limit({ key });
-    return { ok: result?.success !== false, configured: true };
+    if (result?.success === true) return { ok: true, configured: true };
+    if (result?.success === false) return { ok: false, configured: true };
+    console.error("edge rate limiter returned an invalid result", bindingName);
+    return { ok: false, configured: true, unavailable: true };
   } catch (error) {
     // A configured edge guard must fail closed if its provider call errors.
     console.error("edge rate limiter unavailable", bindingName, error instanceof Error ? error.message : String(error));

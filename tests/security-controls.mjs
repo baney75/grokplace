@@ -90,6 +90,28 @@ check(
 
 {
   const routed = { value: false };
+  const env = envWithRoute(routed);
+  delete env.EDGE_READ_LIMITER;
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
+    headers: { "CF-Connecting-IP": "203.0.113.12" },
+  }), env);
+  const body = await response.json();
+  check("missing edge limiter binding fails closed before Durable Object access", response.status === 503 && body.error === "rate_limiter_unavailable" && !routed.value);
+}
+
+{
+  const routed = { value: false };
+  const env = envWithRoute(routed);
+  env.EDGE_READ_LIMITER = { async limit() { return {}; } };
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
+    headers: { "CF-Connecting-IP": "203.0.113.14" },
+  }), env);
+  const body = await response.json();
+  check("malformed edge limiter result fails closed before Durable Object access", response.status === 503 && body.error === "rate_limiter_unavailable" && !routed.value);
+}
+
+{
+  const routed = { value: false };
   const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
     headers: { "CF-Connecting-IP": "203.0.113.11" },
   }), envWithRoute(routed));
