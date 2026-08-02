@@ -5,7 +5,7 @@
  */
 /** @typedef {{ x: number, y: number }} Point */
 /** @typedef {{ agent: string, x: number, y: number, color: string, goal: string, delayMs: number, until: number }} PainterTag */
-/** @typedef {{ type?: unknown, t?: unknown, agent?: unknown, x?: unknown, y?: unknown, c?: unknown, color?: unknown, goal?: unknown }} FeedEntry */
+/** @typedef {{ type?: unknown, t?: unknown, batchOrder?: unknown, agent?: unknown, x?: unknown, y?: unknown, c?: unknown, color?: unknown, goal?: unknown }} FeedEntry */
 /** @typedef {{ t: "ready" | "canvas" | "activity" | "music", v: number }} LiveEvent */
 /** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown }} CanvasResponse */
 /** @typedef {{ ok?: unknown, feed?: unknown }} FeedResponse */
@@ -380,7 +380,8 @@
     if (!/^#[0-9A-F]{6}$/.test(color)) return null;
     const goal = typeof raw.goal === "string" ? raw.goal.slice(0, 200) : "";
     const t = typeof raw.t === "number" && Number.isFinite(raw.t) ? raw.t : 0;
-    return { type: String(raw.type), x, y, agent: agent.slice(0, 32), color, goal, t };
+    const batchOrder = typeof raw.batchOrder === "number" && Number.isSafeInteger(raw.batchOrder) && raw.batchOrder >= 0 ? raw.batchOrder : 0;
+    return { type: String(raw.type), x, y, agent: agent.slice(0, 32), color, goal, t, batchOrder };
   }
 
   /** @param {{ type: string, x: number, y: number, agent: string, color: string, goal: string, t: number }} entry @param {boolean} duplicate */
@@ -428,11 +429,11 @@
   }
 
   tickerToggle?.addEventListener("click", () => setTickerHidden(!tickerHidden));
-  tickerTrack?.addEventListener("focusin", () => {
+  activityTicker?.addEventListener("focusin", () => {
     tickerFocusPaused = true;
     syncTickerMotion();
   });
-  tickerTrack?.addEventListener("focusout", () => {
+  activityTicker?.addEventListener("focusout", () => {
     tickerFocusPaused = false;
     syncTickerMotion();
   });
@@ -457,7 +458,7 @@
     }
     // Attribution is intentionally short-lived so art remains the primary view.
     if (lastFeedSeen > 0) {
-      const ordered = fresh.sort((a, b) => a.t - b.t).slice(-8);
+      const ordered = fresh.sort((a, b) => a.t - b.t || a.batchOrder - b.batchOrder).slice(-8);
       for (const [index, entry] of ordered.entries()) {
         spawnPainterTag(entry.agent, entry.x, entry.y, entry.goal, entry.color, index * 90);
       }

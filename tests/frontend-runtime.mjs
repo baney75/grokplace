@@ -53,7 +53,7 @@ check(
 );
 check(
   "painter attribution is ordered, bounded, motion-aware, and cleared when polling pauses",
-  /fresh\.sort\(\(a, b\) => a\.t - b\.t\)\.slice\(-8\)/.test(mosaicSource)
+  /fresh\.sort\(\(a, b\) => a\.t - b\.t \|\| a\.batchOrder - b\.batchOrder\)\.slice\(-8\)/.test(mosaicSource)
     && /nameTags\.length > 24/.test(mosaicSource)
     && /delayMs: Math\.max\(0, Math\.min\(630, delayMs\)\)/.test(mosaicSource)
     && /clearPainterTags\(\);/.test(mosaicSource)
@@ -66,12 +66,18 @@ function element(id = "") {
   const listeners = new Map();
   const attributes = new Map();
   const classes = new Set();
+  const children = [];
+  let innerHTML = "";
+  const style = { setProperty(name, value) { this[name] = String(value); } };
   return {
     id,
     width: 128,
     height: 128,
     hidden: true,
-    style: {},
+    style,
+    children,
+    get innerHTML() { return innerHTML; },
+    set innerHTML(value) { innerHTML = String(value); children.length = 0; },
     textContent: "",
     className: "",
     classList: {
@@ -84,7 +90,7 @@ function element(id = "") {
       contains(name) { return classes.has(name); },
     },
     addEventListener(type, handler) { listeners.set(type, handler); },
-    appendChild() {},
+    appendChild(child) { children.push(child); },
     closest() { return null; },
     getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 800 }; },
     getContext() { return { createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }), putImageData() {} }; },
@@ -616,9 +622,11 @@ async function flush(ms = 0) {
   const activityTicker = element("activity-ticker");
   const tickerTrack = element("ticker-track");
   const tickerToggle = element("ticker-toggle");
-  const harness = browserHarness(new Map([
+  const tickerElements = new Map([
     ["board", board], ["canvas-wrap", wrap], ["activity-ticker", activityTicker], ["ticker-track", tickerTrack], ["ticker-toggle", tickerToggle],
-  ]));
+  ]);
+  wrap.appendChild = (child) => { wrap.children.push(child); if (child.id) tickerElements.set(child.id, child); };
+  const harness = browserHarness(tickerElements);
   const timers = fakeTimers();
   const motionListeners = [];
   const reduceMotion = {
@@ -666,6 +674,26 @@ async function flush(ms = 0) {
   check("activity ticker renders escaped agent, exact color, coordinate, region, and goal fields", tickerTrack.innerHTML.includes("&lt;agent&amp;name&gt;") && tickerTrack.innerHTML.includes("#A1B2C3") && tickerTrack.innerHTML.includes("(0, 0)") && tickerTrack.innerHTML.includes("R1C1") && tickerTrack.innerHTML.includes("&lt;make this safe&gt;"), tickerTrack.innerHTML);
   check("activity ticker never injects raw feed HTML", !tickerTrack.innerHTML.includes("<agent&name>") && !tickerTrack.innerHTML.includes("<make this safe>"), tickerTrack.innerHTML);
   check("activity ticker duplicates only a bounded first pass for horizontal motion", (tickerTrack.innerHTML.match(/data-x=/g) || []).length === 12 && readFileSync(new URL("public/styles.css", root), "utf8").includes("ticker-slide") && readFileSync(new URL("public/styles.css", root), "utf8").includes("translateX(-50%)"), tickerTrack.innerHTML);
+  feed.unshift(
+    { type: "place", agent: "batch-second", x: 2, y: 0, c: 0, color: "#A1B2C3", goal: "batch", t: 501, batchOrder: 1 },
+    { type: "place", agent: "batch-first", x: 1, y: 0, c: 0, color: "#A1B2C3", goal: "batch", t: 501, batchOrder: 0 },
+  );
+  harness.document.hidden = true;
+  emit(harness.documentListeners, "visibilitychange");
+  harness.document.hidden = false;
+  emit(harness.documentListeners, "visibilitychange");
+  await timers.tick(0);
+  const painterChildren = tickerElements.get("painter-tags")?.children || [];
+  check(
+    "equal-time batch brushes animate in original placement order",
+    painterChildren.length === 2
+      && painterChildren[0].innerHTML.includes("batch-first")
+      && painterChildren[0].style["--brush-delay"] === "0ms"
+      && painterChildren[1].innerHTML.includes("batch-second")
+      && painterChildren[1].style["--brush-delay"] === "90ms",
+    JSON.stringify(painterChildren.map((child) => ({ html: child.innerHTML, delay: child.style["--brush-delay"] })))
+  );
+  const pollCallsBeforeInteractions = calls.length;
   tickerTrack._listeners.get("click")({
     target: {
       closest() {
@@ -674,6 +702,10 @@ async function flush(ms = 0) {
     },
   });
   check("selecting an activity item focuses its board tile without a new polling route", board.focused === true && board.style.transform.includes("px") && calls.filter((path) => path === "/v1/tile").length === 0, JSON.stringify({ style: board.style, calls }));
+  activityTicker._listeners.get("focusin")();
+  check("ticker pauses while its hide control has keyboard focus", activityTicker.classList.contains("is-paused"), "ticker did not pause on focus");
+  activityTicker._listeners.get("focusout")();
+  check("ticker resumes after keyboard focus leaves its controls", !activityTicker.classList.contains("is-paused"), "ticker remained paused after focusout");
   tickerToggle._listeners.get("click")();
   check("ticker hides in place and persists its state", activityTicker.classList.contains("is-hidden") && harness.localStorage.getItem("grokplace-activity-ticker-hidden-v1") === "1", JSON.stringify({ hidden: activityTicker.classList.contains("is-hidden"), stored: harness.localStorage.getItem("grokplace-activity-ticker-hidden-v1") }));
   const reloadBoard = element("board");
@@ -723,7 +755,7 @@ async function flush(ms = 0) {
   reduceMotion.matches = true;
   for (const listener of motionListeners) listener({ matches: true });
   check("ticker pauses when reduced motion is requested", activityTicker.classList.contains("is-paused"), "ticker did not respect reduced motion");
-  check("ticker interactions do not create a polling loop", calls.filter((path) => path === "/v1/canvas").length === 1 && calls.filter((path) => path === "/v1/feed").length === 1, JSON.stringify(calls));
+  check("ticker interactions do not create a polling loop", calls.length === pollCallsBeforeInteractions, JSON.stringify(calls));
   emit(harness.windowListeners, "pagehide", { persisted: false });
 }
 

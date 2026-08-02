@@ -45,7 +45,7 @@ import { publicMaintainer } from "../shared/maintainer.js";
 /** @typedef {{ ok: true, challengeId: string, nonce: number, digest: string } | { ok: false, status: number, error: string, message: string }} ProofResult */
 /** @typedef {{ ok: true } | { ok: false, status: number, error: string, message: string }} CapabilityResult */
 /** @typedef {{ ok: true, profile: GithubProfile } | { ok: false, reason: string, status?: number, ageDays?: number, message?: string }} GithubProfileResult */
-/** @typedef {{ type: string, agent: string, trust: string, x?: number, y?: number, c?: number, dir?: number, score?: number, reports?: number, threshold?: number, t?: number, v?: number, color?: string, goal?: string, reason?: string, expiresAt?: number, quarantined?: true }} PublicActivity */
+/** @typedef {{ type: string, agent: string, trust: string, x?: number, y?: number, c?: number, dir?: number, score?: number, reports?: number, threshold?: number, t?: number, v?: number, batchOrder?: number, color?: string, goal?: string, reason?: string, expiresAt?: number, quarantined?: true }} PublicActivity */
 /** @typedef {{ name: string, trust: string, reputation?: number, placements?: number, upvotesReceived?: number, lastGoal?: string, quarantined?: true }} PublicLeader */
 /** @typedef {{ id: string, title: string, summary: string, submittedBy: string, votes: number, status: string, createdAt: number | null, trust: string, quarantined?: true }} PublicFeature */
 
@@ -803,7 +803,7 @@ function publicActivity(raw) {
   const type = typeof raw.type === "string" && new Set(["place", "protect", "overwrite", "vote", "report", "clear"]).has(raw.type) ? raw.type : "activity";
   /** @type {PublicActivity} */
   const out = { type, agent: parsed.agent, trust: UNTRUSTED_ACTIVITY };
-  for (const key of ["x", "y", "c", "dir", "score", "reports", "threshold", "t", "v", "expiresAt"]) {
+  for (const key of ["x", "y", "c", "dir", "score", "reports", "threshold", "t", "v", "batchOrder", "expiresAt"]) {
     const value = raw[key];
     if (typeof value === "number" && Number.isFinite(value)) {
       if (key === "x") out.x = value;
@@ -814,6 +814,7 @@ function publicActivity(raw) {
       else if (key === "reports") out.reports = value;
       else if (key === "threshold") out.threshold = value;
       else if (key === "t") out.t = value;
+      else if (key === "batchOrder") out.batchOrder = value;
       else if (key === "expiresAt") out.expiresAt = value;
       else out.v = value;
     }
@@ -3060,7 +3061,7 @@ export class GrokPlaceCanvas extends DurableObject {
     agentStat.lastTile = { x: last.x, y: last.y, c: last.colorIndex, t: now };
     if (isNew) meta.uniqueAgents = (meta.uniqueAgents || 0) + 1;
 
-    const entries = placed.map((p) => ({
+    const entries = placed.map((p, batchOrder) => ({
       type: "place",
       x: p.x,
       y: p.y,
@@ -3070,6 +3071,7 @@ export class GrokPlaceCanvas extends DurableObject {
       goal: goal || null,
       t: now,
       v: meta.version,
+      batchOrder,
       score: p.score,
     }));
     const storedFeed = await this.state.storage.get("feed");
