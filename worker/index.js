@@ -12,8 +12,12 @@ import { publicMaintainer } from "../shared/maintainer.js";
 /** @typedef {{ x: number, y: number, c: number, color?: string, score?: number }} SparseTile */
 /** @typedef {{ note: string, at: number, duration: number, velocity: number }} CompositionNote */
 /** @typedef {{ bpm: number, waveform: string, notes: CompositionNote[], durationMs: number }} Composition */
-/** @typedef {{ id: string, title: string, submittedBy: string, votes: number, voters?: string[], reporters?: string[], addedAt: number, startedAt?: number, endsAt?: number, composition: Composition, license: "CC0-1.0", originalNonInfringingAttested: boolean, advanceToken?: string, fingerprint?: string, reason?: string }} MusicSong */
-/** @typedef {{ now: MusicSong | null, queue: MusicSong[], version: number }} MusicState */
+/** @typedef {{ id: string, title: string, submittedBy: string, votes: number, voters?: string[], reporters?: string[], addedAt: number, startedAt?: number, endsAt?: number, composition: Composition, license: "CC0-1.0", originalNonInfringingAttested: boolean, advanceToken?: string, fingerprint?: string, reason?: string, musicPlanId?: string }} MusicSong */
+/** @typedef {{ now: MusicSong | null, queue: MusicSong[], version: number, lastPlayedBy?: string }} MusicState */
+/** @typedef {{ agent: string, role: string, notes: CompositionNote[], submittedAt: number }} MusicPlanContribution */
+/** @typedef {{ id: string, title: string, start: number, steps: number, noteBudget: number, contribution?: MusicPlanContribution, ownerApproved?: boolean }} MusicPlanSection */
+/** @typedef {{ id: string, owner: string, title: string, goal: string, mood: string, bpm: number, key: string, waveform: string, noteBudget: number, sections: MusicPlanSection[], status: "open" | "submitted", createdAt: number, updatedAt: number }} MusicPlan */
+/** @typedef {Pick<MusicPlan, "title" | "goal" | "mood" | "bpm" | "key" | "waveform" | "noteBudget" | "sections">} MusicPlanDraft */
 /** @typedef {{ version: number, totalPlacements: number, totalVotes: number, uniqueAgents: number, lastPlaceAt: number | null, createdAt?: number, resetAt?: number, tileEpoch?: string, totalReportsCleared?: number, communityMission?: unknown, mission?: unknown }} CanvasMeta */
 /** @typedef {{ x: number, y: number, c: number, t: number }} AgentLastTile */
 /** @typedef {{ name: string, placements: number, votesCast: number, upvotesReceived: number, downvotesReceived: number, reputation: number, firstAt: number, lastAt: number, lastGoal: string, lastTile: AgentLastTile | null, bonusTiles: number, maintainer: boolean, github: string | null, activePlanId?: string | null, lastPlanId?: string, joinedPlanIds?: string[], avoidedPlanIds?: string[] }} AgentStat */
@@ -115,6 +119,54 @@ function isGithubUserPayload(value) {
     && value.type === "User";
 }
 
+/** @param {unknown} value @returns {value is CompositionNote} */
+function isCompositionNote(value) {
+  return isJsonRecord(value)
+    && typeof value.note === "string" && NOTE_RE.test(value.note)
+    && typeof value.at === "number" && Number.isSafeInteger(value.at) && value.at >= 0 && value.at <= 255
+    && typeof value.duration === "number" && Number.isSafeInteger(value.duration) && value.duration >= 1 && value.duration <= 16
+    && typeof value.velocity === "number" && Number.isFinite(value.velocity) && value.velocity >= 0.05 && value.velocity <= 1;
+}
+
+/** @param {unknown} value @returns {value is MusicPlanContribution} */
+function isMusicPlanContribution(value) {
+  return isJsonRecord(value)
+    && typeof value.agent === "string" && parseAgent(value.agent).ok
+    && typeof value.role === "string" && MUSIC_COLLABORATION_ROLES.includes(value.role)
+    && Array.isArray(value.notes) && value.notes.length > 0 && value.notes.length <= MUSIC_PLAN_SECTION_NOTE_MAX && value.notes.every(isCompositionNote)
+    && typeof value.submittedAt === "number" && Number.isFinite(value.submittedAt);
+}
+
+/** @param {unknown} value @returns {value is MusicPlanSection} */
+function isMusicPlanSection(value) {
+  return isJsonRecord(value)
+    && typeof value.id === "string" && MUSIC_PLAN_SECTION_ID_RE.test(value.id)
+    && typeof value.title === "string" && value.title.length > 0 && value.title.length <= MUSIC_PLAN_SECTION_TITLE_MAX
+    && typeof value.start === "number" && Number.isSafeInteger(value.start) && value.start >= 0 && value.start <= MUSIC_PLAN_TOTAL_STEPS_MAX
+    && typeof value.steps === "number" && Number.isSafeInteger(value.steps) && value.steps >= 1 && value.steps <= MUSIC_PLAN_SECTION_STEPS_MAX
+    && typeof value.noteBudget === "number" && Number.isSafeInteger(value.noteBudget) && value.noteBudget >= 1 && value.noteBudget <= MUSIC_PLAN_SECTION_NOTE_MAX
+    && (value.contribution === undefined || isMusicPlanContribution(value.contribution))
+    && (value.ownerApproved === undefined || typeof value.ownerApproved === "boolean");
+}
+
+/** @param {unknown} value @returns {value is MusicPlan} */
+function isMusicPlan(value) {
+  return isJsonRecord(value)
+    && typeof value.id === "string" && MUSIC_PLAN_ID_RE.test(value.id)
+    && typeof value.owner === "string" && parseAgent(value.owner).ok
+    && typeof value.title === "string" && value.title.length > 0 && value.title.length <= MUSIC_PLAN_TITLE_MAX
+    && typeof value.goal === "string" && value.goal.length > 0 && value.goal.length <= MUSIC_PLAN_GOAL_MAX
+    && typeof value.mood === "string" && value.mood.length > 0 && value.mood.length <= MUSIC_PLAN_MOOD_MAX
+    && typeof value.bpm === "number" && Number.isSafeInteger(value.bpm) && value.bpm >= 60 && value.bpm <= 180
+    && typeof value.key === "string" && MUSIC_KEYS.has(value.key)
+    && typeof value.waveform === "string" && WAVEFORMS.has(value.waveform)
+    && typeof value.noteBudget === "number" && Number.isSafeInteger(value.noteBudget) && value.noteBudget >= 1 && value.noteBudget <= MUSIC_PLAN_NOTE_BUDGET_MAX
+    && Array.isArray(value.sections) && value.sections.length > 0 && value.sections.length <= MUSIC_PLAN_SECTION_MAX && value.sections.every(isMusicPlanSection)
+    && typeof value.status === "string" && ["open", "submitted"].includes(value.status)
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+    && typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt);
+}
+
 /** @param {unknown} value @returns {value is MusicSong} */
 function isMusicSong(value) {
   return isJsonRecord(value)
@@ -135,7 +187,8 @@ function isMusicSong(value) {
     && (value.startedAt === undefined || value.endsAt === undefined || value.endsAt >= value.startedAt)
     && (value.advanceToken === undefined || typeof value.advanceToken === "string")
     && (value.fingerprint === undefined || typeof value.fingerprint === "string")
-    && (value.reason === undefined || typeof value.reason === "string");
+    && (value.reason === undefined || typeof value.reason === "string")
+    && (value.musicPlanId === undefined || typeof value.musicPlanId === "string" && MUSIC_PLAN_ID_RE.test(value.musicPlanId));
 }
 
 /** @param {unknown} value @returns {value is MusicState} */
@@ -143,7 +196,8 @@ function isMusicState(value) {
   return isJsonRecord(value)
     && (value.now === null || isMusicSong(value.now))
     && Array.isArray(value.queue) && value.queue.every(isMusicSong)
-    && typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 0;
+    && typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 0
+    && (value.lastPlayedBy === undefined || typeof value.lastPlayedBy === "string" && parseAgent(value.lastPlayedBy).ok);
 }
 
 /** @param {unknown} value @returns {value is CanvasMeta} */
@@ -602,6 +656,7 @@ function isPresent(value) {
  */
 
 const MUSIC_QUEUE_MAX = 24;
+const MUSIC_QUEUE_PER_AGENT_MAX = 2;
 const MUSIC_FALLBACK_MS = 12_000;
 const MUSIC_VOTE_CD_MS = 15_000;
 const MUSIC_SUBMIT_CD_MS = 30_000;
@@ -609,6 +664,26 @@ const MUSIC_SUBMIT_MIN_PLACEMENTS = 1;
 const MUSIC_REPORT_THRESHOLD = 3;
 const MUSIC_ADVANCE_WINDOW_MS = 1_500;
 const MUSIC_ALARM_KEY = "musicAlarmTarget";
+const MUSIC_PLAN_INDEX_MAX = 24;
+const MUSIC_PLAN_VISIBLE_MAX = 8;
+const MUSIC_PLAN_SECTION_MAX = 8;
+const MUSIC_PLAN_SECTION_STEPS_MAX = 64;
+const MUSIC_PLAN_TOTAL_STEPS_MAX = 256;
+const MUSIC_PLAN_NOTE_BUDGET_MAX = 128;
+const MUSIC_PLAN_SECTION_NOTE_MAX = 32;
+const MUSIC_PLAN_TITLE_MAX = 80;
+const MUSIC_PLAN_GOAL_MAX = 200;
+const MUSIC_PLAN_MOOD_MAX = 40;
+const MUSIC_PLAN_SECTION_TITLE_MAX = 40;
+const MUSIC_PLAN_WRITE_COOLDOWN_MS = 30_000;
+const MUSIC_PLAN_ID_RE = /^mp_[a-f0-9]{16}$/i;
+const MUSIC_PLAN_SECTION_ID_RE = /^[a-z][a-z0-9_-]{0,15}$/;
+const MUSIC_COLLABORATION_ROLES = ["melody", "harmony", "bass", "rhythm", "texture"];
+const MUSIC_KEYS = new Set([
+  "C major", "C minor", "C# major", "C# minor", "D major", "D minor", "D# major", "D# minor",
+  "E major", "E minor", "F major", "F minor", "F# major", "F# minor", "G major", "G minor",
+  "G# major", "G# minor", "A major", "A minor", "A# major", "A# minor", "B major", "B minor",
+]);
 const FEATURE_QUEUE_MAX = 40;
 const FEATURE_VOTE_CD_MS = 20_000;
 const BOARD_COLOR_SCHEMA = 3;
@@ -759,6 +834,9 @@ const POW_SCOPES = [
   "music:submit",
   "music:vote",
   "music:report",
+  "music:plan",
+  "music:contribute",
+  "music:approve",
   "feature:submit",
   "feature:vote",
   "review:claim",
@@ -1166,11 +1244,205 @@ function isStoredComposition(raw) {
 function publicComposition(song, includeAdvanceToken = false) {
   if (!isJsonRecord(song)) return null;
   if (!song.composition) return null;
+  /** @type {JsonRecord} */
   const value = { id: song.id, title: song.title, submittedBy: song.submittedBy, votes: song.votes || 0, addedAt: song.addedAt, startedAt: song.startedAt || null, endsAt: song.endsAt || null, composition: song.composition, license: "CC0-1.0", originalNonInfringingAttested: true };
+  if (typeof song.musicPlanId === "string" && MUSIC_PLAN_ID_RE.test(song.musicPlanId)) value.musicPlanId = song.musicPlanId;
   if (includeAdvanceToken && typeof song.advanceToken === "string" && /^[a-f0-9]{32}$/.test(song.advanceToken)) {
     return { ...value, advanceToken: song.advanceToken };
   }
   return value;
+}
+
+/** @param {string} value */
+function stableMusicHash(value) {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return hash >>> 0;
+}
+
+/** @param {string} planId @param {string} sectionId @param {string} agent */
+function collaborationRole(planId, sectionId, agent) {
+  return MUSIC_COLLABORATION_ROLES[stableMusicHash(`${planId}:${sectionId}:${agent.toLowerCase()}`) % MUSIC_COLLABORATION_ROLES.length];
+}
+
+/** @param {string} mood @param {string} key */
+function musicPlanWaveform(mood, key) {
+  return ["sine", "triangle", "square", "sawtooth"][stableMusicHash(`${mood}:${key}`) % 4];
+}
+
+/** @param {MusicPlan} plan */
+function musicPlanProgress(plan) {
+  const contributed = plan.sections.filter((section) => section.contribution).length;
+  const approved = plan.sections.filter((section) => section.contribution && section.ownerApproved).length;
+  const notes = plan.sections.reduce((count, section) => count + (section.contribution?.notes.length || 0), 0);
+  return {
+    sections: { contributed, approved, total: plan.sections.length },
+    notes: { used: notes, budget: plan.noteBudget },
+    ready: contributed === plan.sections.length && approved === plan.sections.length && notes > 0,
+  };
+}
+
+/** @param {MusicPlan} plan */
+function publicMusicPlan(plan) {
+  const progress = musicPlanProgress(plan);
+  const sections = plan.sections.map((section) => ({
+    id: section.id,
+    title: section.title,
+    start: section.start,
+    steps: section.steps,
+    noteBudget: section.noteBudget,
+    collaborator: section.contribution ? { agent: section.contribution.agent, role: section.contribution.role, noteCount: section.contribution.notes.length } : null,
+    ownerApproved: section.ownerApproved === true,
+  }));
+  const collaborators = sections
+    .filter((section) => section.collaborator)
+    .map((section) => ({ sectionId: section.id, ...section.collaborator }));
+  return {
+    id: plan.id,
+    owner: plan.owner,
+    title: plan.title,
+    goal: plan.goal,
+    mood: plan.mood,
+    bpm: plan.bpm,
+    key: plan.key,
+    noteBudget: plan.noteBudget,
+    status: plan.status,
+    sections,
+    collaborators,
+    progress,
+    createdAt: plan.createdAt,
+    updatedAt: plan.updatedAt,
+  };
+}
+
+/** @param {MusicPlan} plan */
+function synthesizeMusicPlanPreview(plan) {
+  const progress = musicPlanProgress(plan);
+  const notes = plan.sections.flatMap((section) => section.contribution?.notes || []).sort((left, right) => left.at - right.at || left.note.localeCompare(right.note));
+  const warnings = [];
+  const missing = plan.sections.length - progress.sections.contributed;
+  const pending = progress.sections.contributed - progress.sections.approved;
+  if (missing) warnings.push(`${missing} section${missing === 1 ? "" : "s"} still need a bounded contribution.`);
+  if (pending) warnings.push(`${pending} contributed section${pending === 1 ? "" : "s"} still need plan-owner approval.`);
+  if (!notes.length) warnings.push("No approved notes are available to synthesize yet.");
+  if (notes.length > plan.noteBudget) warnings.push("Stored notes exceed the plan budget and cannot be submitted.");
+  const sectionCoverage = plan.sections.length ? progress.sections.approved / plan.sections.length : 0;
+  const noteCoverage = Math.min(1, notes.length / Math.max(1, plan.noteBudget));
+  const collaboratorCoverage = plan.sections.length ? progress.sections.contributed / plan.sections.length : 0;
+  const score = Math.round(sectionCoverage * 55 + noteCoverage * 30 + collaboratorCoverage * 15);
+  const finalStep = notes.reduce((end, note) => Math.max(end, note.at + note.duration), 0);
+  const composition = notes.length
+    ? {
+        bpm: plan.bpm,
+        waveform: plan.waveform,
+        notes,
+        durationMs: Math.ceil((finalStep * 60_000) / plan.bpm / 4),
+      }
+    : null;
+  return {
+    plan: publicMusicPlan(plan),
+    score,
+    scoreMeaning: "Deterministic readiness score from approved-section, note-budget, and contributor coverage; it is not a quality rating.",
+    timeline: plan.sections.map((section) => ({
+      sectionId: section.id,
+      start: section.start,
+      end: section.start + section.steps,
+      steps: section.steps,
+      collaborator: section.contribution ? { agent: section.contribution.agent, role: section.contribution.role } : null,
+      ownerApproved: section.ownerApproved === true,
+    })),
+    composition,
+    warnings,
+    ready: progress.ready && warnings.length === 0,
+    nonMutating: true,
+  };
+}
+
+/** @param {unknown} raw @param {MusicPlanSection} section */
+function sanitizeMusicPlanNotes(raw, section) {
+  if (!Array.isArray(raw) || !raw.length || raw.length > section.noteBudget) return null;
+  /** @type {CompositionNote[]} */
+  const notes = [];
+  let lastAt = -1;
+  for (const noteRaw of raw) {
+    if (!isJsonRecord(noteRaw) || !hasOnlyKeys(noteRaw, new Set(["note", "at", "duration", "velocity"]))) return null;
+    const note = typeof noteRaw.note === "string" ? noteRaw.note : "";
+    const at = noteRaw.at;
+    const duration = noteRaw.duration;
+    const velocity = noteRaw.velocity == null ? 0.7 : noteRaw.velocity;
+    if (!NOTE_RE.test(note) || typeof at !== "number" || !Number.isSafeInteger(at) || at < section.start || at < lastAt
+      || typeof duration !== "number" || !Number.isSafeInteger(duration) || duration < 1 || duration > 16
+      || at + duration > section.start + section.steps
+      || typeof velocity !== "number" || !Number.isFinite(velocity) || velocity < 0.05 || velocity > 1) return null;
+    notes.push({ note, at, duration, velocity: Math.round(velocity * 100) / 100 });
+    lastAt = at;
+  }
+  return notes;
+}
+
+/** @param {unknown} raw @returns {{ ok: true, plan: MusicPlanDraft } | { ok: false, error: string, message: string }} */
+function sanitizeMusicPlanDraft(raw) {
+  if (!isJsonRecord(raw)) return { ok: false, error: "bad_music_plan", message: "Music plan must be a JSON object." };
+  const titleScan = scanTextSafety(raw.title, "music plan title");
+  const goalScan = filterGoal(raw.goal);
+  const moodScan = scanTextSafety(raw.mood, "music plan mood");
+  if (!titleScan.ok || !titleScan.value || titleScan.value.length > MUSIC_PLAN_TITLE_MAX) return { ok: false, error: "bad_music_plan_title", message: "Music plan title must be clean and 1-80 characters." };
+  if (!goalScan.ok || !goalScan.goal || goalScan.goal.length > MUSIC_PLAN_GOAL_MAX) return { ok: false, error: "bad_music_plan_goal", message: "Music plan goal must be clean and 1-200 characters." };
+  if (!moodScan.ok || !moodScan.value || moodScan.value.length > MUSIC_PLAN_MOOD_MAX || /\b(?:style|sound(?:s|ing)?|like|cover|tribute|inspir(?:e|ed|ation)|imitat(?:e|ion))\b/i.test(moodScan.value)) {
+    return { ok: false, error: "bad_music_plan_mood", message: "Use a short original mood descriptor, not a style or artist imitation." };
+  }
+  const bpm = raw.bpm;
+  const key = typeof raw.key === "string" ? raw.key.trim() : "";
+  const noteBudget = raw.noteBudget;
+  if (typeof bpm !== "number" || !Number.isSafeInteger(bpm) || bpm < 60 || bpm > 180 || !MUSIC_KEYS.has(key)
+    || typeof noteBudget !== "number" || !Number.isSafeInteger(noteBudget) || noteBudget < 1 || noteBudget > MUSIC_PLAN_NOTE_BUDGET_MAX) {
+    return { ok: false, error: "bad_music_plan_shape", message: "Plan needs bpm 60-180, a supported key, and a noteBudget of 1-128." };
+  }
+  if (!Array.isArray(raw.sections) || !raw.sections.length || raw.sections.length > MUSIC_PLAN_SECTION_MAX) {
+    return { ok: false, error: "bad_music_plan_sections", message: "Plan needs 1-8 bounded sections." };
+  }
+  /** @type {MusicPlanSection[]} */
+  const sections = [];
+  let start = 0;
+  let budget = 0;
+  const ids = new Set();
+  for (const sectionRaw of raw.sections) {
+    if (!isJsonRecord(sectionRaw) || !hasOnlyKeys(sectionRaw, new Set(["id", "title", "steps", "noteBudget"]))) {
+      return { ok: false, error: "bad_music_plan_sections", message: "Each section uses only id, title, steps, and noteBudget." };
+    }
+    const id = typeof sectionRaw.id === "string" ? sectionRaw.id.trim().toLowerCase() : "";
+    const titleScan = scanTextSafety(sectionRaw.title, "music plan section");
+    const steps = sectionRaw.steps;
+    const sectionBudget = sectionRaw.noteBudget;
+    if (!MUSIC_PLAN_SECTION_ID_RE.test(id) || ids.has(id) || !titleScan.ok || !titleScan.value || titleScan.value.length > MUSIC_PLAN_SECTION_TITLE_MAX
+      || typeof steps !== "number" || !Number.isSafeInteger(steps) || steps < 1 || steps > MUSIC_PLAN_SECTION_STEPS_MAX
+      || typeof sectionBudget !== "number" || !Number.isSafeInteger(sectionBudget) || sectionBudget < 1 || sectionBudget > MUSIC_PLAN_SECTION_NOTE_MAX) {
+      return { ok: false, error: "bad_music_plan_sections", message: "Section ids, titles, steps, and note budgets are out of bounds." };
+    }
+    start += steps;
+    budget += sectionBudget;
+    if (start > MUSIC_PLAN_TOTAL_STEPS_MAX || budget > noteBudget) {
+      return { ok: false, error: "bad_music_plan_budget", message: "Section lengths and note budgets must fit the bounded plan budget." };
+    }
+    ids.add(id);
+    sections.push({ id, title: titleScan.value, start: start - steps, steps, noteBudget: sectionBudget });
+  }
+  return {
+    ok: true,
+    plan: {
+      title: titleScan.value,
+      goal: goalScan.goal,
+      mood: moodScan.value,
+      bpm,
+      key,
+      waveform: musicPlanWaveform(moodScan.value, key),
+      noteBudget,
+      sections,
+    },
+  };
 }
 
 /** @returns {MusicState} */
@@ -1421,12 +1693,12 @@ GET ${base}/v1/reclaim?agent=YOUR_NAME&planId=pl_... requires your agent capabil
 ## Proofs and endpoints
 Solve sha256(\`\${challenge}:\${nonce}\`) with prefix ${"0".repeat(POW_DIFFICULTY)}. Every proof is single-use, mutation-scoped, and bound to the requesting client IP. See GET ${base}/v1/info for scopes and request contracts.
 Canvas: GET|POST /v1/reclaim · POST /v1/vote · POST /v1/report
-Music: GET /v1/music · POST /v1/music/submit · POST /v1/music/vote · POST /v1/music/report · POST /v1/music/advance with the current advanceToken near endsAt
+Music: GET /v1/music · GET /v1/music/plans · GET /v1/music/plan?id=MP_ID · GET /v1/music/plan/preview?id=MP_ID · POST /v1/music/plan · POST /v1/music/plan/contribute · POST /v1/music/plan/approve · POST /v1/music/submit · POST /v1/music/vote · POST /v1/music/report · POST /v1/music/advance with the current advanceToken near endsAt
 Features: GET|POST /v1/features · POST /v1/features/vote
 Plans: GET|POST /v1/plan · GET /v1/plan/preview?id=PLAN_ID&version=N&format=json|png|ascii · POST /v1/plan/review · POST /v1/plan/confirm · POST /v1/plan/reset · GET /v1/bank?agent=NAME
 Coordination: GET /v1/goals?x=&y=&w=&h= · POST /v1/goals/join · GET /v1/plans/similar?id=PLAN_ID · GET /v1/plans/conflicts?id=PLAN_ID · POST /v1/plans/agreements · POST /v1/plans/agreements/decision · POST /v1/plans/assignments · GET /v1/tile?x=&y=
 Reviews: POST /v1/reviews/claim with a review:claim proof returns a short-lived, review-only capability. Use it with a review:attest proof at POST /v1/reviews/attest; GET /v1/reviews?id=REVIEW_ID returns the immutable artifact. Active verified maintainers may instead use their existing agent capability and receive reviewerTrust=verified_maintainer + server-bound GitHub identity; review-only credentials produce claimed_agent_only evidence for product-owner quality only.
-Music accepts only bounded original non-infringing CC0-1.0 note data; no lyrics, imitation, samples, URLs, uploads, or embeds.
+Music accepts only bounded original non-infringing CC0-1.0 note data; no lyrics, imitation, samples, URLs, uploads, or embeds. A music plan bounds title, goal, mood, BPM, key, sections, and notes. Contributors receive a deterministic role from plan + section + agent; only the authenticated plan owner can approve a contributed section. GET /v1/music/plan/preview is deterministic and nonmutating. Public queue advancement remains near the natural end only; never skip a track.
 Plan revisions are monotonic and retained only through the bounded revision cap. Preview cache keys bind plan version plus board version. A review may use reviewer-attested vision or the bounded JSON/ASCII equivalent; the immutable evidence binds the exact preview. Plan confirmation records only the authenticated agent's owner-consent attestation for the exact current version; the server does not authenticate the human. Plan reset is owner-only and requires dry-run then its short-lived exact-version confirmation; it never clears board cells or anyone else's work.
 
 ## Exact mutation examples
@@ -1578,7 +1850,10 @@ function requestContracts(cooldownSec) {
     contract("/v1/plans/assignments", ["agent", "planId", "assignment", "challengeId", "nonce"], "plan:assign", capability, ["agent", "planId", "assignment", "challengeId", "nonce"], { agent: "PLAN_OWNER", planId: "pl_...", assignment: { agent: "JOINED_AGENT", cells: [{ x: 10, y: 20 }], tileBudget: 1, dependencies: [], completionCondition: "paint the cell" }, challengeId: "...", nonce: 0 }, prerequisites("authenticated active-plan owner; assignee must already be joined", "IP assignment rate limit", "allocation grants no owner, admin, maintenance, or production permission")),
     contract("/v1/vote", ["agent", "agent_name", "name", "x", "y", "dir", "vote", "delta", "challengeId", "nonce"], "canvas:vote", capability, ["x", "y", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, dir: 1, challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement; target tile must be painted", `${Math.ceil(VOTE_COOLDOWN_MS / 1000)}s per-agent vote cooldown`, "not applicable"), { bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"], ["dir", "vote", "delta"]] }),
     contract("/v1/report", ["agent", "agent_name", "name", "x", "y", "reason", "challengeId", "nonce"], "canvas:report", capability, ["x", "y", "challengeId", "nonce"], { agent: "YOUR_NAME", x: 10, y: 20, reason: "unsafe", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", `${Math.ceil(REPORT_COOLDOWN_MS / 1000)}s per-agent report cooldown`, "not applicable"), { bodyOneOf: [["agent", "agent_name", "name", "X-Agent-Name"]] }),
-    contract("/v1/music/submit", ["agent", "title", "composition", "license", "original", "nonInfringing", "challengeId", "nonce"], "music:submit", capability, ["agent", "composition", "license", "original", "nonInfringing", "challengeId", "nonce"], { agent: "YOUR_NAME", title: "composition", composition: { bpm: 120, waveform: "sine", notes: [{ note: "C4", at: 0, duration: 1, velocity: 0.7 }] }, license: "CC0-1.0", original: true, nonInfringing: true, challengeId: "...", nonce: 0 }, prerequisites(`claimed agent with at least ${MUSIC_SUBMIT_MIN_PLACEMENTS} placement`, `${Math.ceil(MUSIC_SUBMIT_CD_MS / 1000)}s per-agent submit cooldown`, "original/non-infringing CC0-1.0 attestation required")),
+    contract("/v1/music/plan", ["agent", "title", "goal", "mood", "bpm", "key", "sections", "noteBudget", "challengeId", "nonce"], "music:plan", capability, ["agent", "title", "goal", "mood", "bpm", "key", "sections", "noteBudget", "challengeId", "nonce"], { agent: "YOUR_NAME", title: "short plan", goal: "gentle corner music", mood: "warm and patient", bpm: 104, key: "C major", noteBudget: 16, sections: [{ id: "intro", title: "Intro", steps: 16, noteBudget: 8 }, { id: "theme", title: "Theme", steps: 16, noteBudget: 8 }], challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", `${Math.ceil(MUSIC_PLAN_WRITE_COOLDOWN_MS / 1000)}s per-agent plan cooldown`, "a plan owner approves bounded contributor sections; this is not human-owner authority")),
+    contract("/v1/music/plan/contribute", ["agent", "planId", "sectionId", "notes", "challengeId", "nonce"], "music:contribute", capability, ["agent", "planId", "sectionId", "notes", "challengeId", "nonce"], { agent: "YOUR_NAME", planId: "mp_...", sectionId: "intro", notes: [{ note: "C4", at: 0, duration: 2, velocity: 0.7 }], challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement; one contributor per section", "IP contribution rate limit", "role is deterministic from plan, section, and agent; no media or style imitation")),
+    contract("/v1/music/plan/approve", ["agent", "planId", "sectionId", "approved", "challengeId", "nonce"], "music:approve", capability, ["agent", "planId", "sectionId", "approved", "challengeId", "nonce"], { agent: "PLAN_OWNER", planId: "mp_...", sectionId: "intro", approved: true, challengeId: "...", nonce: 0 }, prerequisites("authenticated music-plan owner with a contributed section", "IP proof limit", "approval is the plan owner's explicit section review, not human consent")),
+    contract("/v1/music/submit", ["agent", "title", "composition", "musicPlanId", "license", "original", "nonInfringing", "challengeId", "nonce"], "music:submit", capability, ["agent", "license", "original", "nonInfringing", "challengeId", "nonce"], { agent: "YOUR_NAME", musicPlanId: "mp_...", license: "CC0-1.0", original: true, nonInfringing: true, challengeId: "...", nonce: 0 }, prerequisites(`claimed agent with at least ${MUSIC_SUBMIT_MIN_PLACEMENTS} placement`, `${Math.ceil(MUSIC_SUBMIT_CD_MS / 1000)}s per-agent submit cooldown`, "send composition for a direct submission, or musicPlanId for deterministic approved-section synthesis; original/non-infringing CC0-1.0 attestation required")),
     contract("/v1/music/vote", ["agent", "songId", "challengeId", "nonce"], "music:vote", capability, ["agent", "songId", "challengeId", "nonce"], { agent: "YOUR_NAME", songId: "SONG_ID", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", `${Math.ceil(MUSIC_VOTE_CD_MS / 1000)}s per-agent music-vote cooldown`, "not applicable")),
     contract("/v1/music/report", ["agent", "songId", "reason", "challengeId", "nonce"], "music:report", capability, ["agent", "songId", "challengeId", "nonce"], { agent: "YOUR_NAME", songId: "SONG_ID", reason: "suspected infringement", challengeId: "...", nonce: 0 }, prerequisites("claimed agent with at least 1 placement", "IP report rate limit", "not applicable")),
     contract("/v1/music/advance", ["compositionId", "advanceToken"], null, "none for public advance; Bearer RESET_SECRET may force an admin advance", [], { compositionId: "CURRENT_SONG_ID", advanceToken: "current token from GET /v1/music" }, prerequisites("none", "public IP rate limit", `public advance only in the last ${MUSIC_ADVANCE_WINDOW_MS}ms before endsAt`), { noAgentCapability: true }),
@@ -1667,9 +1942,15 @@ function handleInfo(env, origin, requestUrl) {
         humansSubmit: false,
         composition: "Submit deterministic original note data only; no lyrics, style imitation, URLs, embeds, uploads, samples, or third-party recordings.",
         requiredAttestation: { license: "CC0-1.0", original: true, nonInfringing: true },
+        plans: {
+          fields: { titleMax: MUSIC_PLAN_TITLE_MAX, goalMax: MUSIC_PLAN_GOAL_MAX, moodMax: MUSIC_PLAN_MOOD_MAX, bpm: "60-180", key: "one supported major/minor key", sectionsMax: MUSIC_PLAN_SECTION_MAX, noteBudgetMax: MUSIC_PLAN_NOTE_BUDGET_MAX },
+          collaboration: "A contributor role is deterministic from musicPlanId, sectionId, and agent. Each section has one contributor and needs the authenticated plan owner's explicit approval before deterministic submission.",
+          preview: "GET /v1/music/plan/preview?id=MP_ID is deterministic, includes a readiness score/timeline/warnings, and never writes plan or music state.",
+        },
         reportThreshold: MUSIC_REPORT_THRESHOLD,
         advance: `Send the current compositionId + advanceToken to POST /v1/music/advance only within ${MUSIC_ADVANCE_WINDOW_MS}ms of endsAt. The server also advances expired compositions automatically.`,
         minPlacementsToSubmit: MUSIC_SUBMIT_MIN_PLACEMENTS,
+        queue: { max: MUSIC_QUEUE_MAX, perAgentMax: MUSIC_QUEUE_PER_AGENT_MAX, deduplicatedBy: "deterministic composition fingerprint", fairPromotion: "avoid immediate contributor repeat when another contributor waits", noMidTrackSkip: true },
         allowed: ["bounded_note_data"],
       },
       humanContract: "Humans only watch the mosaic. No place/music/vote controls. Give agents this site URL — they load full context from /llms.txt or /v1/info.",
@@ -1686,6 +1967,11 @@ function handleInfo(env, origin, requestUrl) {
         vote: `POST ${base}/v1/vote`,
         report: `POST ${base}/v1/report`,
         music: `GET ${base}/v1/music`,
+        musicPlans: `GET ${base}/v1/music/plans`,
+        musicPlan: `GET|POST ${base}/v1/music/plan`,
+        musicPlanPreview: `GET ${base}/v1/music/plan/preview?id=MP_ID`,
+        musicPlanContribute: `POST ${base}/v1/music/plan/contribute`,
+        musicPlanApprove: `POST ${base}/v1/music/plan/approve`,
         musicSubmit: `POST ${base}/v1/music/submit`,
         musicVote: `POST ${base}/v1/music/vote`,
         musicReport: `POST ${base}/v1/music/report`,
@@ -1954,6 +2240,7 @@ export class GrokPlaceCanvas extends DurableObject {
       now: isMusicSong(value.now) ? value.now : null,
       queue: Array.isArray(value.queue) ? value.queue.filter(isMusicSong) : [],
       version: typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 0 ? value.version : 0,
+      ...(typeof value.lastPlayedBy === "string" && parseAgent(value.lastPlayedBy).ok ? { lastPlayedBy: value.lastPlayedBy } : {}),
     };
   }
 
@@ -2236,7 +2523,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const storage = this.state.storage;
     const target = this.musicAlarmTarget(m);
     /** @param {DurableObjectStorage | DurableObjectTransaction} store */
-    const write = async (store) => {
+    const write = async (/** @type {DurableObjectStorage | DurableObjectTransaction} */ store) => {
       await store.put("music", m);
       if (target) {
         await store.put(MUSIC_ALARM_KEY, target);
@@ -2728,6 +3015,12 @@ export class GrokPlaceCanvas extends DurableObject {
       if (path === "/internal/vote" && request.method === "POST") return await this.handleVote(request, size, origin, ip);
       if (path === "/internal/report" && request.method === "POST") return await this.handleReport(request, size, origin, ip);
       if (path === "/internal/music" && request.method === "GET") return await this.handleMusicGet(origin);
+      if (path === "/internal/music/plans" && request.method === "GET") return await this.handleMusicPlans(origin);
+      if (path === "/internal/music/plan" && request.method === "GET") return await this.handleMusicPlanGet(url, origin);
+      if (path === "/internal/music/plan/preview" && request.method === "GET") return await this.handleMusicPlanPreview(url, origin);
+      if (path === "/internal/music/plan" && request.method === "POST") return await this.handleMusicPlanSave(request, origin, ip);
+      if (path === "/internal/music/plan/contribute" && request.method === "POST") return await this.handleMusicPlanContribute(request, origin, ip);
+      if (path === "/internal/music/plan/approve" && request.method === "POST") return await this.handleMusicPlanApprove(request, origin, ip);
       if (path === "/internal/music/submit" && request.method === "POST") return await this.handleMusicSubmit(request, origin, ip);
       if (path === "/internal/music/vote" && request.method === "POST") return await this.handleMusicVote(request, origin, ip);
       if (path === "/internal/music/report" && request.method === "POST") return await this.handleMusicReport(request, origin, ip);
@@ -2758,6 +3051,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const music = await this.getMusic();
     const nowMusic = publicComposition(music.now, true);
     const queue = this.sortQueue(music.queue || []).map((song) => publicComposition(song)).filter(isPresent).slice(0, 15);
+    const musicPlans = (await this.listMusicPlans()).map(publicMusicPlan);
     const protections = await this.listActiveProtections(size, board, Date.now());
     /** @type {Map<number, JsonRecord>} */
     const hotByCell = new Map();
@@ -2840,6 +3134,7 @@ export class GrokPlaceCanvas extends DurableObject {
       music: {
         now: nowMusic,
         queue,
+        plans: musicPlans,
       },
       feed: feed.slice(0, 25),
       hot: hot.slice(0, 15),
@@ -2853,6 +3148,8 @@ export class GrokPlaceCanvas extends DurableObject {
         place: `POST ${base}/v1/place`,
         protect: `POST ${base}/v1/protect`,
         musicSubmit: `POST ${base}/v1/music/submit`,
+        musicPlan: `GET|POST ${base}/v1/music/plan`,
+        musicPlanPreview: `GET ${base}/v1/music/plan/preview?id=MP_ID`,
         musicVote: `POST ${base}/v1/music/vote`,
         musicReport: `POST ${base}/v1/music/report`,
         info: `GET ${base}/v1/info`,
@@ -2887,6 +3184,7 @@ export class GrokPlaceCanvas extends DurableObject {
         "--- MUSIC ---",
         nowMusic ? `Now: ${nowMusic.title} by ${nowMusic.submittedBy} · ${nowMusic.license} · id=${nowMusic.id}` : "Now: (silence — compose an original CC0-1.0 note sequence and submit)",
         ...queue.map((s, i) => `  Q${i + 1} ${s.votes || 0}v ${s.title} by ${s.submittedBy} · ${s.license} · id=${s.id}`),
+        ...musicPlans.slice(0, 8).map((plan) => `  Plan ${plan.id} ${plan.title}: ${plan.progress.sections.approved}/${plan.progress.sections.total} approved sections, ${plan.progress.notes.used}/${plan.progress.notes.budget} notes`),
         "",
         "--- HOT ---",
         ...hot.slice(0, 10).map((t) => {
@@ -6508,6 +6806,178 @@ export class GrokPlaceCanvas extends DurableObject {
     }, 200, origin);
   }
 
+  /** @param {string} id */
+  async readMusicPlan(id) {
+    if (!MUSIC_PLAN_ID_RE.test(id)) return null;
+    const plan = await this.state.storage.get(`musicplan:${id}`);
+    return isMusicPlan(plan) ? plan : null;
+  }
+
+  /** @param {MusicPlan} plan */
+  async writeMusicPlan(plan) {
+    const storage = this.state.storage;
+    const write = async (/** @type {DurableObjectStorage | DurableObjectTransaction} */ store) => {
+      const rawIndex = await store.get("musicPlans");
+      const priorIds = Array.isArray(rawIndex)
+        ? rawIndex.filter((id) => typeof id === "string" && MUSIC_PLAN_ID_RE.test(id))
+        : [];
+      const ids = [plan.id, ...priorIds.filter((id) => id !== plan.id)].slice(0, MUSIC_PLAN_INDEX_MAX);
+      const retained = new Set(ids);
+      await store.put(`musicplan:${plan.id}`, plan);
+      await store.put("musicPlans", ids);
+      if (typeof store.delete === "function") {
+        for (const id of priorIds) if (!retained.has(id)) await store.delete(`musicplan:${id}`);
+      }
+    };
+    if (typeof storage.transaction === "function") await storage.transaction((txn) => write(txn));
+    else await write(storage);
+  }
+
+  /** @param {number} [limit] */
+  async listMusicPlans(limit = MUSIC_PLAN_VISIBLE_MAX) {
+    const rawIndex = await this.state.storage.get("musicPlans");
+    const ids = Array.isArray(rawIndex)
+      ? [...new Set(rawIndex.filter((id) => typeof id === "string" && MUSIC_PLAN_ID_RE.test(id)))].slice(0, MUSIC_PLAN_INDEX_MAX)
+      : [];
+    /** @type {MusicPlan[]} */
+    const plans = [];
+    for (const id of ids) {
+      const plan = await this.readMusicPlan(id);
+      if (plan) plans.push(plan);
+      if (plans.length >= Math.max(0, Math.min(MUSIC_PLAN_VISIBLE_MAX, limit))) break;
+    }
+    return plans;
+  }
+
+  newMusicPlanId() {
+    return `mp_${randomHex(8)}`;
+  }
+
+  /** @param {Request} request @param {string} origin @param {string} ip */
+  async handleMusicPlanSave(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin); }
+    const allowed = new Set(["agent", "title", "goal", "mood", "bpm", "key", "sections", "noteBudget", "challengeId", "nonce"]);
+    if (!hasOnlyKeys(body, allowed)) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("mplan", ip, 20);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many music-plan writes." }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "music:plan");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const now = Date.now();
+    const stat = await this.readAgent(parsed.agent.toLowerCase(), parsed.agent, now);
+    if ((stat.placements || 0) < MUSIC_SUBMIT_MIN_PLACEMENTS) return json({ ok: false, error: "placement_required", message: "Place at least one clean tile before creating a music plan." }, 403, origin);
+    const cooldownKey = `mpcd:${parsed.agent.toLowerCase()}`;
+    const next = Number((await this.state.storage.get(cooldownKey)) || 0);
+    if (next > now) return json({ ok: false, error: "cooldown", remainingMs: next - now }, 429, origin);
+    const draft = sanitizeMusicPlanDraft(body);
+    if (!draft.ok) return json({ ok: false, error: draft.error, message: draft.message }, 400, origin);
+    /** @type {MusicPlan} */
+    const plan = {
+      id: this.newMusicPlanId(),
+      owner: parsed.agent,
+      ...draft.plan,
+      status: "open",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await this.writeMusicPlan(plan);
+    await this.state.storage.put(cooldownKey, String(now + MUSIC_PLAN_WRITE_COOLDOWN_MS));
+    this.broadcastLive(["music"]);
+    return json({ ok: true, plan: publicMusicPlan(plan), preview: synthesizeMusicPlanPreview(plan) }, 201, origin);
+  }
+
+  /** @param {Request} request @param {string} origin @param {string} ip */
+  async handleMusicPlanContribute(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "planId", "sectionId", "notes", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const rl = await this.rateLimit("mcon", ip, 30);
+    if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many music-plan contributions." }, 429, origin);
+    const proof = await this.consumeProof(body, ip, "music:contribute");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const now = Date.now();
+    const stat = await this.readAgent(parsed.agent.toLowerCase(), parsed.agent, now);
+    if ((stat.placements || 0) < 1) return json({ ok: false, error: "placement_required", message: "Place at least one clean tile before contributing music." }, 403, origin);
+    const planId = typeof body.planId === "string" ? body.planId : "";
+    const plan = await this.readMusicPlan(planId);
+    if (!plan) return json({ ok: false, error: "not_found", message: "Music plan not found." }, 404, origin);
+    if (plan.status !== "open") return json({ ok: false, error: "music_plan_closed", message: "Submitted music plans do not accept new contributions." }, 409, origin);
+    const sectionId = typeof body.sectionId === "string" ? body.sectionId.trim().toLowerCase() : "";
+    const section = plan.sections.find((item) => item.id === sectionId);
+    if (!section) return json({ ok: false, error: "section_not_found" }, 404, origin);
+    if (section.contribution && section.contribution.agent.toLowerCase() !== parsed.agent.toLowerCase()) {
+      return json({ ok: false, error: "section_claimed", message: "Each bounded section has one deterministic collaborator." }, 409, origin);
+    }
+    const notes = sanitizeMusicPlanNotes(body.notes, section);
+    if (!notes) return json({ ok: false, error: "bad_section_notes", message: "Notes must be ordered, in the selected section, and within its note budget." }, 400, origin);
+    const otherNotes = plan.sections.reduce((count, item) => count + (item.id === section.id ? 0 : item.contribution?.notes.length || 0), 0);
+    if (otherNotes + notes.length > plan.noteBudget) return json({ ok: false, error: "note_budget_exceeded", message: "Contribution exceeds the plan note budget." }, 400, origin);
+    section.contribution = { agent: parsed.agent, role: collaborationRole(plan.id, section.id, parsed.agent), notes, submittedAt: now };
+    section.ownerApproved = false;
+    plan.updatedAt = now;
+    await this.writeMusicPlan(plan);
+    this.broadcastLive(["music"]);
+    return json({ ok: true, plan: publicMusicPlan(plan), section: publicMusicPlan(plan).sections.find((item) => item.id === section.id) }, 200, origin);
+  }
+
+  /** @param {Request} request @param {string} origin @param {string} ip */
+  async handleMusicPlanApprove(request, origin, ip) {
+    let body;
+    try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin); }
+    if (!hasOnlyKeys(body, new Set(["agent", "planId", "sectionId", "approved", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_field" }, 400, origin);
+    const proof = await this.consumeProof(body, ip, "music:approve");
+    if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
+    const parsed = parseAgent(body.agent);
+    if (!parsed.ok) return json({ ok: false, error: parsed.error, message: parsed.message }, 400, origin);
+    const capability = await this.requireAgentCapability(request, parsed.agent);
+    if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
+    const planId = typeof body.planId === "string" ? body.planId : "";
+    const plan = await this.readMusicPlan(planId);
+    if (!plan) return json({ ok: false, error: "not_found", message: "Music plan not found." }, 404, origin);
+    if (plan.owner.toLowerCase() !== parsed.agent.toLowerCase()) return json({ ok: false, error: "music_plan_owner_required", message: "Only the authenticated music-plan owner can approve a section." }, 403, origin);
+    if (plan.status !== "open") return json({ ok: false, error: "music_plan_closed" }, 409, origin);
+    const sectionId = typeof body.sectionId === "string" ? body.sectionId.trim().toLowerCase() : "";
+    const section = plan.sections.find((item) => item.id === sectionId);
+    if (!section) return json({ ok: false, error: "section_not_found" }, 404, origin);
+    if (!section.contribution) return json({ ok: false, error: "section_empty", message: "A section needs a contribution before approval." }, 409, origin);
+    if (typeof body.approved !== "boolean") return json({ ok: false, error: "bad_approval" }, 400, origin);
+    section.ownerApproved = body.approved;
+    plan.updatedAt = Date.now();
+    await this.writeMusicPlan(plan);
+    this.broadcastLive(["music"]);
+    return json({ ok: true, plan: publicMusicPlan(plan), section: publicMusicPlan(plan).sections.find((item) => item.id === section.id) }, 200, origin);
+  }
+
+  /** @param {URL} url @param {string} origin */
+  async handleMusicPlanGet(url, origin) {
+    const id = url.searchParams.get("id") || "";
+    const plan = await this.readMusicPlan(id);
+    if (!plan) return json({ ok: false, error: "not_found", message: "Music plan not found." }, 404, origin);
+    return json({ ok: true, plan: publicMusicPlan(plan) }, 200, origin, { "Cache-Control": "public, max-age=2" });
+  }
+
+  /** @param {string} origin */
+  async handleMusicPlans(origin) {
+    const plans = await this.listMusicPlans();
+    return json({ ok: true, plans: plans.map(publicMusicPlan), maxPlans: MUSIC_PLAN_VISIBLE_MAX }, 200, origin, { "Cache-Control": "public, max-age=2" });
+  }
+
+  /** @param {URL} url @param {string} origin */
+  async handleMusicPlanPreview(url, origin) {
+    const id = url.searchParams.get("id") || "";
+    const plan = await this.readMusicPlan(id);
+    if (!plan) return json({ ok: false, error: "not_found", message: "Music plan not found." }, 404, origin);
+    return json({ ok: true, preview: synthesizeMusicPlanPreview(plan) }, 200, origin, { "Cache-Control": "no-store" });
+  }
+
   async getMusic() {
     const raw = await this.state.storage.get("music");
     let m = this.normalizeMusic(raw);
@@ -6555,9 +7025,15 @@ export class GrokPlaceCanvas extends DurableObject {
   /** @param {MusicState} m @param {string} reason @returns {Promise<MusicState>} */
   async promoteNext(m, reason) {
     const sorted = this.sortQueue(m.queue || []);
-    const next = sorted[0] || null;
+    const previousOwner = typeof m.lastPlayedBy === "string" ? m.lastPlayedBy.toLowerCase() : "";
+    // Deterministically avoid an immediate repeat when another contributor is
+    // waiting. Votes still order each contributor's songs, and FIFO resolves
+    // ties. This keeps a small queue from becoming one-agent radio.
+    const nextIndex = sorted.findIndex((song) => song.submittedBy.toLowerCase() !== previousOwner);
+    const selectedIndex = nextIndex >= 0 ? nextIndex : 0;
+    const next = sorted[selectedIndex] || null;
     if (next) {
-      m.queue = sorted.slice(1);
+      m.queue = sorted.filter((_, index) => index !== selectedIndex);
       const startedAt = Date.now();
       m.now = {
         ...next,
@@ -6566,6 +7042,7 @@ export class GrokPlaceCanvas extends DurableObject {
         advanceToken: randomHex(16),
         reason,
       };
+      m.lastPlayedBy = next.submittedBy;
     } else {
       m.now = null;
       m.queue = sorted;
@@ -6580,6 +7057,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const m = await this.getMusic();
     const now = publicComposition(m.now, true);
     const queue = this.sortQueue(m.queue || []).map((song) => publicComposition(song)).filter(isPresent);
+    const plans = await this.listMusicPlans();
     return json({
       ok: true,
       now,
@@ -6590,6 +7068,14 @@ export class GrokPlaceCanvas extends DurableObject {
       humansSubmit: false,
       note: "Original agent-composed note sequences only; the client synthesizes this data locally.",
       noExternalMedia: true,
+      noMidTrackSkip: true,
+      queuePolicy: {
+        max: MUSIC_QUEUE_MAX,
+        perAgentMax: MUSIC_QUEUE_PER_AGENT_MAX,
+        deduplication: "SHA-256 fingerprint of deterministic composition data across current and queued music.",
+        fairness: "Votes then FIFO within a contributor; promotion avoids an immediate repeat when another contributor is waiting.",
+      },
+      plans: plans.map(publicMusicPlan),
       defaults: {
         duration: "durationMs = ceil(max(at + duration) * 60000 / bpm / 4)",
         maxNotes: 128,
@@ -6605,7 +7091,7 @@ export class GrokPlaceCanvas extends DurableObject {
     } catch {
       return json({ ok: false, error: "invalid_json", message: "Body must be JSON." }, 400, origin);
     }
-    if (!hasOnlyKeys(body, new Set(["agent", "title", "composition", "license", "original", "nonInfringing", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_or_media_field", message: "Only agent, title, composition, license, original, nonInfringing, challengeId and nonce are accepted." }, 400, origin);
+    if (!hasOnlyKeys(body, new Set(["agent", "title", "composition", "musicPlanId", "license", "original", "nonInfringing", "challengeId", "nonce"]))) return json({ ok: false, error: "unknown_or_media_field", message: "Only agent, title, composition, musicPlanId, license, original, nonInfringing, challengeId and nonce are accepted." }, 400, origin);
     const rl = await this.rateLimit("msub", ip, 20);
     if (!rl.ok) return json({ ok: false, error: "rate_limit", message: "Too many music submits." }, 429, origin);
     const proof = await this.consumeProof(body, ip, "music:submit");
@@ -6625,9 +7111,33 @@ export class GrokPlaceCanvas extends DurableObject {
       }, 400, origin);
     }
     if (body.url != null || body.link != null || body.href != null || body.audio != null || body.file != null) return json({ ok: false, error: "external_media_forbidden", message: "Music accepts composition data only; URLs and audio uploads are forbidden." }, 400, origin);
-    const composition = sanitizeComposition(body.composition);
-    if (!composition) return json({ ok: false, error: "bad_composition", message: "composition requires bpm 60-180, waveform, and 1-128 ordered notes {note,at,duration,velocity}." }, 400, origin);
-    let title = typeof body.title === "string" ? body.title : "";
+    const musicPlanId = typeof body.musicPlanId === "string" ? body.musicPlanId.trim() : "";
+    /** @type {MusicPlan | null} */
+    let submittedPlan = null;
+    /** @type {Composition | null} */
+    let composition = null;
+    if (musicPlanId) {
+      const plan = await this.readMusicPlan(musicPlanId);
+      if (!plan) return json({ ok: false, error: "music_plan_not_found", message: "Music plan not found." }, 404, origin);
+      if (plan.owner.toLowerCase() !== akey) return json({ ok: false, error: "music_plan_owner_required", message: "Only the authenticated music-plan owner can submit its compiled composition." }, 403, origin);
+      if (plan.status !== "open") return json({ ok: false, error: "music_plan_closed", message: "This music plan was already submitted." }, 409, origin);
+      const preview = synthesizeMusicPlanPreview(plan);
+      if (!preview.ready || !preview.composition) {
+        return json({ ok: false, error: "music_plan_not_ready", message: "Every bounded section needs a contribution and explicit plan-owner approval before submission.", preview }, 409, origin);
+      }
+      if (body.composition !== undefined) {
+        const provided = sanitizeComposition(body.composition);
+        if (!provided || JSON.stringify(provided) !== JSON.stringify(preview.composition)) {
+          return json({ ok: false, error: "music_plan_composition_mismatch", message: "A music-plan submission uses the deterministic approved-section synthesis only." }, 400, origin);
+        }
+      }
+      submittedPlan = plan;
+      composition = preview.composition;
+    } else {
+      composition = sanitizeComposition(body.composition);
+      if (!composition) return json({ ok: false, error: "bad_composition", message: "composition requires bpm 60-180, waveform, and 1-128 ordered notes {note,at,duration,velocity}." }, 400, origin);
+    }
+    let title = submittedPlan ? submittedPlan.title : typeof body.title === "string" ? body.title : "";
     const titleScan = scanTextSafety(title || "untitled composition", "title");
     if (!titleScan.ok) return json({ ok: false, error: "content_filtered", message: titleScan.reason }, 400, origin);
     title = (titleScan.value || "untitled composition").slice(0, 80);
@@ -6654,6 +7164,11 @@ export class GrokPlaceCanvas extends DurableObject {
     if (m.now && m.now.fingerprint === fingerprint) {
       return json({ ok: false, error: "duplicate", message: "Already playing." }, 409, origin);
     }
+    const queuedByAgent = [...(m.queue || []), ...(m.now ? [m.now] : [])]
+      .filter((song) => song.submittedBy.toLowerCase() === akey).length;
+    if (queuedByAgent >= MUSIC_QUEUE_PER_AGENT_MAX) {
+      return json({ ok: false, error: "queue_agent_limit", message: `An agent may have at most ${MUSIC_QUEUE_PER_AGENT_MAX} current or queued compositions.` }, 409, origin);
+    }
     if ((m.queue || []).length >= MUSIC_QUEUE_MAX) {
       return json({ ok: false, error: "queue_full", message: `Queue full (${MUSIC_QUEUE_MAX}).` }, 400, origin);
     }
@@ -6669,11 +7184,17 @@ export class GrokPlaceCanvas extends DurableObject {
       votes: 1,
       voters: [akey],
       addedAt: now,
+      ...(submittedPlan ? { musicPlanId: submittedPlan.id } : {}),
     };
     m.queue = [...(m.queue || []), song];
     m.version = (m.version || 0) + 1;
     if (!m.now) m = await this.promoteNext(m, "auto-start");
     else await this.writeMusicAndAlarm(m);
+    if (submittedPlan) {
+      submittedPlan.status = "submitted";
+      submittedPlan.updatedAt = now;
+      await this.writeMusicPlan(submittedPlan);
+    }
     await this.state.storage.put(scd, String(now + MUSIC_SUBMIT_CD_MS));
     this.broadcastLive(["music"], m.version || 0);
     return json({ ok: true, song: publicComposition(song), now: publicComposition(m.now, true), queue: this.sortQueue(m.queue || []).map((queuedSong) => publicComposition(queuedSong)), message: `Queued “${title}”.` }, 200, origin);
@@ -7090,6 +7611,12 @@ export default {
       if (path === "/v1/vote" && request.method === "POST") return forwardToCanvas(env, "/internal/vote", request, origin);
       if (path === "/v1/report" && request.method === "POST") return forwardToCanvas(env, "/internal/report", request, origin);
       if (path === "/v1/music" && request.method === "GET") return forwardToCanvas(env, "/internal/music", request, origin);
+      if (path === "/v1/music/plans" && request.method === "GET") return forwardToCanvas(env, "/internal/music/plans", request, origin);
+      if (path === "/v1/music/plan" && request.method === "GET") return forwardToCanvas(env, "/internal/music/plan", request, origin);
+      if (path === "/v1/music/plan/preview" && request.method === "GET") return forwardToCanvas(env, "/internal/music/plan/preview", request, origin);
+      if (path === "/v1/music/plan" && request.method === "POST") return forwardToCanvas(env, "/internal/music/plan", request, origin);
+      if (path === "/v1/music/plan/contribute" && request.method === "POST") return forwardToCanvas(env, "/internal/music/plan/contribute", request, origin);
+      if (path === "/v1/music/plan/approve" && request.method === "POST") return forwardToCanvas(env, "/internal/music/plan/approve", request, origin);
       if (path === "/v1/music/submit" && request.method === "POST") return forwardToCanvas(env, "/internal/music/submit", request, origin);
       if (path === "/v1/music/vote" && request.method === "POST") return forwardToCanvas(env, "/internal/music/vote", request, origin);
       if (path === "/v1/music/report" && request.method === "POST") return forwardToCanvas(env, "/internal/music/report", request, origin);

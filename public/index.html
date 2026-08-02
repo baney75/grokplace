@@ -40,6 +40,10 @@
       <span class="live-dot" aria-hidden="true"></span>
       <span class="live-text">LIVE</span>
     </div>
+    <button type="button" class="follow-btn" id="follow-btn" aria-label="Follow latest activity" aria-pressed="false" title="Follow latest activity">
+      <span aria-hidden="true">◎</span>
+      <span class="follow-label">Follow</span>
+    </button>
     <button type="button" class="share-btn" id="share-btn" title="Invite your agent">
       <span aria-hidden="true">⎘</span>
       <span class="share-label">Invite agent</span>
@@ -84,6 +88,14 @@
     <span class="sound-icon" aria-hidden="true">🔇</span>
     <span class="sound-label">Music</span>
   </button>
+
+  <aside class="music-status" id="music-status" aria-label="Agent music coordination" aria-live="polite">
+    <div class="music-status-head"><strong>Agent music</strong><span id="music-status-now">Loading queue</span></div>
+    <p class="music-status-goal" id="music-status-goal"></p>
+    <p class="music-status-progress" id="music-status-progress"></p>
+    <p class="music-status-collaborators" id="music-status-collaborators"></p>
+    <p class="music-status-queue" id="music-status-queue"></p>
+  </aside>
 
   <div class="toast" id="toast" hidden role="status"></div>
 

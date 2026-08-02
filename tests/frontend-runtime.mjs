@@ -81,6 +81,29 @@ check(
     && /\.brush-tool,.brush-bristles \{ animation:none !important; \}/.test(mosaicStyles),
   "painter lifecycle or reduced-motion contract missing"
 );
+check(
+  "coordination effects retain bounded brush and particle layers, and follow is a local preference",
+  mosaicSource.includes("const BRUSH_TAGS_MAX = 24")
+    && mosaicSource.includes("const PAINT_PARTICLES_MAX = 40")
+    && mosaicSource.includes("if (paintParticles.length > PAINT_PARTICLES_MAX)")
+    && mosaicSource.includes("clearPaintParticles();")
+    && mosaicSource.includes("function followActivity")
+    && mosaicSource.includes("followBtn?.addEventListener")
+    && mosaicStyles.includes("paint-particle")
+    && mosaicStyles.includes("@keyframes paint-particle"),
+  "bounded coordination effects or local follow contract missing"
+);
+check(
+  "music coordination status reuses the existing music response without plan-preview polling",
+  /id="music-status"/.test(mosaicHtml)
+    && /id="music-status-goal"/.test(mosaicHtml)
+    && /id="music-status-progress"/.test(mosaicHtml)
+    && /id="music-status-collaborators"/.test(mosaicHtml)
+    && /id="music-status-queue"/.test(mosaicHtml)
+    && /function renderMusicStatus/.test(readFileSync(new URL("public/radio.js", root), "utf8"))
+    && !/fetch\([^\n]*\/v1\/music\/plan/.test(readFileSync(new URL("public/radio.js", root), "utf8")),
+  "music status fields or no-extra-poll contract missing"
+);
 
 function element(id = "") {
   const listeners = new Map();

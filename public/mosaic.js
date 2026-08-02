@@ -5,6 +5,7 @@
  */
 /** @typedef {{ x: number, y: number }} Point */
 /** @typedef {{ agent: string, x: number, y: number, color: string, goal: string, delayMs: number, angle: number, travelX: number, travelY: number, until: number }} PainterTag */
+/** @typedef {{ x: number, y: number, color: string, delayMs: number, dx: number, dy: number, until: number }} PaintParticle */
 /** @typedef {{ type?: unknown, t?: unknown, batchOrder?: unknown, agent?: unknown, x?: unknown, y?: unknown, c?: unknown, color?: unknown, goal?: unknown }} FeedEntry */
 /** @typedef {{ t: "ready" | "canvas" | "activity" | "music", v: number }} LiveEvent */
 /** @typedef {{ ok?: unknown, board?: unknown, size?: unknown, palette?: unknown, version?: unknown, planOverlay?: unknown }} CanvasResponse */
@@ -19,6 +20,7 @@
   const wrapNode = document.getElementById("canvas-wrap");
   const coordTip = document.getElementById("coord-tip");
   const shareBtn = document.getElementById("share-btn");
+  const followBtn = document.getElementById("follow-btn");
   const toast = document.getElementById("toast");
   const activityTicker = document.getElementById("activity-ticker");
   const tickerTrack = document.getElementById("ticker-track");
@@ -54,11 +56,15 @@
   let flashes = new Map();
   /** @type {PainterTag[]} */
   let nameTags = [];
+  /** @type {PaintParticle[]} */
+  let paintParticles = [];
   let lastFeedSeen = 0;
   let tickerHidden = false;
   let tickerFocusPaused = false;
+  let followLatest = false;
   let rafId = 0;
   let painterTagTimer = 0;
+  let particleTimer = 0;
   let canvasTimer = 0;
   let feedTimer = 0;
   let toastTimer = 0;
@@ -93,6 +99,8 @@
   const VIEW_KEY = "grokplace-view-v1";
   const TICKER_HIDDEN_KEY = "grokplace-activity-ticker-hidden-v1";
   const TICKER_ITEMS_MAX = 12;
+  const BRUSH_TAGS_MAX = 24;
+  const PAINT_PARTICLES_MAX = 40;
   // Disconnected viewers retain this critic-reviewed 12/min fallback budget.
   const CANVAS_POLL_MS = 12_000;
   const FEED_POLL_MS = 30_000;
@@ -341,6 +349,7 @@
 
   function markUserAdjusted() {
     userAdjusted = true;
+    if (followLatest) setFollowLatest(false);
     saveView();
   }
 
@@ -359,8 +368,28 @@
       travelY: Number.isFinite(motion?.travelY) ? motion.travelY : -0.24,
       until: now + 2000 + Math.max(0, Math.min(630, delayMs)),
     });
-    if (nameTags.length > 24) nameTags = nameTags.slice(-24);
+    if (nameTags.length > 24) nameTags = nameTags.slice(-BRUSH_TAGS_MAX);
     renderPainterTags();
+  }
+
+  /** @param {number} x @param {number} y @param {string} color @param {number} delayMs */
+  function spawnPaintParticles(x, y, color, delayMs) {
+    if (reduceMotion.matches) return;
+    const now = performance.now();
+    const directions = [[-11, -8], [10, -7], [-8, 10], [9, 9], [0, -13]];
+    for (const [dx, dy] of directions) {
+      paintParticles.push({
+        x,
+        y,
+        color: /^#[0-9A-F]{6}$/.test(color) ? color : "#FFFFFF",
+        delayMs: Math.max(0, Math.min(630, delayMs)),
+        dx,
+        dy,
+        until: now + 620 + Math.max(0, Math.min(630, delayMs)),
+      });
+    }
+    if (paintParticles.length > PAINT_PARTICLES_MAX) paintParticles = paintParticles.slice(-PAINT_PARTICLES_MAX);
+    renderPaintParticles();
   }
 
   function renderPainterTags() {
@@ -409,6 +438,45 @@
     if (layer) layer.innerHTML = "";
   }
 
+  function renderPaintParticles() {
+    let layer = document.getElementById("paint-particles");
+    if (!layer) {
+      layer = document.createElement("div");
+      layer.id = "paint-particles";
+      layer.className = "paint-particles";
+      wrap.appendChild(layer);
+    }
+    const now = performance.now();
+    paintParticles = paintParticles.filter((particle) => particle.until > now);
+    const rect = boardEl.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    layer.innerHTML = "";
+    for (const particle of paintParticles) {
+      const el = document.createElement("span");
+      el.className = "paint-particle";
+      el.style.left = `${rect.left - wrapRect.left + ((particle.x + 0.5) / size) * rect.width}px`;
+      el.style.top = `${rect.top - wrapRect.top + ((particle.y + 0.5) / size) * rect.height}px`;
+      el.style.setProperty("--particle-color", particle.color);
+      el.style.setProperty("--particle-delay", `${particle.delayMs}ms`);
+      el.style.setProperty("--particle-x", `${particle.dx}px`);
+      el.style.setProperty("--particle-y", `${particle.dy}px`);
+      layer.appendChild(el);
+    }
+    clearTimeout(particleTimer);
+    if (paintParticles.length) {
+      const nextExpiry = Math.min(...paintParticles.map((particle) => particle.until));
+      particleTimer = setTimeout(renderPaintParticles, Math.max(0, nextExpiry - performance.now()));
+    }
+  }
+
+  function clearPaintParticles() {
+    paintParticles = [];
+    clearTimeout(particleTimer);
+    particleTimer = 0;
+    const layer = document.getElementById("paint-particles");
+    if (layer) layer.innerHTML = "";
+  }
+
   function pointerDistance() {
     const pts = [...pointers.values()];
     if (pts.length < 2) return 0;
@@ -431,6 +499,7 @@
     syncTickerMotion();
     if (!reduceMotion.matches) return;
     flashes.clear();
+    clearPaintParticles();
     cancelAnimationFrame(rafId);
     paint();
   };
@@ -465,6 +534,33 @@
     } catch {
       setTickerHidden(false);
     }
+  }
+
+  /** @param {boolean} next */
+  function setFollowLatest(next) {
+    followLatest = Boolean(next);
+    followBtn?.classList.toggle("is-on", followLatest);
+    followBtn?.setAttribute("aria-pressed", String(followLatest));
+    followBtn?.setAttribute("aria-label", followLatest ? "Stop following latest activity" : "Follow latest activity");
+    followBtn?.setAttribute("title", followLatest ? "Stop following latest activity" : "Follow latest activity");
+    const label = followBtn?.querySelector(".follow-label");
+    if (label) label.textContent = followLatest ? "Following" : "Follow";
+  }
+
+  function loadFollowState() {
+    setFollowLatest(false);
+  }
+
+  /** @param {{ x: number, y: number }} entry */
+  function followActivity(entry) {
+    if (!followLatest) return;
+    scale = clampScale(Math.max(scale, 8));
+    panX = (size / 2 - (entry.x + 0.5)) * scale;
+    panY = (size / 2 - (entry.y + 0.5)) * scale;
+    userAdjusted = true;
+    saveView();
+    if (!reduceMotion.matches) flashes.set(entry.y * size + entry.x, performance.now() + 500);
+    paint();
   }
 
   /** @param {unknown} raw */
@@ -528,6 +624,7 @@
   }
 
   tickerToggle?.addEventListener("click", () => setTickerHidden(!tickerHidden));
+  followBtn?.addEventListener("click", () => setFollowLatest(!followLatest));
   activityTicker?.addEventListener("focusin", () => {
     tickerFocusPaused = true;
     syncTickerMotion();
@@ -569,7 +666,10 @@
           travelY: -Math.max(-1, Math.min(1, dy / length)) * 0.42,
         };
         spawnPainterTag(entry.agent, entry.x, entry.y, entry.goal, entry.color, index * 90, motion);
+        spawnPaintParticles(entry.x, entry.y, entry.color, index * 90);
       }
+      const newest = ordered[ordered.length - 1];
+      if (newest) followActivity(newest);
     }
     const maxT = items.reduce((max, entry) => Math.max(max, typeof entry.t === "number" ? entry.t : 0), lastFeedSeen);
     lastFeedSeen = maxT;
@@ -1067,6 +1167,7 @@
     tileRequest?.abort();
     closeLiveSocket();
     clearPainterTags();
+    clearPaintParticles();
   }
 
   function resumePolling() {
@@ -1352,6 +1453,7 @@
   const restored = loadView();
   if (!restored) fitContain(true);
   loadTickerState();
+  loadFollowState();
   startPolling();
 
   window.addEventListener("pagehide", () => {
@@ -1359,6 +1461,7 @@
     syncTickerMotion();
     cancelAnimationFrame(rafId);
     clearTimeout(painterTagTimer);
+    clearTimeout(particleTimer);
     clearTimeout(toastTimer);
   });
   window.addEventListener("pageshow", (event) => {
