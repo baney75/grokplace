@@ -462,7 +462,7 @@ async function flush(ms = 0) {
     Map,
     Math,
     JSON,
-    Date: timers.Date,
+    Date,
     performance,
     atob,
     Element: class ElementMock {},
@@ -689,7 +689,7 @@ async function flush(ms = 0) {
     Set,
     Math,
     JSON,
-    Date,
+    Date: timers.Date,
     performance,
     atob,
     setTimeout: timers.setTimeout,
@@ -719,19 +719,19 @@ async function flush(ms = 0) {
   socket.message('{"t":"canvas","v":1}');
   socket.message('{"t":"canvas","v":1}');
   await timers.tick(0);
-  check("canvas invalidations coalesce and fetch only the canvas", count("/v1/canvas") === 2 && count("/v1/feed") === 1 && count("/v1/music") === 1, JSON.stringify(calls));
+  check("canvas invalidations cannot bypass the successful-read cadence", count("/v1/canvas") === 1 && count("/v1/feed") === 1 && count("/v1/music") === 1, JSON.stringify(calls));
   socket.message('{"t":"activity","v":1}');
   socket.message('{"t":"activity","v":1}');
   await timers.tick(0);
-  check("activity invalidations coalesce and fetch only the feed", count("/v1/canvas") === 2 && count("/v1/feed") === 2 && count("/v1/music") === 1, JSON.stringify(calls));
+  check("activity invalidations cannot bypass the successful-read cadence", count("/v1/canvas") === 1 && count("/v1/feed") === 1 && count("/v1/music") === 1, JSON.stringify(calls));
   socket.message('{"t":"music","v":1}');
   socket.message('{"t":"music","v":1}');
   await timers.tick(0);
-  check("music invalidations coalesce and fetch only music", count("/v1/canvas") === 2 && count("/v1/feed") === 2 && count("/v1/music") === 2, JSON.stringify(calls));
+  check("music invalidations cannot bypass the successful-read cadence", count("/v1/canvas") === 1 && count("/v1/feed") === 1 && count("/v1/music") === 1, JSON.stringify(calls));
   check("the viewer never sends a websocket command", socket.sent.length === 0, JSON.stringify(socket.sent));
   socket.close();
   const retryDelays = timers.delays();
-  check("closed live sockets restore fallback reads and retry with bounded jitter", retryDelays.filter((delay) => delay === 0).length === 3 && retryDelays.some((delay) => delay >= 800 && delay <= 1_200), JSON.stringify(retryDelays));
+  check("closed live sockets preserve fallback read cadence and retry with bounded jitter", retryDelays.filter((delay) => delay === 0).length === 0 && retryDelays.includes(30_000) && retryDelays.includes(60_000) && retryDelays.includes(120_000) && retryDelays.some((delay) => delay >= 800 && delay <= 1_200), JSON.stringify(retryDelays));
   await timers.tick(1_200);
   check("a closed live socket retries once after its bounded backoff", live.sockets.length === 2, `sockets=${live.sockets.length}`);
   harness.document.hidden = true;
@@ -776,7 +776,7 @@ async function flush(ms = 0) {
     Set,
     Math,
     JSON,
-    Date,
+    Date: timers.Date,
     performance,
     atob,
     setTimeout: timers.setTimeout,
@@ -788,14 +788,26 @@ async function flush(ms = 0) {
   vm.runInContext(readFileSync(new URL("public/radio.js", root), "utf8"), context, { filename: "public/radio.js" });
   live.sockets[0].open();
   live.sockets[0].message('{"t":"ready","v":0}');
-  await timers.tick(29_999);
+  for (let version = 1; version <= 2; version++) {
+    await timers.tick(10_000);
+    live.sockets[0].message(JSON.stringify({ t: "canvas", v: version }));
+    live.sockets[0].message(JSON.stringify({ t: "activity", v: version }));
+    await timers.tick(0);
+  }
+  await timers.tick(9_999);
   check("a connected shortest-valid track does not wait nearly two minutes for promotion", musicGets === 1, JSON.stringify(calls));
   await timers.tick(1);
   const musicCallsAtThirtySeconds = calls.filter((call) => call.path === "/v1/music");
   check("connected music reconciliation fetches again at thirty seconds", musicGets === 2 && musicCallsAtThirtySeconds[1]?.at === 30_000, JSON.stringify(musicCallsAtThirtySeconds));
-  await timers.tick(270_000);
+  for (let version = 3; version <= 9; version++) {
+    await timers.tick(10_000);
+    live.sockets[0].message(JSON.stringify({ t: "canvas", v: version }));
+    live.sockets[0].message(JSON.stringify({ t: "activity", v: version }));
+    await timers.tick(0);
+  }
+  await timers.tick(210_000);
   const byPath = calls.reduce((counts, call) => ({ ...counts, [call.path]: (counts[call.path] || 0) + 1 }), {});
-  check("a healthy live socket holds the five-minute budget to twenty reads", calls.length === 20 && byPath["/v1/canvas"] === 6 && byPath["/v1/feed"] === 3 && byPath["/v1/music"] === 11, JSON.stringify({ calls: calls.length, byPath }));
+  check("nine serial placement invalidations still hold the healthy five-minute budget to twenty reads", calls.length === 20 && byPath["/v1/canvas"] === 6 && byPath["/v1/feed"] === 3 && byPath["/v1/music"] === 11, JSON.stringify({ calls: calls.length, byPath }));
   emit(harness.windowListeners, "pagehide", { persisted: false });
 }
 

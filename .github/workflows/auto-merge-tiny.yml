@@ -365,6 +365,8 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ steps.candidate.outputs.pr }}
           HEAD: ${{ steps.candidate.outputs.head }}
+          CHECK_ID: ${{ steps.candidate.outputs.check_id }}
+          ATTEMPT: ${{ github.event_name == 'workflow_dispatch' && inputs.attempt || '1' }}
         run: |
           set -euo pipefail
           observe_exact_merge() {
@@ -377,20 +379,27 @@ jobs:
             echo "merged=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD" --auto; then
-            observe_exact_merge || { echo "Exact-head auto-merge request failed before the PR merged."; exit 1; }
+          if gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD"; then
+            observe_exact_merge || { echo "GitHub accepted the immediate exact-head merge but did not report that head merged."; exit 1; }
             echo "merged=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          for attempt in {1..20}; do
-            if observe_exact_merge; then
-              echo "merged=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            sleep 3
-          done
+          if observe_exact_merge; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$ATTEMPT" =~ ^[1-3]$ ]] || ATTEMPT=1
+          COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" -f status="completed" -f conclusion="cancelled" -f completed_at="$COMPLETED_AT" -f 'output[title]=Waiting on immediate exact-head merge' -f 'output[summary]=GitHub did not complete the immediate merge. No deferred auto-merge remains armed; a bounded exact-head validation will retry.' >/dev/null
+          if [ "$ATTEMPT" -lt 3 ]; then
+            NEXT=$((ATTEMPT + 1))
+            sleep $((ATTEMPT * 15))
+            gh workflow run auto-merge-tiny.yml --repo "$REPO" -f action=merge -f pr="$PR" -f attempt="$NEXT"
+            echo "Scheduled bounded exact-head merge retry $NEXT/3 for PR #$PR at $HEAD."
+          else
+            echo "Bounded immediate exact-head merge retries exhausted; a new PR-quality event may restart validation."
+          fi
           echo "merged=false" >> "$GITHUB_OUTPUT"
-          echo "Exact-head auto-merge is enabled; durable reconciliation will finalize a maintenance award after GitHub completes the merge."
 
       - name: Finalize the reserved maintain award
         if: steps.merge.outcome == 'success' && steps.validation.outputs.lane == 'maintain'
@@ -406,7 +415,7 @@ jobs:
         run: |
           set -euo pipefail
           [ "${{ steps.merge.outputs.merged }}" = "true" ] || {
-            echo "Auto-merge is still pending; reconciliation will finalize this maintenance award after the merge."
+            echo "The immediate exact-head merge did not complete; no maintenance award will finalize on this attempt."
             exit 0
           }
           MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha')

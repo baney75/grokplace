@@ -908,8 +908,10 @@ const PLAN_DRAWING_LANDMARK_MAX = 32;
 const PLAN_DRAWING_TEXT_MAX = 80;
 const FOOTPRINT_RESET_TTL_MS = 5 * 60_000;
 const FOOTPRINT_RESET_BATCH_MAX = 32;
+const FOOTPRINT_RESET_CONFIRMATION_MAX = 128;
 const FOOTPRINT_CURSOR_RE = /^frc_[0-9a-z]+$/;
 const RELOCATION_CREDIT_TTL_MS = 24 * 60 * 60_000;
+const RELOCATION_CREDIT_ACCOUNT_MAX = 128;
 const CHALLENGE_TTL_MS = 90_000;
 const POW_DIFFICULTY = 3;
 const VOTE_COOLDOWN_MS = 20_000;
@@ -6300,6 +6302,9 @@ export class GrokPlaceCanvas extends DurableObject {
     if (!isJsonRecord(prior) || prior.clientRequestId !== clientRequestId || prior.confirmationId !== confirmationId || priorExpiresAt <= now) {
       return json({ ok: false, error: "reset_confirmation_required", message: "Run the version-bound dryRun first, then confirm its unexpired confirmationId." }, 409, origin);
     }
+    await this.pruneFootprintResetConfirmationsIn(this.state.storage, now);
+    await this.pruneRelocationCreditsIn(this.state.storage, akey, now);
+    await this.state.storage.delete(footprintResetKey(id, version, akey));
     if (prior.status === "confirmed" && isJsonRecord(prior.result)) return json({ ok: true, already: true, ...prior.result }, 200, origin);
     const agent = await this.readAgent(akey, parsed.agent, now);
     plan.status = "draft";
@@ -6329,6 +6334,59 @@ export class GrokPlaceCanvas extends DurableObject {
     return Array.isArray(raw)
       ? raw.filter(isRelocationCredit).filter((credit) => credit.agent.toLowerCase() === agentKey && credit.expiresAt > now)
       : [];
+  }
+
+  /**
+   * Retain only live footprint confirmations. A confirmation's own expiry is
+   * also its replay window, so pruning it makes stale confirmation IDs fail.
+   * @param {DurableObjectStorage | DurableObjectTransaction} storage
+   * @param {number} now
+   */
+  async pruneFootprintResetConfirmationsIn(storage, now) {
+    if (typeof storage.list !== "function") return { active: 0, overflow: true };
+    const listed = await storage.list({ prefix: "footprint-reset:", limit: FOOTPRINT_RESET_CONFIRMATION_MAX + 1 });
+    let active = 0;
+    for (const [key, raw] of listed) {
+      if (!isFootprintResetConfirmation(raw) || raw.expiresAt <= now) {
+        await storage.delete(key);
+        continue;
+      }
+      active++;
+    }
+    return { active, overflow: listed.size > FOOTPRINT_RESET_CONFIRMATION_MAX };
+  }
+
+  /**
+   * A credit balance has one key per agent. Expired and malformed balances are
+   * removed before admission; live balances are never evicted to make room.
+   * @param {DurableObjectStorage | DurableObjectTransaction} storage
+   * @param {string} agentKey
+   * @param {number} now
+   */
+  async pruneRelocationCreditsIn(storage, agentKey, now) {
+    if (typeof storage.list !== "function") return { credits: [], activeAccounts: 0, currentActive: false, overflow: true };
+    const listed = await storage.list({ prefix: "relocationcredits:", limit: RELOCATION_CREDIT_ACCOUNT_MAX + 1 });
+    let activeAccounts = 0;
+    /** @type {RelocationCredit[]} */
+    let credits = [];
+    for (const [key, raw] of listed) {
+      const keyAgent = key.slice("relocationcredits:".length);
+      const live = Array.isArray(raw)
+        ? raw.filter(isRelocationCredit).filter((credit) => credit.agent.toLowerCase() === keyAgent && credit.expiresAt > now)
+        : [];
+      if (!live.length) {
+        await storage.delete(key);
+        continue;
+      }
+      activeAccounts++;
+      if (keyAgent === agentKey) credits = live;
+    }
+    return {
+      credits,
+      activeAccounts,
+      currentActive: credits.length > 0,
+      overflow: listed.size > RELOCATION_CREDIT_ACCOUNT_MAX,
+    };
   }
 
   /** @param {unknown} raw @param {PlanBounds} bounds @param {number} size @returns {FootprintSelectionResult} */
@@ -6518,6 +6576,7 @@ export class GrokPlaceCanvas extends DurableObject {
       if (!plan || plan.agent.toLowerCase() !== akey) return { status: 404, body: { ok: false, error: "not_yours" }, changed: false, version: 0 };
       if (this.planVersion(plan) !== version) return { status: 409, body: { ok: false, error: "stale_plan_version", currentVersion: this.planVersion(plan) }, changed: false, version: 0 };
       if (!isPlanBounds(plan.bounds)) return { status: 409, body: { ok: false, error: "plan_bounds_required" }, changed: false, version: 0 };
+      const confirmationRetention = await this.pruneFootprintResetConfirmationsIn(storage, now);
       const requested = this.sanitizeFootprintSelection(body.selected, plan.bounds, size);
       if (!requested.ok) return { status: requested.status, body: { ok: false, error: requested.error, message: requested.message, coordinate: requested.coordinate }, changed: false, version: 0 };
       const parsedCursor = this.parseFootprintCursor(body.cursor, plan.bounds, size);
@@ -6558,6 +6617,9 @@ export class GrokPlaceCanvas extends DurableObject {
             return { status: 200, body: { ok: true, dryRun: true, already: true, id, version, boardVersion, confirmationId: prepared.confirmationId, expiresAt: prepared.expiresAt, footprint: publicFootprint }, changed: false, version: footprint.meta.version };
           }
         }
+        if ((!prepared || prepared.expiresAt <= now) && (confirmationRetention.overflow || confirmationRetention.active >= FOOTPRINT_RESET_CONFIRMATION_MAX)) {
+          return { status: 409, body: { ok: false, error: "footprint_confirmation_capacity", max: FOOTPRINT_RESET_CONFIRMATION_MAX }, changed: false, version: footprint.meta.version };
+        }
         const nextConfirmation = {
           version: 2,
           confirmationId: `pfc_${randomHex(8)}`,
@@ -6595,7 +6657,11 @@ export class GrokPlaceCanvas extends DurableObject {
         }
       }
       const clearCount = clearable.length;
-      const credits = await this.readRelocationCredits(storage, akey, now);
+      const creditRetention = await this.pruneRelocationCreditsIn(storage, akey, now);
+      if (clearCount && !creditRetention.currentActive && (creditRetention.overflow || creditRetention.activeAccounts >= RELOCATION_CREDIT_ACCOUNT_MAX)) {
+        return { status: 409, body: { ok: false, error: "relocation_credit_capacity", max: RELOCATION_CREDIT_ACCOUNT_MAX }, changed: false, version: footprint.meta.version };
+      }
+      const credits = creditRetention.credits;
       const availableCredits = credits.reduce((total, credit) => total + credit.amount, 0);
       if (!Number.isSafeInteger(availableCredits + clearCount)) return { status: 409, body: { ok: false, error: "relocation_credit_overflow" }, changed: false, version: footprint.meta.version };
       const creditBalance = clearCount
@@ -6643,8 +6709,9 @@ export class GrokPlaceCanvas extends DurableObject {
       /** @type {Record<string, unknown>} */
       const put = {
         [confirmationKey]: { ...prepared, status: "confirmed", result: bodyResult },
-        [relocationCreditKey(akey)]: creditBalance ? [creditBalance] : credits,
       };
+      if (creditBalance) put[relocationCreditKey(akey)] = [creditBalance];
+      else if (credits.length) put[relocationCreditKey(akey)] = credits;
       if (clearCount) {
         put.board = this.bufCopy(footprint.board);
         put.scores = this.scoresCopy(footprint.scores);
@@ -8320,7 +8387,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const storedFeatures = await this.state.storage.get(storageKey);
     const now = Date.now();
     const features = (Array.isArray(storedFeatures) ? storedFeatures.filter(isFeatureRecord) : [])
-      .filter((feature) => now - feature.createdAt <= FEATURE_RETENTION_MS);
+      .filter((feature) => !suggestionMode || now - feature.createdAt <= FEATURE_RETENTION_MS);
     const ranked = [...features]
       .sort((a, b) => b.votes - a.votes || a.createdAt - b.createdAt || a.id.localeCompare(b.id))
       .map(publicFeature)
@@ -8347,7 +8414,7 @@ export class GrokPlaceCanvas extends DurableObject {
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const now = Date.now();
     const stat = await this.readAgent(akey, parsed.agent, now);
-    if ((stat.placements || 0) < 1 || !stat.lastAt || now - stat.lastAt > GOAL_ACTIVE_TTL_MS) return json({ ok: false, error: "active_agent_required", message: "An active agent with at least one placement is required." }, 403, origin);
+    if ((stat.placements || 0) < 1 || (suggestionMode && (!stat.lastAt || now - stat.lastAt > GOAL_ACTIVE_TTL_MS))) return json({ ok: false, error: "active_agent_required", message: suggestionMode ? "An active agent with at least one placement is required." : "A claimed agent with at least one placement is required." }, 403, origin);
     const title = scanTextSafety(typeof body.title === "string" ? body.title.trim().slice(0, 80) : "", "feature title");
     const summary = scanTextSafety(typeof body.summary === "string" ? body.summary.trim().slice(0, 400) : "", "feature summary");
     if (!title.ok || !summary.ok || title.value.length < 3 || summary.value.length < 8) return json({ ok: false, error: "bad_feature", message: "Clean title (3-80 chars) and summary (8-400 chars) required." }, 400, origin);
@@ -8355,7 +8422,7 @@ export class GrokPlaceCanvas extends DurableObject {
       const storageKey = suggestionMode ? "suggestions" : "features";
       const storedFeatures = await storage.get(storageKey);
       const features = (Array.isArray(storedFeatures) ? storedFeatures.filter(isFeatureRecord) : [])
-        .filter((feature) => now - feature.createdAt <= FEATURE_RETENTION_MS);
+        .filter((feature) => !suggestionMode || now - feature.createdAt <= FEATURE_RETENTION_MS);
       const duplicate = features.find((feature) => feature.title.toLowerCase() === title.value.toLowerCase());
       if (duplicate) return { status: 200, body: { ok: true, replayed: true, [suggestionMode ? "suggestion" : "feature"]: publicFeature(duplicate) } };
       if (suggestionMode && features.filter((feature) => feature.submittedBy.toLowerCase() === akey).length >= SUGGESTIONS_PER_AGENT_MAX) {
@@ -8388,11 +8455,11 @@ export class GrokPlaceCanvas extends DurableObject {
     const now = Date.now();
     const result = await this.storageTransaction(async (storage) => {
       const stat = this.normalizeAgent(await storage.get(`agent:${akey}`), parsed.agent, now);
-      if ((stat.placements || 0) < 1 || !stat.lastAt || now - stat.lastAt > GOAL_ACTIVE_TTL_MS) return { status: 403, body: { ok: false, error: "active_agent_required" } };
+      if ((stat.placements || 0) < 1 || (suggestionMode && (!stat.lastAt || now - stat.lastAt > GOAL_ACTIVE_TTL_MS))) return { status: 403, body: { ok: false, error: "active_agent_required" } };
       const storageKey = suggestionMode ? "suggestions" : "features";
       const storedFeatures = await storage.get(storageKey);
       const features = (Array.isArray(storedFeatures) ? storedFeatures.filter(isFeatureRecord) : [])
-        .filter((feature) => now - feature.createdAt <= FEATURE_RETENTION_MS);
+        .filter((feature) => !suggestionMode || now - feature.createdAt <= FEATURE_RETENTION_MS);
       const index = features.findIndex((feature) => feature.id === id && feature.status === "proposed");
       if (index < 0) return { status: 404, body: { ok: false, error: "not_found" } };
       const feature = features[index];

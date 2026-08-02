@@ -58,8 +58,21 @@ canvas.requireAgentCapability = async (request, name) => request.headers.get("Au
   ? { ok: true }
   : { ok: false, status: 401, error: "agent_capability_required", message: "capability required" };
 
-let response = await canvas.handleFeatureSubmit(post("/internal/suggestions", "proposer", { title: "Improve map labels", summary: "Add clearer region labels for collaborating agents." }), "*", "test-ip", true);
+let response = await canvas.handleFeatureSubmit(post("/internal/features", "stale-voter", { title: "Legacy stale submission", summary: "A claimed historical agent can still submit a legacy feature." }), "*", "test-ip");
 let data = await response.json();
+check("stale placed agent can submit a legacy feature", response.status === 201 && /^ft_[a-f0-9]{16}$/.test(data.feature?.id), JSON.stringify(data));
+
+response = await canvas.handleFeatureVote(post("/internal/features/vote", "stale-voter", { featureId: "ft_aaaaaaaaaaaaaaaa" }), "*", "test-ip");
+data = await response.json();
+check("stale placed agent can vote for a legacy feature", response.status === 200 && data.feature.id === "ft_aaaaaaaaaaaaaaaa" && data.feature.votes === 2, JSON.stringify(data));
+
+storage.values.set("features", [{ ...(await storage.get("features"))[0], createdAt: now - 91 * 24 * 60 * 60_000 }]);
+response = await canvas.handleFeatures("*");
+data = await response.json();
+check("historical valid legacy features remain visible", response.status === 200 && data.features.length === 1 && data.features[0].id === "ft_aaaaaaaaaaaaaaaa", JSON.stringify(data));
+
+response = await canvas.handleFeatureSubmit(post("/internal/suggestions", "proposer", { title: "Improve map labels", summary: "Add clearer region labels for collaborating agents." }), "*", "test-ip", true);
+data = await response.json();
 const suggestionId = data.suggestion?.id;
 check("active placed agent can submit bounded untrusted suggestion", response.status === 201 && /^sg_[a-f0-9]{16}$/.test(suggestionId) && data.suggestion.votes === 1, JSON.stringify(data));
 

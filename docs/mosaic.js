@@ -96,6 +96,8 @@
   let feedRetryJitter = false;
   let canvasRetryNotBefore = 0;
   let feedRetryNotBefore = 0;
+  let canvasCadenceNotBefore = 0;
+  let feedCadenceNotBefore = 0;
   let canvasReadThisVisibility = false;
   let feedReadThisVisibility = false;
   let canvasRefreshQueued = false;
@@ -1071,7 +1073,7 @@
   /** @param {number} delay */
   function scheduleCanvasPoll(delay) {
     if (!isPollingActive()) return;
-    const gateDelay = Math.max(0, canvasRetryNotBefore - Date.now());
+    const gateDelay = Math.max(0, canvasRetryNotBefore - Date.now(), canvasCadenceNotBefore - Date.now());
     if (gateDelay > 0 && canvasTimer) return;
     clearTimeout(canvasTimer);
     canvasTimer = setTimeout(() => {
@@ -1088,7 +1090,7 @@
   /** @param {number} delay */
   function scheduleFeedPoll(delay) {
     if (!isPollingActive()) return;
-    const gateDelay = Math.max(0, feedRetryNotBefore - Date.now());
+    const gateDelay = Math.max(0, feedRetryNotBefore - Date.now(), feedCadenceNotBefore - Date.now());
     if (gateDelay > 0 && feedTimer) return;
     clearTimeout(feedTimer);
     feedTimer = setTimeout(() => {
@@ -1114,6 +1116,7 @@
       await fetchCanvas(controller.signal);
       canvasFailures = 0;
       canvasRetryNotBefore = 0;
+      canvasCadenceNotBefore = Date.now() + liveCanvasInterval();
       setLiveStatus(false);
       if (document.title.includes("reconnecting")) document.title = "grok/place · live mosaic";
     } catch (error) {
@@ -1151,6 +1154,7 @@
       await fetchFeed(controller.signal);
       feedFailures = 0;
       feedRetryNotBefore = 0;
+      feedCadenceNotBefore = Date.now() + liveFeedInterval();
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
         feedFailures++;
@@ -1198,6 +1202,8 @@
     feedRefreshQueued = false;
     canvasReadThisVisibility = false;
     feedReadThisVisibility = false;
+    canvasCadenceNotBefore = 0;
+    feedCadenceNotBefore = 0;
     clearTimeout(canvasTimer);
     clearTimeout(feedTimer);
     canvasTimer = 0;
