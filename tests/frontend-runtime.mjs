@@ -731,6 +731,86 @@ async function flush(ms = 0) {
   const sound = element("sound-btn");
   sound.querySelector = () => element();
   const harness = browserHarness(new Map([["sound-btn", sound]]));
+  const timers = fakeTimers();
+  const math = Object.create(Math);
+  math.random = () => 0;
+  let calls = 0;
+  const context = vm.createContext({
+    ...harness,
+    fetch: async () => {
+      calls++;
+      if (calls === 1) return { ok: false, status: 429, headers: { get: () => "50" } };
+      return { ok: true, json: async () => ({ ok: true, now: null }) };
+    },
+    AbortController,
+    URL,
+    Set,
+    Math: math,
+    JSON,
+    Date: timers.Date,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  vm.runInContext(readFileSync(new URL("public/radio.js", root), "utf8"), context, { filename: "public/radio.js" });
+  await timers.tick(0);
+  for (let index = 0; index < 6; index++) emit(harness.windowListeners, "grokplace:live", { detail: { t: "music", v: index + 1 } });
+  await timers.tick(10_000);
+  harness.document.hidden = true;
+  emit(harness.documentListeners, "visibilitychange");
+  await timers.tick(30_000);
+  harness.document.hidden = false;
+  emit(harness.documentListeners, "visibilitychange");
+  emit(harness.windowListeners, "focus");
+  emit(harness.windowListeners, "grokplace:live", { detail: { t: "music", v: 99 } });
+  await timers.tick(9_999);
+  check(
+    "music live, focus, and visibility triggers cannot bypass Retry-After",
+    calls === 1 && JSON.stringify(timers.delays()) === JSON.stringify([1]),
+    JSON.stringify({ calls, delays: timers.delays() })
+  );
+  await timers.tick(1);
+  check("music resumes when its absolute retry gate expires", calls === 2, `calls=${calls}`);
+  emit(harness.windowListeners, "pagehide", { persisted: false });
+}
+
+{
+  const sound = element("sound-btn");
+  sound.querySelector = () => element();
+  const harness = browserHarness(new Map([["sound-btn", sound]]));
+  const timers = fakeTimers();
+  const math = Object.create(Math);
+  math.random = () => 1;
+  let calls = 0;
+  const context = vm.createContext({
+    ...harness,
+    fetch: async () => {
+      calls++;
+      return { ok: false, status: 503, headers: { get: () => null } };
+    },
+    AbortController,
+    URL,
+    Set,
+    Math: math,
+    JSON,
+    Date: timers.Date,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  vm.runInContext(readFileSync(new URL("public/radio.js", root), "utf8"), context, { filename: "public/radio.js" });
+  await timers.tick(0);
+  await timers.tick(60_000);
+  check(
+    "music jitter stays capped at sixty seconds across consecutive overloads",
+    calls === 2 && JSON.stringify(timers.delays()) === JSON.stringify([60_000]),
+    JSON.stringify({ calls, delays: timers.delays() })
+  );
+  emit(harness.windowListeners, "pagehide", { persisted: false });
+}
+
+{
+  const sound = element("sound-btn");
+  sound.querySelector = () => element();
+  const harness = browserHarness(new Map([["sound-btn", sound]]));
   const tracker = delayedFetch();
   const context = vm.createContext({
     ...harness,
@@ -772,7 +852,7 @@ async function flush(ms = 0) {
     Set,
     Math,
     JSON,
-    Date,
+    Date: timers.Date,
     setTimeout: timers.setTimeout,
     clearTimeout: timers.clearTimeout,
   });

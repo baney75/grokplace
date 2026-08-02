@@ -30,13 +30,14 @@
   let musicFailures = 0;
   let musicRetryAfterMs = 0;
   let musicRetryJitter = false;
+  let musicRetryNotBefore = 0;
   let liveConnected = false;
   let musicReadThisVisibility = false;
   /** @type {Set<Voice>} */
   const voices = new Set();
   // Disconnected viewers retain the critic-reviewed 12/min fallback budget.
   const MUSIC_POLL_MS = 30_000;
-  const MUSIC_BACKOFF_MAX_MS = 120_000;
+  const MUSIC_BACKOFF_MAX_MS = 60_000;
   // GET /v1/music also promotes an expired track, so this must cover the
   // shortest valid composition even while the invalidation socket is healthy.
   const LIVE_MUSIC_RECONCILE_MS = 30_000;
@@ -181,11 +182,18 @@
   /** @param {number} delay */
   function scheduleMusicPoll(delay) {
     if (!isPollingActive()) return;
+    const gateDelay = Math.max(0, musicRetryNotBefore - Date.now());
+    if (gateDelay > 0 && pollTimer) return;
     clearTimeout(pollTimer);
     pollTimer = setTimeout(() => {
       pollTimer = 0;
+      if (musicRetryNotBefore > Date.now()) {
+        scheduleMusicPoll(0);
+        return;
+      }
+      musicRetryNotBefore = 0;
       void pollMusic();
-    }, delay);
+    }, Math.max(delay, gateDelay));
   }
 
   function isPollingActive() {
@@ -230,7 +238,7 @@
     if (musicFailures <= 0) return base;
     const exponential = Math.min(MUSIC_BACKOFF_MAX_MS, base * (2 ** Math.min(musicFailures, 2)));
     if (!jitter) return Math.max(Math.min(MUSIC_BACKOFF_MAX_MS, serverRetryAfterMs), exponential);
-    const jittered = Math.round(exponential * (0.8 + Math.random() * 0.4));
+    const jittered = Math.min(MUSIC_BACKOFF_MAX_MS, Math.round(exponential * (0.8 + Math.random() * 0.4)));
     return Math.max(Math.min(MUSIC_BACKOFF_MAX_MS, serverRetryAfterMs), jittered);
   }
 
@@ -255,6 +263,7 @@
     try {
       await fetchMusic(controller.signal);
       musicFailures = 0;
+      musicRetryNotBefore = 0;
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
         musicFailures++;
@@ -265,7 +274,9 @@
     } finally {
       if (musicRequest === controller) musicRequest = null;
       if (isPollingActive()) {
-        const delay = refreshAfterPoll ? 0 : musicBackoffDelay(musicRetryAfterMs, musicRetryJitter);
+        const failureDelay = musicBackoffDelay(musicRetryAfterMs, musicRetryJitter);
+        if (musicFailures > 0) musicRetryNotBefore = Math.max(musicRetryNotBefore, Date.now() + failureDelay);
+        const delay = refreshAfterPoll ? 0 : failureDelay;
         refreshAfterPoll = false;
         musicRetryAfterMs = 0;
         musicRetryJitter = false;
