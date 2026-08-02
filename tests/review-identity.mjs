@@ -65,6 +65,9 @@ class MemoryStorage {
     else this.values.set(key, value);
   }
   async delete(key) { this.values.delete(key); }
+  async list({ prefix = "", limit = 1_000 } = {}) {
+    return new Map([...this.values.entries()].filter(([key]) => key.startsWith(prefix)).slice(0, limit));
+  }
 }
 
 async function attest(storageValues, agent = "critic-agent") {
@@ -139,6 +142,24 @@ check(
     !await reviewStorage.get(`agent:${reviewAgent.toLowerCase()}`),
   JSON.stringify(reviewClaim)
 );
+
+await reviewStorage.put("reviewauth:expired-review", {
+  agent: "expired-review",
+  hash: "a".repeat(64),
+  version: 1,
+  createdAt: 0,
+  expiresAt: 0,
+});
+await reviewCanvas.handleReviewClaim(
+  new Request("https://test/internal/reviews/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ challengeId: "cleanup", nonce: 0 }),
+  }),
+  "*",
+  "review-ip"
+);
+check("validated review claims reclaim expired review credentials in a bounded batch", !await reviewStorage.get("reviewauth:expired-review"));
 
 const reviewAttestResponse = await reviewCanvas.handleReviewAttest(
   new Request("https://test/internal/reviews/attest", {

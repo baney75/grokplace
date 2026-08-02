@@ -500,6 +500,7 @@ const GITHUB_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 const IP_CHALLENGE_LIMIT = 60;
 const IP_NEW_AGENTS_LIMIT = 8;
 const REVIEW_CAPABILITY_TTL_MS = 15 * 60_000;
+const REVIEW_CLEANUP_BATCH = 16;
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
 const WORKERS_DEV_SUFFIX = ".workers.dev";
 const EDGE_READ_PATHS = new Set(["/", "/llms.txt", "/agent", "/v1/agent", "/health", "/see"]);
@@ -1897,6 +1898,14 @@ export class GrokPlaceCanvas extends DurableObject {
     return { ok: true };
   }
 
+  /** @param {number} now */
+  async pruneExpiredReviewCapabilities(now) {
+    const records = await this.state.storage.list({ prefix: "reviewauth:", limit: REVIEW_CLEANUP_BATCH });
+    for (const [key, record] of records) {
+      if (!isReviewCapabilityRecord(record) || record.expiresAt <= now) await this.state.storage.delete(key);
+    }
+  }
+
   /** @param {Request} request @param {string} origin @param {string} ip */
   async handleReviewClaim(request, origin, ip) {
     let body;
@@ -1906,8 +1915,9 @@ export class GrokPlaceCanvas extends DurableObject {
     if (!rl.ok) return json({ ok: false, error: "rate_limit" }, 429, origin);
     const proof = await this.consumeProof(body, ip, "review:claim");
     if (!proof.ok) return json({ ok: false, error: proof.error, message: proof.message }, proof.status, origin);
-    const agent = `reviewer_${randomHex(8)}`;
     const now = Date.now();
+    await this.pruneExpiredReviewCapabilities(now);
+    const agent = `reviewer_${randomHex(8)}`;
     const expiresAt = now + REVIEW_CAPABILITY_TTL_MS;
     const token = `gp_r_${randomHex(32)}`;
     await this.state.storage.put(`reviewauth:${agent.toLowerCase()}`, { agent, hash: await sha256Hex(token), version: 1, createdAt: now, expiresAt });
