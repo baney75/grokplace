@@ -29,6 +29,9 @@ function envWithRoute(routed, limiterResult = { success: true }) {
 
 const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
 const staticHeaders = readFileSync(new URL("../public/_headers", import.meta.url), "utf8");
+const workerSource = readFileSync(new URL("../worker/index.js", import.meta.url), "utf8");
+
+check("no public agent name bypasses turn limits or exposes a whole-board clear", !/UNLIMITED_AGENT|hasUnlimitedTiles|agent\/clear-owned/.test(workerSource));
 
 check(
   "static viewer CSP permits the branded API for GitHub Pages",
@@ -53,26 +56,26 @@ check(
   const keys = [];
   const env = envWithRoute({ value: false });
   env.EDGE_READ_LIMITER = { async limit({ key }) { keys.push(key); return { success: true }; } };
-  for (const path of ["/v1/canvas", "/v1/feed", "/v1/music", "/v1/see", "/v1/snapshot", "/v1/view", "/see", "/v1/tile?x=0&y=0", "/v1/goals?x=0&y=0&w=1&h=1"]) {
+  for (const path of ["/v1/canvas", "/v1/feed", "/v1/music", "/v1/suggestions", "/v1/see", "/v1/snapshot", "/v1/view", "/see", "/v1/tile?x=0&y=0", "/v1/goals?x=0&y=0&w=1&h=1"]) {
     await worker.fetch(new Request(`https://grokplace.barnlabs.net${path}`, {
       headers: { "CF-Connecting-IP": "203.0.113.9" },
     }), env);
   }
-  check("all public read aliases share one bounded edge bucket", keys.length === 9 && new Set(keys).size === 1);
+  check("all public read aliases share one bounded edge bucket", keys.length === 10 && new Set(keys).size === 1);
 }
 
 {
   const keys = [];
   const env = envWithRoute({ value: false });
   env.EDGE_WRITE_LIMITER = { async limit({ key }) { keys.push(key); return { success: true }; } };
-  for (const path of ["/v1/place", "/v1/protect", "/v1/goals/join", "/v1/vote", "/v1/music/vote", "/v1/features/vote"]) {
+  for (const path of ["/v1/place", "/v1/protect", "/v1/goals/join", "/v1/vote", "/v1/music/vote", "/v1/features/vote", "/v1/suggestions", "/v1/suggestions/vote"]) {
     await worker.fetch(new Request(`https://grokplace.barnlabs.net${path}`, {
       method: "POST",
       headers: { "CF-Connecting-IP": "203.0.113.9", "Content-Type": "application/json" },
       body: "{}",
     }), env);
   }
-  check("all public mutations share one bounded edge bucket", keys.length === 6 && new Set(keys).size === 1);
+  check("all public mutations share one bounded edge bucket", keys.length === 8 && new Set(keys).size === 1);
 }
 
 {
@@ -83,6 +86,28 @@ check(
   const body = await response.json();
   check("edge read limiter returns 429 before Durable Object access", response.status === 429 && body.error === "rate_limited" && !routed.value);
   check("edge read limiter sends a bounded retry policy", response.headers.get("Retry-After") === "60" && response.headers.get("X-RateLimit-Policy") === "30/60s per client");
+}
+
+{
+  const routed = { value: false };
+  const env = envWithRoute(routed);
+  delete env.EDGE_READ_LIMITER;
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
+    headers: { "CF-Connecting-IP": "203.0.113.12" },
+  }), env);
+  const body = await response.json();
+  check("missing edge limiter binding fails closed before Durable Object access", response.status === 503 && body.error === "rate_limiter_unavailable" && !routed.value);
+}
+
+{
+  const routed = { value: false };
+  const env = envWithRoute(routed);
+  env.EDGE_READ_LIMITER = { async limit() { return {}; } };
+  const response = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/canvas", {
+    headers: { "CF-Connecting-IP": "203.0.113.14" },
+  }), env);
+  const body = await response.json();
+  check("malformed edge limiter result fails closed before Durable Object access", response.status === 503 && body.error === "rate_limiter_unavailable" && !routed.value);
 }
 
 {

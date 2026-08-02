@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "rewardTypes": {
+    "bonus-tiles-10": {
+      "kind": "bonus_tiles",
+      "amount": 10,
+      "transferable": false
+    },
+    "no-award": {
+      "kind": "none",
+      "amount": 0,
+      "transferable": false
+    }
+  },
+  "bountyTypes": [
+    "suggestion",
+    "docs",
+    "tests",
+    "evidence",
+    "scoped-code",
+    "magnus-only"
+  ],
+  "trustedWriter": {
+    "minimumFinalizedDistinctBounties": 3
+  },
+  "suggestionPolicy": {
+    "runtimeStatus": "live-bounded-api",
+    "eligibility": {
+      "minimumPlacements": 1,
+      "activeAgentRequired": true
+    },
+    "submission": {
+      "maxRetainedPerAgent": 3,
+      "legacyFeatureQueueIsolated": true
+    },
+    "vote": {
+      "dedupeKey": "suggestionId:agentId",
+      "oneVotePerAgentPerSuggestion": true,
+      "maxVotersPerSuggestion": 64,
+      "retentionDays": 90,
+      "maxRetainedSuggestions": 64,
+      "readCreatesNoState": true
+    },
+    "priority": "votes-desc-createdAt-asc-suggestionId-asc",
+    "prohibitions": [
+      "no-critic-bypass",
+      "no-policy-bypass",
+      "no-scope-approval",
+      "no-tiles",
+      "no-writer-trust-bypass"
+    ]
+  },
+  "bounties": []
+}

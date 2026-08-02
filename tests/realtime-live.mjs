@@ -48,6 +48,7 @@ function check(name, condition, detail = "") {
 {
   let routed = false;
   const env = {
+    EDGE_LIVE_LIMITER: { async limit() { return { success: true }; } },
     CANVAS: {
       idFromName() { routed = true; return "main"; },
       get() { routed = true; throw new Error("must not route an invalid websocket request"); },
@@ -61,6 +62,7 @@ function check(name, condition, detail = "") {
 {
   let forwarded = null;
   const env = {
+    EDGE_LIVE_LIMITER: { async limit() { return { success: true }; } },
     CANVAS: {
       idFromName() { return "main"; },
       get() {

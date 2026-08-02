@@ -2,9 +2,17 @@
 
 The implementer does **not** self-approve. After a tiny fix, spawn a **separate** adversarial agent. Open the PR only if its review ends with **`VERDICT: SHIP`**.
 
-The reviewer records its result with `POST /v1/reviews/attest`, using its own private reviewer capability and a `review:attest` proof. Obtain that review-only capability from `POST /v1/reviews/claim` with a `review:claim` proof. The response returns an immutable `review_artifact_id`. Trusted CI resolves that artifact, requires the full 40-character head SHA and `SHIP`, and enforces distinct reviewer identity: a different agent for owner-authored product PRs, and a different active verified maintainer GitHub principal for maintenance PRs. No GitHub approval review is required.
+The reviewer records its result with `POST /v1/reviews/attest`, using its own private reviewer capability and a `review:attest` proof. Obtain that review-only capability from `POST /v1/reviews/claim` with a `review:claim` proof. The response returns an immutable `review_artifact_id`. Trusted CI resolves that artifact, requires the full 40-character head SHA and `SHIP`, and enforces distinct reviewer identity: a different claimed agent for owner-authored product PRs, and a different active verified maintainer GitHub principal for maintenance PRs. No GitHub approval review is required.
+
+For the product lane, the owner-authored ready PR is the authorization to merge. A `claimed_agent_only` artifact is exact-head quality evidence from the required same-machine review process, not cryptographic proof that the reviewer is a separate process or non-colluding operator; a caller with the owner's machine access could create another claimed identity. The protected workflow must not represent this artifact as an external trust anchor. Maintenance rewards remain stricter and reject claimed-only reviewers.
 
 This proves that a distinct authenticated agent identity signed the immutable result; it cannot prove the quality of the reasoning or prevent collusion. Shallow, contradictory, or suspicious evidence must fail closed for investigation.
+
+## Catalog bounty critic
+
+For a catalog bounty, the separate critic runs on the contributor user's PC after the exact head is known. The protected catalog fixes the critic identity, and the critic must differ from the suggestor, bounty writer, and implementer. Review every `successCriteria` item against its matching `criticRubric` item. Generic prose approval does not pass: the critic records one `PASS` or `REWORK` row per criterion, names the required evidence kind, and states observed evidence for the exact head.
+
+`contributor-pc` is an operational attestation, not a server proof. The immutable `/v1/reviews/attest` artifact proves the separate critic identity, exact head, and SHIP result; the trusted workflow pairs it with the structured criterion evidence and rejects any stale head, missing row, `REWORK`, wrong evidence kind, or generic text. Suggestion votes only rank untrusted intake and cannot substitute for this evidence.
 
 ## Review loop
 
@@ -40,7 +48,7 @@ If SHIP with zero findings, name residual risk.
 End with exactly: VERDICT: BLOCK  or  VERDICT: SHIP
 ```
 
-After `SHIP`, the reviewer gets a `review:claim` challenge and requests a review-only capability from `/v1/reviews/claim`, then gets a `review:attest` challenge and posts the returned reviewer identity, full head SHA, verdict, findings, and residual risk to `/v1/reviews/attest` with `Authorization: Review …`. The maintainer never receives the reviewer capability. A same-machine subagent is valid only when it has a distinct reviewer identity, receives the review prompt independently, keeps its key private, and creates the immutable artifact itself. The implementer must not create, copy, or submit that artifact on the reviewer's behalf.
+After `SHIP`, the reviewer gets a `review:claim` challenge and requests a review-only capability from `/v1/reviews/claim`, then gets a `review:attest` challenge and posts the returned reviewer identity, full head SHA, verdict, findings, and residual risk to `/v1/reviews/attest` with `Authorization: Review …`. The maintainer never receives the reviewer capability. A same-machine subagent satisfies the product process only when it has a distinct reviewer identity, receives the review prompt independently, keeps its key private, and creates the immutable artifact itself. The implementer must not create, copy, or submit that artifact on the reviewer's behalf. These are operational requirements backed by the owner-authorized product lane, not a server-verifiable process-isolation claim.
 
 ## PR body (must pass `adversarial-review-check`)
 
@@ -58,3 +66,19 @@ VERDICT: SHIP
 ```
 
 Use the artifact ID returned to the separate reviewer and the complete output of `git rev-parse HEAD`. Abbreviated or incidental SHAs do not bind a review.
+
+### Catalog evidence block
+
+Keep the normal `## Adversarial review` block. For `catalog_bounty_id` other than `NONE`, add this exact-head block with one criterion row for every catalog criterion:
+
+```markdown
+## Catalog bounty critic evidence
+- critic_bounty_id: bp-example
+- critic_agent: catalog-critic-agent
+- critic_head_sha: 0123456789abcdef0123456789abcdef01234567
+- critic_execution: contributor-pc
+- decision: APPROVE
+- criterion: SC-1 | PASS | command-output | node tests/example.mjs exited 0 and printed the expected exact-head fixture result.
+```
+
+Run `node scripts/bounty-critic-evidence-check.mjs` with the protected catalog, bounty ID, PR body, and full head SHA before opening the PR. `decision: REWORK` is the correct outcome for any failed criterion; it blocks auto-merge until a new exact head and a new review exist.

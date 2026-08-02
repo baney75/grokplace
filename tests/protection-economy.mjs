@@ -155,6 +155,26 @@ async function placeOn(targetCanvas, body, targetSize = size) {
 }
 
 try {
+  const formerPrivilegedStorage = new TransactionalMemoryStorage({
+    board: new Uint8Array(size * size).buffer,
+    scores: new Int16Array(size * size).buffer,
+    size,
+    schema: 4,
+    meta: { version: 0, totalPlacements: 0, totalVotes: 0, uniqueAgents: 0, lastPlaceAt: 0 },
+    feed: [],
+    history: [],
+    leaders: [],
+    "turn:magnus-frog-cont-lk84q": { left: 5, nextTurnAt: 0 },
+  });
+  const formerPrivilegedCanvas = new GrokPlaceCanvas({ storage: formerPrivilegedStorage, getWebSockets() { return []; } }, {});
+  formerPrivilegedCanvas.rateLimit = async () => ({ ok: true });
+  formerPrivilegedCanvas.consumeProof = async () => ({ ok: true });
+  formerPrivilegedCanvas.requireAgentCapability = async () => ({ ok: true });
+  let formerResult = await placeOn(formerPrivilegedCanvas, { agent: "magnus-frog-cont-lk84q", goal: "bounded turn regression", tiles: Array.from({ length: 5 }, (_, y) => ({ x: 0, y, color: 1 })), challengeId: "test", nonce: 0 });
+  check("former designated public name spends the ordinary five-tile turn", formerResult.response.status === 200 && formerResult.data.tilesLeftInTurn === 0 && formerResult.data.nextTurnAt === now + 60_000 && !Object.hasOwn(formerResult.data, "unlimitedTiles"), JSON.stringify(formerResult.data));
+  formerResult = await placeOn(formerPrivilegedCanvas, { agent: "magnus-frog-cont-lk84q", goal: "bounded turn regression", x: 1, y: 0, color: 1, challengeId: "test", nonce: 0 });
+  check("former designated public name cannot bypass cooldown", formerResult.response.status === 429 && formerResult.data.error === "cooldown", JSON.stringify(formerResult.data));
+
   let result = await protect({ agent: "protector", x: 1, y: 1, action: "protect", clientRequestId: "protect-cell-1" });
   const firstProtection = await storage.get("protection:cell:1:1");
   const firstTurn = await storage.get("turn:protector");

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { GrokPlaceCanvas } from "../worker/index.js";
+import worker, { GrokPlaceCanvas } from "../worker/index.js";
 
 class MemoryStorage {
   constructor(values = {}) {
@@ -332,6 +332,17 @@ response = await canvas.handlePlanReset(new Request("https://test/internal/plan/
 }), "*", "test-ip");
 data = await response.json();
 check("an agent cannot reset another agent's plan or assignment", response.status === 404 && data.error === "not_yours", JSON.stringify(data));
+const resetCleanupConfirmationKey = `footprint-reset:${planId}:3:${owner}`;
+const resetCleanupCreditKey = `relocationcredits:expired-reset-credit`;
+storage.values.set(resetCleanupConfirmationKey, {
+  version: 2, confirmationId: "pfc_eeeeeeeeeeeeeeee", clientRequestId: "reset-cleanup-confirmation", planId, planVersion: 3,
+  agent: owner, boardVersion: 7, footprintHash: "e".repeat(64), selectionMode: "all", selected: [], cursor: null,
+  expiresAt: Date.now() + 60_000, status: "prepared",
+});
+storage.values.set(resetCleanupCreditKey, [{
+  version: 1, id: "rlc_eeeeeeeeeeeeeeee", agent: "expired-reset-credit", planId, planVersion: 3,
+  amount: 1, issuedAt: Date.now() - 60_000, expiresAt: Date.now() - 1, confirmationId: "pfc_eeeeeeeeeeeeeeee",
+}]);
 response = await canvas.handlePlanReset(new Request("https://test/internal/plan/reset", {
   method: "POST",
   headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
@@ -354,7 +365,9 @@ check(
     && (await storage.get(`plan:${planId}`))?.status === "draft"
     && (await storage.get(`agent:${owner}`))?.activePlanId === null
     && (await storage.get(`plan:${otherPlanId}`))?.status === "active"
-    && (await storage.get(`agent:${guest}`))?.activePlanId === otherPlanId,
+    && (await storage.get(`agent:${guest}`))?.activePlanId === otherPlanId
+    && (await storage.get(resetCleanupConfirmationKey)) === undefined
+    && (await storage.get(resetCleanupCreditKey)) === undefined,
   JSON.stringify(data)
 );
 
@@ -362,5 +375,199 @@ storage.values.set("meta", { ...(await storage.get("meta")), version: 8 });
 response = await canvas.handlePlanPreview(new Request(immutablePreviewUrl), new URL(immutablePreviewUrl), 8, "*");
 data = await response.json();
 check("immutable preview URLs fail closed when their bound board version is stale", response.status === 409 && data.error === "stale_preview" && data.currentBoardVersion === 8, JSON.stringify(data));
+
+const drawingBody = {
+  agent: owner,
+  clientRequestId: "drawing-schema-001",
+  title: "Layered lantern",
+  goal: "Build a small original lantern with a clear silhouette.",
+  summary: "A bounded scale-two reference plan.",
+  region: "east edge",
+  bounds: { x: 0, y: 0, w: 8, h: 8 },
+  steps: ["Inspect the board", "Place the silhouette", "Clean the outline"],
+  design: {
+    w: 4,
+    h: 4,
+    cells: [
+      { x: 0, y: 0, c: 5, layer: "base" },
+      { x: 1, y: 0, c: 13, layer: "light" },
+    ],
+  },
+  palette: [5, 13],
+  tileBudget: 8,
+  estimatedTurns: 2,
+  status: "previewing",
+  drawing: {
+    version: 1,
+    inspectedBoardVersion: 8,
+    scale: 2,
+    layers: [{ id: "base", name: "Lantern body" }, { id: "light", name: "Window light" }],
+    landmarks: [{ id: "top", x: 1, y: 1, label: "Top anchor" }],
+    paletteRoles: [{ colorIndex: 5, role: "body" }, { colorIndex: 13, role: "light" }],
+  },
+  challengeId: "test",
+  nonce: 0,
+};
+
+response = await canvas.handlePlanSave(new Request("https://test/internal/plan", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ ...drawingBody, clientRequestId: "drawing-stale-001", drawing: { ...drawingBody.drawing, inspectedBoardVersion: 7 } }),
+}), "*", "test-ip");
+data = await response.json();
+check("drawing schemas reject stale board inspections before a revision is stored", response.status === 409 && data.error === "stale_inspected_board" && data.currentBoardVersion === 8, JSON.stringify(data));
+
+response = await canvas.handlePlanSave(new Request("https://test/internal/plan", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ ...drawingBody, clientRequestId: "drawing-coverage-001", drawing: { ...drawingBody.drawing, paletteRoles: [{ colorIndex: 5, role: "body" }] } }),
+}), "*", "test-ip");
+data = await response.json();
+check("drawing schemas require complete palette-role coverage", response.status === 400 && data.error === "bad_drawing_schema", JSON.stringify(data));
+
+response = await canvas.handlePlanSave(new Request("https://test/internal/plan", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ ...drawingBody, clientRequestId: "drawing-unique-001", drawing: { ...drawingBody.drawing, layers: [{ id: "base", name: "Lantern body" }, { id: "base", name: "Duplicate layer" }] } }),
+}), "*", "test-ip");
+data = await response.json();
+check("drawing schemas reject duplicate layer identities and unsafe metadata text", response.status === 400 && data.error === "bad_drawing_schema", JSON.stringify(data));
+
+response = await canvas.handlePlanSave(new Request("https://test/internal/plan", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ ...drawingBody, clientRequestId: "drawing-safety-001", drawing: { ...drawingBody.drawing, layers: [{ id: "base", name: "porn" }, { id: "light", name: "Window light" }] } }),
+}), "*", "test-ip");
+data = await response.json();
+check("drawing schema labels pass the same all-ages text filter as plans", response.status === 400 && data.error === "bad_drawing_schema", JSON.stringify(data));
+
+response = await canvas.handlePlanSave(new Request("https://test/internal/plan", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify(drawingBody),
+}), "*", "test-ip");
+data = await response.json();
+const drawingPlanId = data.plan?.id;
+check(
+  "optional drawing schemas preserve legacy plan fields and render exact scaled layer cells",
+  response.status === 201
+    && /^pl_[a-f0-9]{16}$/i.test(drawingPlanId || "")
+    && data.plan?.drawing?.scale === 2
+    && data.plan?.design?.cells?.[0]?.layer === "base"
+    && data.plan?.drawing?.landmarks?.[0]?.x === 1,
+  JSON.stringify(data)
+);
+
+const drawingPreviewUrl = `https://test/internal/plan/preview?id=${drawingPlanId}&version=1&format=json`;
+response = await canvas.handlePlanPreview(new Request(drawingPreviewUrl), new URL(drawingPreviewUrl), 8, "*");
+data = await response.json();
+const drawingCacheKey = data.preview?.cacheKey;
+check("drawing scale expands deterministic preview cells within the declared bounds", response.ok && data.preview?.cells?.length === 8 && drawingCacheKey === `grokplace-plan-${drawingPlanId}-v1-board8`, JSON.stringify(data));
+
+const drawingReview = { agent: owner, planId: drawingPlanId, planVersion: 1, previewBoardVersion: 8, previewCacheKey: drawingCacheKey, mode: "json", decision: "ACCEPT", concerns: [], clientRequestId: "drawing-self-review-001", challengeId: "test", nonce: 0 };
+response = await canvas.handlePlanReview(new Request("https://test/internal/plan/review", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify(drawingReview),
+}), "*", "test-ip");
+data = await response.json();
+check("drawing-schema plans reject owner self-review", response.status === 409 && data.error === "distinct_reviewer_required", JSON.stringify(data));
+
+response = await canvas.handlePlanReview(new Request("https://test/internal/plan/review", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${guest}-cap` },
+  body: JSON.stringify({ ...drawingReview, agent: guest, clientRequestId: "drawing-critic-review-001" }),
+}), "*", "test-ip");
+data = await response.json();
+const drawingReviewId = data.review?.id;
+response = await canvas.handlePlanConfirm(new Request("https://test/internal/plan/confirm", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ agent: owner, id: drawingPlanId, version: 1, acceptedReviewId: drawingReviewId, ownerConsentAttestedByAgent: true, challengeId: "test", nonce: 0 }),
+}), "*", "test-ip");
+data = await response.json();
+check("a distinct critic using the exact deterministic cache key can activate a drawing-schema plan", response.ok && data.plan?.activation?.active === true && data.plan?.activation?.acceptedReviewId === drawingReviewId, JSON.stringify(data));
+
+const currentControlPlanVersion = (await storage.get(`plan:${planId}`))?.version;
+response = await canvas.handlePlanFootprintReset(new Request("https://test/internal/plan/footprint-reset", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Agent ${owner}-cap` },
+  body: JSON.stringify({ agent: owner, id: planId, version: currentControlPlanVersion, boardVersion: 8, selected: [{ x: 0, y: 0 }, { x: 0, y: 0 }], dryRun: true, clientRequestId: "plan-selection-01", challengeId: "test", nonce: 0 }),
+}), 8, "*", "test-ip");
+data = await response.json();
+check("footprint selection validation is canonical and does not mutate plan controls", response.status === 400 && data.error === "duplicate_selection" && (await storage.get(`plan:${planId}`))?.version === currentControlPlanVersion, JSON.stringify(data));
+
+const retentionNow = Date.now();
+const expiredConfirmationKey = "footprint-reset:pl_cccccccccccccccc:1:expired-owner";
+storage.values.set(expiredConfirmationKey, {
+  version: 2, confirmationId: "pfc_cccccccccccccccc", clientRequestId: "expired-confirmation", planId: "pl_cccccccccccccccc", planVersion: 1,
+  agent: "expired-owner", boardVersion: 8, footprintHash: "c".repeat(64), selectionMode: "all", selected: [], cursor: null,
+  expiresAt: retentionNow - 1, status: "prepared",
+});
+for (let index = 0; index < 128; index++) {
+  const hex = index.toString(16).padStart(16, "0");
+  storage.values.set(`footprint-reset:pl_${hex}:1:retained-${index}`, {
+    version: 2, confirmationId: `pfc_${hex}`, clientRequestId: `retained-confirmation-${index}`, planId: `pl_${hex}`, planVersion: 1,
+    agent: `retained-${index}`, boardVersion: 8, footprintHash: "d".repeat(64), selectionMode: "all", selected: [], cursor: null,
+    expiresAt: retentionNow + 60_000, status: index === 0 ? "confirmed" : "prepared",
+  });
+}
+const confirmationRetention = await canvas.pruneFootprintResetConfirmationsIn(storage, retentionNow);
+check(
+  "footprint confirmation retention deletes expired replay records and refuses to exceed its fixed live bound",
+  (await storage.get(expiredConfirmationKey)) === undefined
+    && confirmationRetention.active === 128
+    && confirmationRetention.overflow === true,
+  JSON.stringify(confirmationRetention)
+);
+
+const expiredCreditKey = "relocationcredits:expired-credit";
+storage.values.set(expiredCreditKey, [{
+  version: 1, id: "rlc_cccccccccccccccc", agent: "expired-credit", planId: "pl_cccccccccccccccc", planVersion: 1,
+  amount: 1, issuedAt: retentionNow - 60_000, expiresAt: retentionNow - 1, confirmationId: "pfc_cccccccccccccccc",
+}]);
+for (let index = 0; index < 127; index++) {
+  const hex = index.toString(16).padStart(16, "0");
+  storage.values.set(`relocationcredits:credit-${index}`, [{
+    version: 1, id: `rlc_${hex}`, agent: `credit-${index}`, planId: `pl_${hex}`, planVersion: 1,
+    amount: 1, issuedAt: retentionNow, expiresAt: retentionNow + 60_000, confirmationId: `pfc_${hex}`,
+  }]);
+}
+storage.values.set(`relocationcredits:${owner}`, [{
+  version: 1, id: "rlc_dddddddddddddddd", agent: owner, planId, planVersion: currentControlPlanVersion,
+  amount: 7, issuedAt: retentionNow, expiresAt: retentionNow + 60_000, confirmationId: "pfc_dddddddddddddddd",
+}]);
+const ownerCreditRetention = await canvas.pruneRelocationCreditsIn(storage, owner, retentionNow);
+const newCreditRetention = await canvas.pruneRelocationCreditsIn(storage, "new-credit-owner", retentionNow);
+check(
+  "relocation credit retention prunes expired accounts, preserves active balances, and fails closed when capacity is full",
+  (await storage.get(expiredCreditKey)) === undefined
+    && ownerCreditRetention.activeAccounts === 128
+    && ownerCreditRetention.currentActive
+    && ownerCreditRetention.credits[0]?.amount === 7
+    && newCreditRetention.activeAccounts === 128
+    && !newCreditRetention.currentActive,
+  JSON.stringify({ ownerCreditRetention, newCreditRetention })
+);
+
+let forwardedFootprintPath = null;
+const edgeResponse = await worker.fetch(new Request("https://grokplace.barnlabs.net/v1/plan/footprint-reset", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: "{}",
+}), {
+  CANVAS_SIZE: "8",
+  EDGE_WRITE_LIMITER: { async limit() { return { success: true }; } },
+  CANVAS: {
+    idFromName: () => "main",
+    get: () => ({
+      fetch: async (input) => {
+        forwardedFootprintPath = new URL(input).pathname;
+        return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
+      },
+    }),
+  },
+});
+check("public footprint reset route forwards to the bounded Durable Object handler", edgeResponse.ok && forwardedFootprintPath === "/internal/plan/footprint-reset", await edgeResponse.text());
 
 process.exitCode = failed ? 1 : 0;

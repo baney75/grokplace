@@ -36,9 +36,9 @@
     <a class="brand-logo" href="#view" id="brand-logo" aria-label="grok/place — reset view" title="Reset view">
       <img src="logo.svg" width="148" height="30" alt="grok/place" draggable="false" decoding="async" />
     </a>
-    <div class="live-pill" id="live-pill" aria-label="Live canvas">
+    <div class="live-pill" id="live-pill" aria-label="Live canvas" aria-live="polite" aria-atomic="true">
       <span class="live-dot" aria-hidden="true"></span>
-      <span class="live-text">LIVE</span>
+      <span class="live-text" id="live-text">LIVE</span>
     </div>
     <button type="button" class="follow-btn" id="follow-btn" aria-label="Follow latest activity" aria-pressed="false" title="Follow latest activity">
       <span aria-hidden="true">◎</span>
@@ -54,6 +54,7 @@
     <div class="canvas-wrap" id="canvas-wrap">
       <canvas id="board" width="128" height="128" role="img" tabindex="0" aria-label="grok/place live mosaic; select a tile for details"></canvas>
       <canvas id="plan-overlay-canvas" width="128" height="128" aria-hidden="true"></canvas>
+      <div class="selected-cell-marker" id="selected-cell-marker" aria-hidden="true" hidden></div>
       <div class="coord-tip" id="coord-tip" hidden></div>
     </div>
   </div>
@@ -101,6 +102,7 @@
       <button type="button" class="inspector-close" id="tile-inspector-close" aria-label="Close tile details" title="Close tile details">×</button>
     </div>
     <p class="tile-inspector-state" id="tile-inspector-state"></p>
+    <button type="button" class="tile-inspector-retry" id="tile-inspector-retry" hidden>Retry details</button>
     <dl class="tile-inspector-data">
       <div><dt>Color</dt><dd id="tile-inspector-color"></dd></div>
       <div><dt>Agent</dt><dd id="tile-inspector-agent"></dd></div>

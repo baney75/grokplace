@@ -100,62 +100,71 @@ check("trusted merge requires no GitHub approval review", !/pulls\/\$PR\/reviews
 const pendingCheck = mergeWorkflow.indexOf('-f status="in_progress"');
 const exactRunHeadCheck = mergeWorkflow.indexOf('[ "$HEAD" = "$RUN_HEAD" ]');
 const inactiveExit = mergeWorkflow.indexOf('echo "inactive=true"');
-const validateCandidate = mergeWorkflow.indexOf("Validate exact head, lane, reviewer identity, bounty, and checks");
+const validateCandidate = mergeWorkflow.indexOf("Validate exact head, lane, reviewer identity, catalog bounty, and checks");
 const reserveAward = mergeWorkflow.indexOf('phase:"reserve"');
 const successCheck = mergeWorkflow.indexOf('-f conclusion="success"');
 const mergeExactHead = mergeWorkflow.indexOf('gh pr merge "$PR"');
 check("trusted check lifecycle orders pending, validation, reservation, success, and merge", pendingCheck >= 0 && pendingCheck < validateCandidate && validateCandidate < reserveAward && reserveAward < successCheck && successCheck < mergeExactHead);
 check("closed PR retries verify the exact run head before exiting without a check", exactRunHeadCheck >= 0 && exactRunHeadCheck < inactiveExit && inactiveExit < pendingCheck && /PR #\$PR is already closed; no trusted merge action is required\./.test(mergeWorkflow));
-check("inactive PR retries skip validation, trusted gate publication, and merge", /Validate exact head, lane, reviewer identity, bounty, and checks\s+id: validation\s+if: steps\.candidate\.outputs\.inactive != 'true'/.test(mergeWorkflow) && /Publish successful exact-head merge gate\s+id: trusted_success\s+if: steps\.candidate\.outputs\.inactive != 'true'/.test(mergeWorkflow) && /Publish failed exact-head merge gate[\s\S]*steps\.candidate\.outputs\.inactive != 'true'/.test(mergeWorkflow) && /Merge the exact eligible head\s+id: merge\s+if: steps\.candidate\.outputs\.inactive != 'true'/.test(mergeWorkflow));
+check("inactive PR retries skip validation, trusted gate publication, and merge", /Validate exact head, lane, reviewer identity, catalog bounty, and checks\s+id: validation\s+if: steps\.candidate\.outputs\.inactive != 'true'/.test(mergeWorkflow) && /Publish successful exact-head merge gate[\s\S]*steps\.candidate\.outputs\.inactive != 'true'/.test(mergeWorkflow) && /Publish failed exact-head merge gate[\s\S]*steps\.candidate\.outputs\.inactive != 'true'/.test(mergeWorkflow) && /Merge the exact eligible head\s+id: merge\s+if: steps\.trusted_success\.outcome == 'success'/.test(mergeWorkflow));
 check("award is reserved before merge and finalized after", reserveAward < mergeExactHead && mergeExactHead < mergeWorkflow.indexOf('phase:"finalize"'));
-check("only the maintain lane reserves and finalizes an award", /Reserve the exact maintain award before merge[\s\S]*if: steps\.validation\.outputs\.lane == 'maintain'/.test(mergeWorkflow) && /Finalize the reserved maintain award[\s\S]*if: steps\.validation\.outputs\.lane == 'maintain'/.test(mergeWorkflow));
+check("only the maintain lane reserves and finalizes an award", /Reserve the exact maintain award before merge[\s\S]*steps\.validation\.outputs\.lane == 'maintain'/.test(mergeWorkflow) && /Finalize the reserved maintain award[\s\S]*steps\.validation\.outputs\.lane == 'maintain'/.test(mergeWorkflow));
 check("trusted workflow has Checks write authority", /merge-and-award:[\s\S]*permissions:[\s\S]*checks: write/.test(mergeWorkflow));
 check("orchestrator job context is distinct from the protected exact-head gate", /merge-and-award:\s+name: Trusted merge orchestrator/.test(mergeWorkflow) && /-f name="merge-and-award" -f head_sha="\$HEAD"/.test(mergeWorkflow));
 check("pending exact-head merge gate is created on the full candidate head", /CHECK_ID=\$\(gh api --method POST "repos\/\$REPO\/check-runs"[\s\S]*-f name="merge-and-award" -f head_sha="\$HEAD" -f status="in_progress"/.test(mergeWorkflow) && /\[\[ "\$HEAD" =~ \^\[a-f0-9\]\{40\}\$ \]\]/.test(mergeWorkflow));
 check("merge-gate success binds exact check ID, head, app, and current PR head", /CURRENT=\$\(gh api "repos\/\$REPO\/pulls\/\$PR" --jq '\.head\.sha'\)[\s\S]*repos\/\$REPO\/check-runs\/\$CHECK_ID[\s\S]*\.head_sha == \$head and \.name == "merge-and-award" and \.app\.id == 15368 and \.status == "in_progress"[\s\S]*conclusion="success"/.test(mergeWorkflow));
-check("active failed validation always publishes an exact-head merge-gate failure", /Publish failed exact-head merge gate[\s\S]*if: \$\{\{ always\(\)[\s\S]*steps\.candidate\.outputs\.inactive != 'true'[\s\S]*steps\.trusted_success\.outcome != 'success'[\s\S]*\.head_sha == \$head and \.name == "merge-and-award" and \.app\.id == 15368[\s\S]*conclusion="failure"/.test(mergeWorkflow));
+check("permanent failed validation publishes an exact-head merge-gate failure", /Publish failed exact-head merge gate[\s\S]*always\(\)[\s\S]*steps\.candidate\.outputs\.inactive != 'true'[\s\S]*steps\.trusted_success\.outcome != 'success'[\s\S]*steps\.retry_wait\.outcome != 'success'[\s\S]*\.head_sha == \$head and \.name == "merge-and-award" and \.app\.id == 15368[\s\S]*conclusion="failure"/.test(mergeWorkflow));
+check("retryable infrastructure waits avoid failed runs and redispatch with a cap", /id: validation[\s\S]*continue-on-error: true[\s\S]*echo "retryable=true" >> "\$GITHUB_OUTPUT"/.test(mergeWorkflow) && /Publish retryable wait and redispatch[\s\S]*conclusion="cancelled"[\s\S]*ATTEMPT" -lt 3[\s\S]*gh workflow run auto-merge-tiny\.yml[\s\S]*attempt="\$NEXT"/.test(mergeWorkflow));
+check("bounded retry dispatch has the required narrow Actions permission", /merge-and-award:[\s\S]*permissions:[\s\S]*actions: write[\s\S]*checks: write/.test(mergeWorkflow));
 check("untrusted PR workflow cannot publish the exact-head merge gate", !/merge-and-award/.test(qualityWorkflow));
 check("merge atomically requires the reserved head SHA", /gh pr merge "\$PR" --repo "\$REPO" --squash --delete-branch --match-head-commit "\$HEAD"/.test(mergeWorkflow));
-check("trusted merge enables exact-head GitHub auto-merge with a bounded observation", /gh pr merge "\$PR" --repo "\$REPO" --squash --delete-branch --match-head-commit "\$HEAD" --auto[\s\S]*for attempt in \{1\.\.20\}[\s\S]*sleep 3[\s\S]*echo "merged=false"/.test(mergeWorkflow));
-check("an exact-head merge race is idempotent instead of failing the workflow", /observe_exact_merge\(\)[\s\S]*if ! gh pr merge[\s\S]*observe_exact_merge \|\| \{ echo "Exact-head auto-merge request failed before the PR merged\."; exit 1; \}[\s\S]*echo "merged=true"/.test(mergeWorkflow));
-check("completed auto-merges report the exact successful observation", /if observe_exact_merge; then[\s\S]*echo "merged=true" >> "\$GITHUB_OUTPUT"[\s\S]*exit 0/.test(mergeWorkflow));
-check("queued maintenance merges defer award finalization to durable reconciliation", /Exact-head auto-merge is enabled; durable reconciliation will finalize a maintenance award[\s\S]*Auto-merge is still pending; reconciliation will finalize this maintenance award/.test(mergeWorkflow));
+check("trusted merge never arms deferred GitHub auto-merge", !/gh pr merge[^\n]*--auto/.test(mergeWorkflow) && /if gh pr merge "\$PR" --repo "\$REPO" --squash --delete-branch --match-head-commit "\$HEAD"; then/.test(mergeWorkflow));
+check("an exact-head merge race is idempotent instead of failing the workflow", /observe_exact_merge\(\)[\s\S]*if gh pr merge[\s\S]*if observe_exact_merge; then[\s\S]*echo "merged=true"/.test(mergeWorkflow));
+check("an unmerged attempt cancels the successful gate and starts bounded full revalidation", /conclusion="cancelled"[\s\S]*Waiting on immediate exact-head merge[\s\S]*ATTEMPT" -lt 3[\s\S]*gh workflow run auto-merge-tiny\.yml[\s\S]*attempt="\$NEXT"[\s\S]*echo "merged=false"/.test(mergeWorkflow));
+check("completed immediate merges report the exact successful observation", /if observe_exact_merge; then[\s\S]*echo "merged=true" >> "\$GITHUB_OUTPUT"[\s\S]*exit 0/.test(mergeWorkflow));
+check("no deferred merge can finalize a maintenance award", /No deferred auto-merge remains armed/.test(mergeWorkflow) && /steps\.merge\.outputs\.merged \}\}" = "true"/.test(mergeWorkflow));
 check("maintenance awards finalize only after observed merge or durable reconciliation", /\[ "\$\{\{ steps\.merge\.outputs\.merged \}\}" = "true" \][\s\S]*phase:"finalize"[\s\S]*reconcile-reservations[\s\S]*phase:"finalize"/.test(mergeWorkflow));
-check("pending maintenance auto-merges exit before any award finalization", /\[ "\$\{\{ steps\.merge\.outputs\.merged \}\}" = "true" \] \|\| \{[\s\S]*exit 0[\s\S]*\}[\s\S]*MERGE_SHA=\$\(gh api[\s\S]*phase:"finalize"/.test(mergeWorkflow));
-check("bounty creation has no circular owner-comment field", !/\bid:\s*owner\b/.test(bountyForm) && /After creation[\s\S]*BOUNTY APPROVED/.test(bountyForm));
-check("PR template makes the optional bounty pair explicit", /- bounty_issue:\s*NONE/.test(prTemplate) && /- bounty_approval_comment:\s*NONE/.test(prTemplate));
+check("unmerged maintenance attempts exit before any award finalization", /\[ "\$\{\{ steps\.merge\.outputs\.merged \}\}" = "true" \] \|\| \{[\s\S]*exit 0[\s\S]*\}[\s\S]*MERGE_SHA=\$\(gh api[\s\S]*phase:"finalize"/.test(mergeWorkflow));
+check("bounty issue form is intake only and has no owner-comment authority", !/\bid:\s*owner\b/.test(bountyForm) && /untrusted intake only/.test(bountyForm) && /no issue-comment trigger/.test(bountyForm) && !/BOUNTY APPROVED/.test(bountyForm));
+check("PR template names the optional protected catalog bounty", /- catalog_bounty_id:\s*NONE/.test(prTemplate) && /bounties\/catalog\.json/.test(prTemplate));
 check("PR template exposes exactly one implementer-agent field", (prTemplate.match(/^- implementer_agent:/gm) || []).length === 1 && /PASTE_IMPLEMENTER_AGENT_HERE/.test(prTemplate));
-check("ordinary maintenance accepts only the explicit NONE bounty pair", /\[ "\$BOUNTY_ISSUE" = "NONE" \] && \[ "\$BOUNTY_COMMENT" = "NONE" \]/.test(mergeWorkflow));
-check("claimed bounty metadata fails closed unless both fields are present", /elif \[ "\$BOUNTY_ISSUE" = "NONE" \] \|\| \[ "\$BOUNTY_COMMENT" = "NONE" \]/.test(mergeWorkflow) && /exactly one bounty_issue field/.test(mergeWorkflow) && /exactly one bounty_approval_comment field/.test(mergeWorkflow));
+check("ordinary maintenance defaults to no catalog bounty", /CATALOG_BOUNTY_ID="NONE"/.test(mergeWorkflow) && /\[ "\$CATALOG_BOUNTY_ID" != "NONE" \]/.test(mergeWorkflow));
+check("catalog bounty ID fails closed on duplicate or malformed PR metadata", /at most one catalog_bounty_id/.test(mergeWorkflow) && /catalog_bounty_id must be NONE or a canonical protected bounty ID/.test(mergeWorkflow));
 check(
-  "bounty URLs bind the canonical repository issue and comment together",
-  /ISSUE_PREFIX="https:\/\/github\.com\/\$REPO\/issues\/"/.test(mergeWorkflow) &&
-    /COMMENT_PREFIX="\$\{ISSUE_PREFIX\}\$\{BOUNTY_ISSUE_ID\}#issuecomment-"/.test(mergeWorkflow) &&
-    /repos\/\$REPO\/issues\/\$BOUNTY_ISSUE_ID/.test(mergeWorkflow) &&
-    /repos\/\$REPO\/issues\/comments\/\$BOUNTY_APPROVAL_COMMENT_ID/.test(mergeWorkflow)
+  "catalog bounty validation uses only the checked-out default branch policy and exact PR inputs",
+  /CATALOG_HEAD=\$\(git rev-parse HEAD\)/.test(mergeWorkflow) &&
+    /--catalog bounties\/catalog\.json/.test(mergeWorkflow) &&
+    /--catalog-head "\$CATALOG_HEAD"/.test(mergeWorkflow) &&
+    /--default-branch-head "\$CATALOG_HEAD"/.test(mergeWorkflow) &&
+    /--base "\$BASE"/.test(mergeWorkflow) &&
+    /--head "\$HEAD"/.test(mergeWorkflow) &&
+    /--files \/tmp\/files\.json/.test(mergeWorkflow) &&
+    /--checks \/tmp\/checks\.json/.test(mergeWorkflow)
 );
 check(
-  "bounty requires a live bounty issue and exact whole-body owner approval",
-  /\.state == "open"/.test(mergeWorkflow) &&
-    /index\("bounty"\)/.test(mergeWorkflow) &&
-    /\.user\.login == "baney75"/.test(mergeWorkflow) &&
-    /--arg phrase "BOUNTY APPROVED"/.test(mergeWorkflow) &&
-    /\.html_url == \$commentUrl/.test(mergeWorkflow) &&
-    /\.issue_url == \$issueUrl/.test(mergeWorkflow) &&
-    /\) == \$phrase\)/.test(mergeWorkflow) &&
-    !/contains\(\$phrase\)/.test(mergeWorkflow)
+  "catalog bounty requires exact-head structured criterion evidence from the protected critic",
+  /CRITIC_AGENT=\$\(jq -r '\.review\.reviewerAgent/.test(mergeWorkflow) &&
+    /--critic-agent "\$CRITIC_AGENT"/.test(mergeWorkflow) &&
+    /scripts\/bounty-critic-evidence-check\.mjs/.test(mergeWorkflow) &&
+    /--body-file \/tmp\/pr-body\.md/.test(mergeWorkflow) &&
+    /critic_execution: contributor-pc/.test(prTemplate) &&
+    /criterion: SC-1 \| REWORK/.test(prTemplate)
 );
-check("verified bounty identifiers, not PR text, enter the reservation", /bountyIssue: \(\$bountyIssue \| tonumber\)/.test(mergeWorkflow) && /bountyApprovalCommentId: \(\$bountyApprovalCommentId \| tonumber\)/.test(mergeWorkflow));
+check("cataloged bounties preserve the fixed reservation payload without issue or comment authority", !/bountyIssue|bountyApprovalComment|issues\/comments|BOUNTY APPROVED/.test(mergeWorkflow) && /phase:"reserve"[\s\S]*filesChanged/.test(mergeWorkflow));
+check("catalog bounty reservations durably bind the protected ID", /CATALOG_BOUNTY_ID: \$\{\{ steps\.validation\.outputs\.catalog_bounty_id \}\}/.test(mergeWorkflow) && /catalogBountyId:\$catalog/.test(mergeWorkflow));
+check("catalog policy and focused tests run in untrusted PR quality without secrets", /npm run check:bounty/.test(qualityWorkflow) && /npm run test:bounty/.test(qualityWorkflow) && !/secrets\.AWARD_SECRET/.test(qualityWorkflow));
+check("transient GitHub and Cloudflare calls use bounded retryable wait codes", /gh_api_retry\(\)[\s\S]*\[ "\$attempt" -ge 3 \][\s\S]*WAIT_RETRYABLE_GITHUB_API.*>&2/.test(mergeWorkflow) && /WAIT_RETRYABLE_REVIEW_API/.test(mergeWorkflow) && /WAIT_RETRYABLE_AWARD_RESERVE/.test(mergeWorkflow) && /WAIT_RETRYABLE_AWARD_FINALIZE/.test(mergeWorkflow));
+check("existing reconciliation stays paginated but is capped rather than unbounded", /MAX_RECONCILE_PAGES=20/.test(mergeWorkflow) && /PAGES=\$\(\(PAGES \+ 1\)\)/.test(mergeWorkflow) && /WAIT_RETRYABLE_RECONCILE_PAGE_CAP/.test(mergeWorkflow));
 check("external active maintainers are eligible without GitHub association", !/author_association/.test(mergeWorkflow) && /\.maintainers\[\][\s\S]*\.status == "active"/.test(mergeWorkflow) && /Any \*\*active server-verified maintainer\*\*/.test(maintainGuide));
 check("issue-form label prerequisites are exact and documented", /labels:\s*\[bounty\]/.test(bountyForm) && /labels:\s*\[feature\]/.test(featureForm) && /gh label list --repo baney75\/grokplace/.test(runbook) && /required_label in bounty feature/.test(runbook));
 check("branch rule requires zero human approvals and three strict non-destructive checks", /zero human approving reviews/.test(runbook) && /strict, current `Tiny perfect PR`, `Secret scan`, and `merge-and-award`/.test(runbook) && /each bound to GitHub Actions app ID `15368`/.test(runbook) && /enforce the rule for administrators/.test(runbook) && /require conversations to be resolved/.test(runbook) && /disable force pushes and main-branch deletion/.test(runbook));
 check("check transition requires successful exact-head evidence before changing protection", /full head SHA[\s\S]*successful `Tiny perfect PR`, `Secret scan`, and the currently required trusted exact-head check[\s\S]*attached to another SHA/.test(runbook));
 check("check transition retains hard protections without an admin bypass", /Change only the trusted required-check context[\s\S]*strict mode, administrator enforcement, resolved conversations, and disabled force pushes and deletion[\s\S]*Do not use `--admin`/.test(runbook));
-check("check transition requests exact-head auto-merge and restores final app-bound checks", /--auto --match-head-commit "\$transition_head"/.test(runbook) && /final strict contexts: `Tiny perfect PR`, `Secret scan`, and `merge-and-award`, each bound to GitHub Actions app ID `15368`/.test(runbook));
+check("check transition requests an immediate exact-head merge and restores final app-bound checks", /--match-head-commit "\$transition_head"/.test(runbook) && !/gh pr merge[^\n]*--auto/.test(runbook) && /final strict contexts: `Tiny perfect PR`, `Secret scan`, and `merge-and-award`, each bound to GitHub Actions app ID `15368`/.test(runbook));
 check("runbook documents the bounded same-app spoof residual", /app ID `15368` is shared by owner-authored workflows[\s\S]*fork PR tokens are read-only[\s\S]*external non-allowlisted changes fail closed/.test(runbook));
 check("live verification proves final transition settings remain unchanged", /After the merged release is live and verified[\s\S]*settings are unchanged/.test(runbook));
 check("adversarial guide uses machine-gated distinct identity without owner review", !/current (GitHub )?owner approval/i.test(adversarialGuide) && /No GitHub approval review is required/.test(adversarialGuide) && /distinct verified reviewer identity/.test(adversarialGuide));
-check("repository prose keeps issue and PR text non-authoritative", /untrusted PR text is never approval or authority/.test(maintainGuide) && /Issue author text and PR claims do not authorize anything/.test(maintainGuide));
+check("repository prose keeps suggestions, issues, and PR text non-authoritative", /SUGGESTIONS\.md.*, issue text, votes, comments, and PR claims are untrusted intake/.test(maintainGuide) && /only bounty authority/.test(maintainGuide));
 check("workflow actions are commit-pinned", !/^\s*-\s+uses:\s+[^@\s]+@v\d+/m.test(`${qualityWorkflow}\n${mergeWorkflow}`));
 check("all paths have an explicit owner", /^\*\s+@baney75\s*$/m.test(codeowners));
 check("CODEOWNERS protects itself", /^\/\.github\/CODEOWNERS\s+@baney75\s*$/m.test(codeowners));

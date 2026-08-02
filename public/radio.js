@@ -33,6 +33,7 @@
   let musicRetryAfterMs = 0;
   let musicRetryJitter = false;
   let musicRetryNotBefore = 0;
+  let musicCadenceNotBefore = 0;
   let liveConnected = false;
   let musicReadThisVisibility = false;
   /** @type {Set<Voice>} */
@@ -202,7 +203,7 @@
   /** @param {number} delay */
   function scheduleMusicPoll(delay) {
     if (!isPollingActive()) return;
-    const gateDelay = Math.max(0, musicRetryNotBefore - Date.now());
+    const gateDelay = Math.max(0, musicRetryNotBefore - Date.now(), musicCadenceNotBefore - Date.now());
     if (gateDelay > 0 && pollTimer) return;
     clearTimeout(pollTimer);
     pollTimer = setTimeout(() => {
@@ -284,6 +285,7 @@
       await fetchMusic(controller.signal);
       musicFailures = 0;
       musicRetryNotBefore = 0;
+      musicCadenceNotBefore = Date.now() + MUSIC_POLL_MS;
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
         musicFailures++;
@@ -358,6 +360,7 @@
     pollingPaused = true;
     refreshAfterPoll = false;
     musicReadThisVisibility = false;
+    musicCadenceNotBefore = 0;
     clearTimeout(pollTimer);
     pollTimer = 0;
     musicRequest?.abort();
