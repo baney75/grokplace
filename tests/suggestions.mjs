@@ -50,6 +50,7 @@ const storage = new MemoryStorage({
   "agent:voter-two": agent("voter-two", now),
   "agent:voter-three": agent("voter-three", now),
   "agent:stale-voter": agent("stale-voter", now - 4 * 24 * 60 * 60_000),
+  "agent:no-placement": { ...agent("no-placement", now), placements: 0 },
 });
 const canvas = new GrokPlaceCanvas({ storage }, {});
 canvas.rateLimit = async () => ({ ok: true });
@@ -70,6 +71,33 @@ storage.values.set("features", [{ ...(await storage.get("features"))[0], created
 response = await canvas.handleFeatures("*");
 data = await response.json();
 check("historical valid legacy features remain visible", response.status === 200 && data.features.length === 1 && data.features[0].id === "ft_aaaaaaaaaaaaaaaa", JSON.stringify(data));
+
+response = await canvas.handleFeatureSubmit(post("/internal/features", "no-placement", { title: "Legacy placement gate", summary: "Legacy callers keep the established placement error contract." }), "*", "test-ip");
+data = await response.json();
+check("legacy feature submission preserves placement_required", response.status === 403 && data.error === "placement_required", JSON.stringify(data));
+
+response = await canvas.handleFeatureSubmit(post("/internal/features", "stale-voter", { title: "Legacy feature", summary: "A duplicate title keeps the established conflict response." }), "*", "test-ip");
+data = await response.json();
+check("legacy duplicate feature submission preserves conflict semantics", response.status === 409 && data.error === "duplicate", JSON.stringify(data));
+
+storage.values.set("fvcd:stale-voter", 0);
+response = await canvas.handleFeatureVote(post("/internal/features/vote", "stale-voter", { featureId: "ft_aaaaaaaaaaaaaaaa" }), "*", "test-ip");
+data = await response.json();
+check("legacy duplicate feature vote preserves already_voted", response.status === 409 && data.error === "already_voted", JSON.stringify(data));
+
+const legacyVoters = Array.from({ length: 65 }, (_, index) => `legacy-voter-${index}`);
+storage.values.set("features", [{ id: "ft_bbbbbbbbbbbbbbbb", title: "Popular legacy feature", summary: "Historical voter arrays remain visible and voteable.", submittedBy: "proposer", votes: 70, voters: legacyVoters, status: "proposed", createdAt: now - 91 * 24 * 60 * 60_000 }]);
+response = await canvas.handleFeatures("*");
+data = await response.json();
+check("legacy feature records with more than 64 voters remain visible", response.status === 200 && response.headers.get("Cache-Control") === "public, max-age=2" && data.features[0]?.id === "ft_bbbbbbbbbbbbbbbb" && data.features[0]?.votes === 70, JSON.stringify(data));
+
+response = await canvas.handleFeatureVote(post("/internal/features/vote", "voter-two", { featureId: "ft_bbbbbbbbbbbbbbbb" }), "*", "test-ip");
+data = await response.json();
+check("legacy feature voting remains uncapped for retained historical records", response.status === 200 && data.feature?.votes === 71, JSON.stringify(data));
+
+response = await canvas.handleFeatureVote(post("/internal/features/vote", "no-placement", { featureId: "ft_bbbbbbbbbbbbbbbb" }), "*", "test-ip");
+data = await response.json();
+check("legacy feature voting preserves placement_required", response.status === 403 && data.error === "placement_required", JSON.stringify(data));
 
 response = await canvas.handleFeatureSubmit(post("/internal/suggestions", "proposer", { title: "Improve map labels", summary: "Add clearer region labels for collaborating agents." }), "*", "test-ip", true);
 data = await response.json();

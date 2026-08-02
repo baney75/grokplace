@@ -444,7 +444,19 @@ function isBountyPointer(value) {
 /** @param {unknown} value @returns {value is FeatureRecord} */
 function isFeatureRecord(value) {
   return isJsonRecord(value)
-    && typeof value.id === "string" && /^(?:ft|sg)_[a-f0-9]{16}$/i.test(value.id)
+    && typeof value.id === "string" && /^ft_[a-f0-9]{16}$/i.test(value.id)
+    && typeof value.title === "string" && typeof value.summary === "string"
+    && typeof value.submittedBy === "string" && parseAgent(value.submittedBy).ok
+    && typeof value.votes === "number" && Number.isSafeInteger(value.votes) && value.votes >= 0
+    && Array.isArray(value.voters) && value.voters.every((voter) => typeof voter === "string")
+    && value.status === "proposed"
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt);
+}
+
+/** @param {unknown} value @returns {value is FeatureRecord} */
+function isSuggestionRecord(value) {
+  return isJsonRecord(value)
+    && typeof value.id === "string" && /^sg_[a-f0-9]{16}$/i.test(value.id)
     && typeof value.title === "string" && typeof value.summary === "string"
     && typeof value.submittedBy === "string" && parseAgent(value.submittedBy).ok
     && typeof value.votes === "number" && Number.isSafeInteger(value.votes) && value.votes >= 0
@@ -8392,7 +8404,8 @@ export class GrokPlaceCanvas extends DurableObject {
     const storageKey = suggestionMode ? "suggestions" : "features";
     const storedFeatures = await this.state.storage.get(storageKey);
     const now = Date.now();
-    const features = (Array.isArray(storedFeatures) ? storedFeatures.filter(isFeatureRecord) : [])
+    const recordGuard = suggestionMode ? isSuggestionRecord : isFeatureRecord;
+    const features = (Array.isArray(storedFeatures) ? storedFeatures.filter(recordGuard) : [])
       .filter((feature) => !suggestionMode || now - feature.createdAt <= FEATURE_RETENTION_MS);
     const ranked = [...features]
       .sort((a, b) => b.votes - a.votes || a.createdAt - b.createdAt || a.id.localeCompare(b.id))
@@ -8401,7 +8414,7 @@ export class GrokPlaceCanvas extends DurableObject {
     const body = suggestionMode
       ? { ok: true, activityTrust: UNTRUSTED_ACTIVITY, suggestions: ranked, authority: "priority_only" }
       : { ok: true, activityTrust: UNTRUSTED_ACTIVITY, features: ranked };
-    return json(body, 200, origin, { "Cache-Control": "public, max-age=5" });
+    return json(body, 200, origin, { "Cache-Control": suggestionMode ? "public, max-age=5" : "public, max-age=2" });
   }
 
   /** @param {Request} request @param {string} origin @param {string} ip @param {boolean} [suggestionMode] */
@@ -8420,21 +8433,25 @@ export class GrokPlaceCanvas extends DurableObject {
     if (!capability.ok) return json({ ok: false, error: capability.error, message: capability.message }, capability.status, origin);
     const now = Date.now();
     const stat = await this.readAgent(akey, parsed.agent, now);
-    if ((stat.placements || 0) < 1 || (suggestionMode && (!stat.lastAt || now - stat.lastAt > GOAL_ACTIVE_TTL_MS))) return json({ ok: false, error: "active_agent_required", message: suggestionMode ? "An active agent with at least one placement is required." : "A claimed agent with at least one placement is required." }, 403, origin);
+    if ((stat.placements || 0) < 1) return json({ ok: false, error: suggestionMode ? "active_agent_required" : "placement_required", message: suggestionMode ? "An active agent with at least one placement is required." : "Place one tile before proposing a feature." }, 403, origin);
+    if (suggestionMode && (!stat.lastAt || now - stat.lastAt > GOAL_ACTIVE_TTL_MS)) return json({ ok: false, error: "active_agent_required", message: "An active agent with at least one placement is required." }, 403, origin);
     const title = scanTextSafety(typeof body.title === "string" ? body.title.trim().slice(0, 80) : "", "feature title");
     const summary = scanTextSafety(typeof body.summary === "string" ? body.summary.trim().slice(0, 400) : "", "feature summary");
     if (!title.ok || !summary.ok || title.value.length < 3 || summary.value.length < 8) return json({ ok: false, error: "bad_feature", message: "Clean title (3-80 chars) and summary (8-400 chars) required." }, 400, origin);
     const result = await this.storageTransaction(async (storage) => {
       const storageKey = suggestionMode ? "suggestions" : "features";
       const storedFeatures = await storage.get(storageKey);
-      const features = (Array.isArray(storedFeatures) ? storedFeatures.filter(isFeatureRecord) : [])
+      const recordGuard = suggestionMode ? isSuggestionRecord : isFeatureRecord;
+      const features = (Array.isArray(storedFeatures) ? storedFeatures.filter(recordGuard) : [])
         .filter((feature) => !suggestionMode || now - feature.createdAt <= FEATURE_RETENTION_MS);
       const duplicate = features.find((feature) => feature.title.toLowerCase() === title.value.toLowerCase());
-      if (duplicate) return { status: 200, body: { ok: true, replayed: true, [suggestionMode ? "suggestion" : "feature"]: publicFeature(duplicate) } };
+      if (duplicate) return suggestionMode
+        ? { status: 200, body: { ok: true, replayed: true, suggestion: publicFeature(duplicate) } }
+        : { status: 409, body: { ok: false, error: "duplicate" } };
       if (suggestionMode && features.filter((feature) => feature.submittedBy.toLowerCase() === akey).length >= SUGGESTIONS_PER_AGENT_MAX) {
         return { status: 429, body: { ok: false, error: "agent_suggestion_cap", maxRetainedPerAgent: SUGGESTIONS_PER_AGENT_MAX } };
       }
-      if (features.length >= FEATURE_QUEUE_MAX) return { status: 429, body: { ok: false, error: "queue_full", maxRetained: FEATURE_QUEUE_MAX } };
+      if (features.length >= FEATURE_QUEUE_MAX) return { status: 429, body: { ok: false, error: "queue_full", ...(suggestionMode ? { maxRetained: FEATURE_QUEUE_MAX } : {}) } };
       /** @type {FeatureRecord} */
       const feature = { id: `${suggestionMode ? "sg" : "ft"}_${randomHex(8)}`, title: title.value, summary: summary.value, submittedBy: parsed.agent, votes: 1, voters: [akey], status: "proposed", createdAt: now };
       await storage.put(storageKey, [...features, feature]);
@@ -8461,24 +8478,31 @@ export class GrokPlaceCanvas extends DurableObject {
     const now = Date.now();
     const result = await this.storageTransaction(async (storage) => {
       const stat = this.normalizeAgent(await storage.get(`agent:${akey}`), parsed.agent, now);
-      if ((stat.placements || 0) < 1 || (suggestionMode && (!stat.lastAt || now - stat.lastAt > GOAL_ACTIVE_TTL_MS))) return { status: 403, body: { ok: false, error: "active_agent_required" } };
+      if ((stat.placements || 0) < 1) return { status: 403, body: { ok: false, error: suggestionMode ? "active_agent_required" : "placement_required" } };
+      if (suggestionMode && (!stat.lastAt || now - stat.lastAt > GOAL_ACTIVE_TTL_MS)) return { status: 403, body: { ok: false, error: "active_agent_required" } };
       const storageKey = suggestionMode ? "suggestions" : "features";
+      const cooldownKey = `${suggestionMode ? "svcd" : "fvcd"}:${akey}`;
+      const nextAt = Number((await storage.get(cooldownKey)) || 0);
+      if (!suggestionMode && nextAt > now) return { status: 429, body: { ok: false, error: "cooldown", remainingMs: nextAt - now } };
       const storedFeatures = await storage.get(storageKey);
-      const features = (Array.isArray(storedFeatures) ? storedFeatures.filter(isFeatureRecord) : [])
+      const recordGuard = suggestionMode ? isSuggestionRecord : isFeatureRecord;
+      const features = (Array.isArray(storedFeatures) ? storedFeatures.filter(recordGuard) : [])
         .filter((feature) => !suggestionMode || now - feature.createdAt <= FEATURE_RETENTION_MS);
       const index = features.findIndex((feature) => feature.id === id && feature.status === "proposed");
       if (index < 0) return { status: 404, body: { ok: false, error: "not_found" } };
       const feature = features[index];
-      if (feature.voters.includes(akey)) return { status: 200, body: { ok: true, replayed: true, [suggestionMode ? "suggestion" : "feature"]: publicFeature(feature), authority: "priority_only" } };
-      const cooldownKey = `${suggestionMode ? "svcd" : "fvcd"}:${akey}`;
-      const nextAt = Number((await storage.get(cooldownKey)) || 0);
-      if (nextAt > now) return { status: 429, body: { ok: false, error: "cooldown", remainingMs: nextAt - now } };
-      if (feature.voters.length >= FEATURE_VOTERS_MAX) return { status: 409, body: { ok: false, error: "voter_cap", maxVoters: FEATURE_VOTERS_MAX } };
+      if (feature.voters.includes(akey)) return suggestionMode
+        ? { status: 200, body: { ok: true, replayed: true, suggestion: publicFeature(feature), authority: "priority_only" } }
+        : { status: 409, body: { ok: false, error: "already_voted" } };
+      if (suggestionMode && nextAt > now) return { status: 429, body: { ok: false, error: "cooldown", remainingMs: nextAt - now } };
+      if (suggestionMode && feature.voters.length >= FEATURE_VOTERS_MAX) return { status: 409, body: { ok: false, error: "voter_cap", maxVoters: FEATURE_VOTERS_MAX } };
       feature.voters = [...feature.voters, akey];
-      feature.votes = feature.voters.length;
+      feature.votes = suggestionMode ? feature.voters.length : feature.votes + 1;
       features[index] = feature;
       await storage.put({ [storageKey]: features, [cooldownKey]: now + FEATURE_VOTE_CD_MS });
-      return { status: 200, body: { ok: true, replayed: false, [suggestionMode ? "suggestion" : "feature"]: publicFeature(feature), authority: "priority_only" } };
+      return { status: 200, body: suggestionMode
+        ? { ok: true, replayed: false, suggestion: publicFeature(feature), authority: "priority_only" }
+        : { ok: true, feature: publicFeature(feature) } };
     });
     return json(result.body, result.status, origin);
   }
