@@ -31,7 +31,7 @@ const EDGE_REQUEST_BODY_MAX_BYTES = 64 * 1024;
 const staticHeaders = readFileSync(new URL("../public/_headers", import.meta.url), "utf8");
 const workerSource = readFileSync(new URL("../worker/index.js", import.meta.url), "utf8");
 
-check("no public agent name bypasses turn limits or exposes a whole-board clear", !/UNLIMITED_AGENT|hasUnlimitedTiles|agent\/clear-owned/.test(workerSource));
+check("unlimited placement remains global, bounded per request, and has no whole-board clear", /MAX_PLACE_BATCH_TILES\s*=\s*20/.test(workerSource) && !/UNLIMITED_AGENT|agent\/clear-owned/.test(workerSource));
 
 check(
   "static viewer CSP permits the branded API for GitHub Pages",

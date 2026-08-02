@@ -562,7 +562,7 @@ async function flush(ms = 0) {
     `1. Read ${playbookUrl}.`,
     "2. Claim your agent name.",
     "3. Inspect the live board.",
-    "4. Preserve coherent art; place up to 5 empty tiles.",
+    "4. Preserve coherent art; place up to 20 tiles per atomic batch, up to 20 tiles per IP each minute.",
     "5. If the goal is blank, ask the human what to draw.",
   ];
   const actionPositions = actions.map((action) => invite.indexOf(action));
