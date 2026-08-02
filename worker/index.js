@@ -3896,7 +3896,7 @@ export class GrokPlaceCanvas extends DurableObject {
     /** @type {Map<number, (TileProvenance | null)[]>} */
     const provenanceRows = new Map();
     const agentKey = `agent:${akey}`;
-    const agentStat = await this.readAgent(akey, agent, now);
+    let agentStat = await this.readAgent(akey, agent, now);
     const placements = agentStat.placements || 0;
     const requestedPlanId = body.planId == null ? "" : typeof body.planId === "string" ? body.planId.trim() : null;
     const requestedAssignmentId = body.assignmentId == null ? "" : typeof body.assignmentId === "string" ? body.assignmentId.trim() : null;
@@ -3939,11 +3939,12 @@ export class GrokPlaceCanvas extends DurableObject {
     }
 
     // Start a fresh turn: base tiles + earned bonus from code maintenance
+    let bonusConsumed = 0;
     if (turn.left <= 0) {
       const bank = Math.max(0, agentStat.bonusTiles || 0);
       const bonus = Math.min(bank, MAX_BONUS_PER_TURN);
+      bonusConsumed = bonus;
       turn.left = TILES_PER_TURN + bonus;
-      if (bonus > 0) agentStat.bonusTiles = bank - bonus;
       turn.nextTurnAt = 0;
     }
     if (batch.length > turn.left) {
@@ -4040,14 +4041,7 @@ export class GrokPlaceCanvas extends DurableObject {
     // Remove legacy sticky missions as soon as the board is written; they were never an authority boundary.
     delete meta.communityMission;
     delete meta.mission;
-    const isNew = !agentStat.placements;
-    agentStat.placements = (agentStat.placements || 0) + batch.length;
-    agentStat.reputation = (agentStat.reputation || 0) + batch.length;
-    agentStat.lastAt = now;
-    agentStat.lastGoal = goal || agentStat.lastGoal || "";
     const last = placed[placed.length - 1];
-    agentStat.lastTile = { x: last.x, y: last.y, c: last.colorIndex, t: now };
-    if (isNew) meta.uniqueAgents = (meta.uniqueAgents || 0) + 1;
 
     const entries = placed.map((p, batchOrder) => ({
       type: "place",
@@ -4070,7 +4064,6 @@ export class GrokPlaceCanvas extends DurableObject {
     /** @type {unknown[]} */
     let history = Array.isArray(storedHistory) ? storedHistory : [];
     history = [...entries, ...history].slice(0, HISTORY_MAX);
-    const leaders = await this.updateLeaders(agentStat);
     const onCooldown = turn.nextTurnAt > now;
     // Recheck at the same storage boundary as the board write. A protect
     // transaction that wins this race must make this ordinary write fail.
@@ -4098,12 +4091,22 @@ export class GrokPlaceCanvas extends DurableObject {
       }
       const latestMeta = normalizeCanvasMeta(await storage.get("meta"));
       if ((latestMeta.version || 0) !== meta.version - 1) return { changed: true };
+      const latestAgent = this.normalizeAgent(await storage.get(agentKey), agent, now);
+      const committedAgent = {
+        ...latestAgent,
+        placements: (latestAgent.placements || 0) + batch.length,
+        reputation: (latestAgent.reputation || 0) + batch.length,
+        bonusTiles: Math.max(0, (latestAgent.bonusTiles || 0) - bonusConsumed),
+        lastAt: now,
+        lastGoal: goal || latestAgent.lastGoal || "",
+        lastTile: { x: last.x, y: last.y, c: last.colorIndex, t: now },
+      };
+      if (!latestAgent.placements) meta.uniqueAgents = (meta.uniqueAgents || 0) + 1;
       let committedPlan = null;
       let committedPlanIndex = null;
       if (placementPlan) {
         const rawPlan = await storage.get(`plan:${placementPlan.id}`);
         const latestPlan = isPlanRecord(rawPlan) ? rawPlan : null;
-        const latestAgent = this.normalizeAgent(await storage.get(agentKey), agent, now);
         if (!latestPlan
           || !this.isPlanActive(latestPlan)
           || this.planVersion(latestPlan) !== this.planVersion(placementPlan)
@@ -4150,7 +4153,7 @@ export class GrokPlaceCanvas extends DurableObject {
         const storedPlan = await storage.get(`plan:${prior.planId}`);
         const plan = isPlanRecord(storedPlan) ? storedPlan : null;
         if (!plan || plan.status !== "active" || !isPlanBounds(plan.bounds) || !this.boundsContainCell(plan.bounds, placedTile)) continue;
-        if (this.isPlanParticipant(plan, agentStat, akey)) continue;
+        if (this.isPlanParticipant(plan, committedAgent, akey)) continue;
         /** @type {RestorationEvent} */
         const event = {
           version: 1,
@@ -4167,6 +4170,7 @@ export class GrokPlaceCanvas extends DurableObject {
         };
         await this.writeRestorationEvent(storage, event);
       }
+      const leaders = await this.updateLeadersIn(storage, [committedAgent]);
       await storage.put({
       board: this.bufCopy(board),
       scores: this.scoresCopy(scores),
@@ -4178,11 +4182,12 @@ export class GrokPlaceCanvas extends DurableObject {
       leaders,
       [turnKey]: turn,
       [cdKey]: onCooldown ? turn.nextTurnAt : 0,
-      [agentKey]: agentStat,
+      [agentKey]: committedAgent,
       ...putOwners,
       ...Object.fromEntries([...provenanceRows].map(([rowY, row]) => [provenanceRowKey(rowY), row])),
       ...(committedPlan ? { [`plan:${committedPlan.id}`]: committedPlan, planIndex: committedPlanIndex } : {}),
       });
+      agentStat = committedAgent;
       if (committedPlan) placementPlan = committedPlan;
       return null;
     });

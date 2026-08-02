@@ -585,6 +585,41 @@ try {
     }),
     (current) => current?.assignments?.[0]?.id === "as_ffffffffffff" && current?.assignments?.[0]?.acceptedPlacements === 0
   );
+
+  const joinPlanId = "pl_aaaaaaaaaaaaaaaa";
+  const joinPlan = { ...racePlan, id: joinPlanId, agent: "plan-owner", acceptedReviewId: "pvr_aaaaaaaaaaaaaaaa" };
+  const joinRaceStorage = new TransactionalMemoryStorage({
+    board: new Uint8Array(size * size).buffer, scores: new Int16Array(size * size).buffer, size, schema: 4,
+    meta: { version: 0, tileEpoch: 1, totalPlacements: 0, totalVotes: 0, uniqueAgents: 2, lastPlaceAt: now }, feed: [], history: [], leaders: [],
+    [`plan:${joinPlanId}`]: joinPlan,
+    planIndex: [{ id: joinPlanId, agent: "plan-owner", updatedAt: now, status: "active", bounds: joinPlan.bounds }],
+    "agent:plan-owner": { name: "plan-owner", placements: 1, reputation: 1, firstAt: now, lastAt: now, activePlanId: joinPlanId, joinedPlanIds: [], avoidedPlanIds: [] },
+    "agent:placer": { name: "placer", placements: 1, reputation: 1, firstAt: now, lastAt: now, joinedPlanIds: [], avoidedPlanIds: [] },
+    "turn:placer": { left: 5, nextTurnAt: 0 },
+  });
+  const joinRaceCanvas = new GrokPlaceCanvas({ storage: joinRaceStorage, getWebSockets() { return []; } }, {});
+  joinRaceCanvas.rateLimit = async () => ({ ok: true });
+  joinRaceCanvas.consumeProof = async () => ({ ok: true });
+  joinRaceCanvas.requireAgentCapability = async () => ({ ok: true });
+  const joinGate = joinRaceStorage.holdNextTransaction();
+  const pendingOrdinaryPlace = placeOn(joinRaceCanvas, { agent: "placer", goal: "unrelated drawing", x: 3, y: 3, color: 5 });
+  await joinGate.entered;
+  const joinResponse = await joinRaceCanvas.handleGoalCoordinate(new Request("https://test/internal/goals/join", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: "placer", id: joinPlanId, intent: "join", challengeId: "test", nonce: 0 }),
+  }), "*", "test-ip");
+  joinGate.release();
+  const ordinaryPlaceResponse = await pendingOrdinaryPlace;
+  const finalPlacer = await joinRaceStorage.get("agent:placer");
+  check(
+    "an ordinary placement preserves a concurrently committed goal join",
+    joinResponse.status === 200
+      && ordinaryPlaceResponse.response.status === 200
+      && finalPlacer?.joinedPlanIds?.includes(joinPlanId)
+      && finalPlacer?.placements === 2
+      && finalPlacer?.reputation === 2,
+    JSON.stringify({ join: await joinResponse.json(), placement: ordinaryPlaceResponse.data, agent: finalPlacer })
+  );
 } finally {
   Date.now = realNow;
 }
