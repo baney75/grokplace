@@ -258,7 +258,8 @@ check(
     && legacyVoteResponse.ok
     && legacyVoteData.vote?.score === 1
     && (await legacyGrowthStorage.get(`agent:${owner}`))?.upvotesReceived === 1
-    && (await legacyGrowthStorage.get("legacyOwnerWidth")) === 2,
+    && (await legacyGrowthStorage.get("legacyOwnerWidth")) === 2
+    && (await legacyGrowthStorage.get("meta"))?.version === 2,
   JSON.stringify({ tile: data, vote: legacyVoteData, owner: await legacyGrowthStorage.get(`agent:${owner}`) })
 );
 

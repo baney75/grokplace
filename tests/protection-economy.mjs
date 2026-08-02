@@ -80,13 +80,13 @@ function check(name, condition, detail = "") {
 
 const size = 8;
 const board = new Uint8Array(size * size);
-for (const [x, y, color] of [[1, 1, 5], [2, 1, 6], [3, 1, 7], [4, 1, 8]]) board[y * size + x] = color + 1;
+for (const [x, y, color] of [[1, 1, 5], [2, 1, 6], [3, 1, 7], [4, 1, 8], [5, 1, 9]]) board[y * size + x] = color + 1;
 const storage = new TransactionalMemoryStorage({
   board: board.buffer,
   scores: new Int16Array(size * size).buffer,
   size,
   schema: 4,
-  meta: { version: 0, totalPlacements: 4, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: 0 },
+  meta: { version: 0, totalPlacements: 5, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: 0 },
   feed: [],
   history: [],
   leaders: [],
@@ -171,9 +171,9 @@ try {
   formerPrivilegedCanvas.consumeProof = async () => ({ ok: true });
   formerPrivilegedCanvas.requireAgentCapability = async () => ({ ok: true });
   let formerResult = await placeOn(formerPrivilegedCanvas, { agent: "magnus-frog-cont-lk84q", goal: "bounded turn regression", tiles: Array.from({ length: 5 }, (_, y) => ({ x: 0, y, color: 1 })), challengeId: "test", nonce: 0 });
-  check("former designated public name spends the ordinary five-tile turn", formerResult.response.status === 200 && formerResult.data.tilesLeftInTurn === 0 && formerResult.data.nextTurnAt === now + 60_000 && !Object.hasOwn(formerResult.data, "unlimitedTiles"), JSON.stringify(formerResult.data));
+  check("former designated public name uses the global unlimited placement contract", formerResult.response.status === 200 && formerResult.data.placement?.mode === "unlimited" && formerResult.data.placement?.maxBatchTiles === 20 && !Object.hasOwn(formerResult.data, "unlimitedTiles"), JSON.stringify(formerResult.data));
   formerResult = await placeOn(formerPrivilegedCanvas, { agent: "magnus-frog-cont-lk84q", goal: "bounded turn regression", x: 1, y: 0, color: 1, challengeId: "test", nonce: 0 });
-  check("former designated public name cannot bypass cooldown", formerResult.response.status === 429 && formerResult.data.error === "cooldown", JSON.stringify(formerResult.data));
+  check("former designated public name can continue immediately under the global contract", formerResult.response.status === 200 && formerResult.data.placement?.mode === "unlimited", JSON.stringify(formerResult.data));
 
   let result = await protect({ agent: "protector", x: 1, y: 1, action: "protect", clientRequestId: "protect-cell-1" });
   const firstProtection = await storage.get("protection:cell:1:1");
@@ -200,13 +200,13 @@ try {
     JSON.stringify({ response: result.data, turn: await storage.get("turn:protector") })
   );
 
-  result = await protect({ agent: "protector", x: 2, y: 1, action: "protect", clientRequestId: "insufficient-credits" });
+  result = await protect({ agent: "protector", x: 5, y: 1, action: "protect", clientRequestId: "renewed-protection-credits" });
   check(
-    "insufficient credits fail without a debit or a protection record",
-    result.response.status === 409
-      && result.data.error === "insufficient_protection_credits"
+    "protection credits renew independently when placement no longer advances turns",
+    result.response.status === 200
+      && result.data.spentCredits === 3
       && (await storage.get("turn:protector")).left === 2
-      && (await storage.get("protection:cell:2:1")) === undefined,
+      && (await storage.get("protection:cell:5:1")) !== undefined,
     JSON.stringify({ response: result.data, turn: await storage.get("turn:protector") })
   );
 

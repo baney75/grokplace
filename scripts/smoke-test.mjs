@@ -303,8 +303,8 @@ const placedA = await mutate("/v1/place", "place", a, {
   goal: "release smoke marker",
   tiles: cells.slice(0, 5).map((cell, index) => ({ ...cell, color: index === 0 ? 0 : 5 })),
 });
-check("authenticated batch places five tiles", placedA.response.ok && placedA.data.placedCount === 5 && placedA.data.tilesLeftInTurn === 0, placedA.data);
-check("turn response exposes cooldown", placedA.data.remainingSec > 0 && placedA.data.tilesPerTurn === 5, placedA.data);
+check("authenticated batch places five tiles", placedA.response.ok && placedA.data.placedCount === 5 && placedA.data.placement?.mode === "unlimited", placedA.data);
+check("placement response exposes the bounded atomic batch contract", placedA.data.placement?.maxBatchTiles === 20 && placedA.data.placement?.cooldownMs === 0, placedA.data);
 
 const placedB = await mutate("/v1/place", "place", b, { ...cells[5], color: 11, goal: "release smoke voter", mission: "legacy agent-set mission must be ignored" });
 const missionReads = await Promise.all([json("/v1/canvas"), json("/v1/see")]);

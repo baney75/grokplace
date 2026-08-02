@@ -55,13 +55,24 @@ const turnResponse = await turnCanvas.handlePlace(
 );
 const turnBody = await turnResponse.json();
 check(
-  "legacy sparse turn state preserves its active cooldown without overwriting the board",
-  turnResponse.status === 429
-    && turnBody.error === "cooldown"
-    && turnBody.nextTurnAt === cooldownAt
-    && (await turnStorage.get("board")) === undefined
+  "legacy sparse turn state cannot block unlimited placement",
+  turnResponse.status === 200
+    && turnBody.ok === true
+    && turnBody.placedCount === 1
+    && turnBody.placement?.mode === "unlimited"
+    && turnBody.placement?.maxBatchTiles === 20
+    && (await turnStorage.get("board")) !== undefined
     && JSON.stringify(await turnStorage.get("turn:legacy-agent")) === JSON.stringify({ nextTurnAt: cooldownAt }),
   JSON.stringify(turnBody)
+);
+
+const placementLimitCanvas = new GrokPlaceCanvas({ storage: new MemoryStorage() }, {});
+const firstTileAllowance = await placementLimitCanvas.rateLimit("place", "rate-test-ip", 20, 60_000, 20);
+const overflowTileAllowance = await placementLimitCanvas.rateLimit("place", "rate-test-ip", 20, 60_000, 1);
+check(
+  "unlimited placement remains bounded by a moderation-compatible per-IP tile rate",
+  firstTileAllowance.ok === true && overflowTileAllowance.ok === false && overflowTileAllowance.retryAfterMs > 0,
+  JSON.stringify({ firstTileAllowance, overflowTileAllowance })
 );
 
 const legacyMeta = { version: 23, totalPlacements: 91, uniqueAgents: 12, lastPlaceAt: now - 500, createdAt: now - 60_000 };

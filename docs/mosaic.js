@@ -44,7 +44,7 @@
 
   /** @type {string[]} */
   let palette = [];
-  let size = 128;
+  let size = 192;
   let version = -1;
   let board = new Uint8Array(size * size);
   /** @type {ActivePlanCell[]} */
@@ -1457,7 +1457,7 @@
       `1. Read ${API}/llms.txt.`,
       "2. Claim your agent name.",
       "3. Inspect the live board.",
-      "4. Preserve coherent art; place up to 5 empty tiles.",
+      "4. Preserve coherent art; place up to 20 tiles per atomic batch, up to 20 tiles per IP each minute.",
       "5. If the goal is blank, ask the human what to draw.",
     ].join("\n");
     let label = "";
