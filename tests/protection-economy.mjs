@@ -1,0 +1,342 @@
+#!/usr/bin/env node
+import { GrokPlaceCanvas } from "../worker/index.js";
+
+class TransactionalMemoryStorage {
+  constructor(values = {}) {
+    this.values = new Map(Object.entries(values));
+    this.currentTransaction = 0;
+    this.nextTransaction = 1;
+    this.transactionWrites = [];
+    this.tail = Promise.resolve();
+  }
+
+  async get(key) { return this.values.get(key); }
+
+  async put(key, value) {
+    if (typeof key === "object" && key !== null) {
+      for (const [name, item] of Object.entries(key)) this.write(name, item);
+      return;
+    }
+    this.write(key, value);
+  }
+
+  async delete(key) { this.values.delete(key); }
+
+  write(key, value) {
+    this.values.set(key, value);
+    if (this.currentTransaction) this.transactionWrites.push({ transaction: this.currentTransaction, key });
+  }
+
+  async list({ prefix = "", limit = 1_000 } = {}) {
+    return new Map([...this.values.entries()].filter(([key]) => key.startsWith(prefix)).slice(0, limit));
+  }
+
+  async transaction(callback) {
+    const previous = this.tail;
+    let release;
+    this.tail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    const transaction = this.nextTransaction++;
+    this.currentTransaction = transaction;
+    const store = {
+      get: (key) => this.get(key),
+      put: (key, value) => this.put(key, value),
+      delete: (key) => this.delete(key),
+      list: (options) => this.list(options),
+    };
+    try {
+      return await callback(store);
+    } finally {
+      this.currentTransaction = 0;
+      release();
+    }
+  }
+}
+
+let failed = 0;
+function check(name, condition, detail = "") {
+  if (condition) console.log(`PASS ${name}`);
+  else {
+    failed++;
+    console.error(`FAIL ${name}${detail ? ` — ${detail}` : ""}`);
+  }
+}
+
+const size = 8;
+const board = new Uint8Array(size * size);
+for (const [x, y, color] of [[1, 1, 5], [2, 1, 6], [3, 1, 7], [4, 1, 8]]) board[y * size + x] = color + 1;
+const storage = new TransactionalMemoryStorage({
+  board: board.buffer,
+  scores: new Int16Array(size * size).buffer,
+  size,
+  schema: 4,
+  meta: { version: 0, totalPlacements: 4, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: 0 },
+  feed: [],
+  history: [],
+  leaders: [],
+  "turn:protector": { left: 5, nextTurnAt: 0 },
+  "turn:racer": { left: 5, nextTurnAt: 0 },
+  "turn:overwriter": { left: 5, nextTurnAt: 0 },
+  "turn:after-expiry": { left: 5, nextTurnAt: 0 },
+});
+const canvas = new GrokPlaceCanvas({ storage, getWebSockets() { return []; } }, {});
+canvas.rateLimit = async () => ({ ok: true });
+canvas.consumeProof = async () => ({ ok: true });
+canvas.requireAgentCapability = async () => ({ ok: true });
+
+let now = 1_000;
+const realNow = Date.now;
+Date.now = () => now;
+
+async function protect(body) {
+  const request = new Request("https://test/internal/protect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await canvas.handleProtect(request, size, 60_000, "*", "test-ip");
+  return { response, data: await response.json() };
+}
+
+async function place(body) {
+  const request = new Request("https://test/internal/place", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await canvas.handlePlace(request, size, 60_000, "*", "test-ip");
+  return { response, data: await response.json() };
+}
+
+try {
+  let result = await protect({ agent: "protector", x: 1, y: 1, action: "protect", clientRequestId: "protect-cell-1" });
+  const firstProtection = await storage.get("protection:cell:1:1");
+  const firstTurn = await storage.get("turn:protector");
+  const committed = storage.transactionWrites.filter((write) => ["protection:cell:1:1", "protection:requests:protector", "turn:protector"].includes(write.key));
+  check(
+    "a successful protection atomically spends exactly three current turn credits",
+    result.response.status === 200
+      && result.data.spentCredits === 3
+      && result.data.chargedCredits === 3
+      && firstTurn.left === 2
+      && firstProtection?.expiresAt === now + 15 * 60_000
+      && new Set(committed.map((write) => write.transaction)).size === 1,
+    JSON.stringify({ response: result.data, firstTurn, firstProtection, committed })
+  );
+
+  result = await protect({ agent: "protector", x: 1, y: 1, action: "protect", clientRequestId: "protect-cell-1" });
+  check(
+    "an exact replay returns the durable result without a second debit",
+    result.response.status === 200
+      && result.data.replayed === true
+      && result.data.chargedCredits === 0
+      && (await storage.get("turn:protector")).left === 2,
+    JSON.stringify({ response: result.data, turn: await storage.get("turn:protector") })
+  );
+
+  result = await protect({ agent: "protector", x: 2, y: 1, action: "protect", clientRequestId: "insufficient-credits" });
+  check(
+    "insufficient credits fail without a debit or a protection record",
+    result.response.status === 409
+      && result.data.error === "insufficient_protection_credits"
+      && (await storage.get("turn:protector")).left === 2
+      && (await storage.get("protection:cell:2:1")) === undefined,
+    JSON.stringify({ response: result.data, turn: await storage.get("turn:protector") })
+  );
+
+  result = await protect({ agent: "protector", x: 1, y: 1, action: "protect", clientRequestId: "existing-protection" });
+  check(
+    "an already protected tile fails without spending credits",
+    result.response.status === 409
+      && result.data.error === "already_protected"
+      && (await storage.get("turn:protector")).left === 2,
+    JSON.stringify({ response: result.data, turn: await storage.get("turn:protector") })
+  );
+
+  const raced = await Promise.all([
+    protect({ agent: "racer", x: 3, y: 1, action: "protect", clientRequestId: "race-request-a" }),
+    protect({ agent: "racer", x: 3, y: 1, action: "protect", clientRequestId: "race-request-b" }),
+  ]);
+  const raceErrors = raced.map((item) => item.data.error).filter(Boolean);
+  check(
+    "concurrent protection attempts serialize so only one can spend",
+    raced.filter((item) => item.response.status === 200).length === 1
+      && raceErrors.length === 1
+      && raceErrors[0] === "already_protected"
+      && (await storage.get("turn:racer")).left === 2,
+    JSON.stringify({ raced: raced.map((item) => item.data), turn: await storage.get("turn:racer") })
+  );
+
+  const [raceProtection, racePlace] = await Promise.all([
+    protect({ agent: "race-protector", x: 2, y: 1, action: "protect", clientRequestId: "cross-route-race" }),
+    place({ agent: "race-place", goal: "ordinary race", x: 2, y: 1, color: 9 }),
+  ]);
+  const raceBoard = new Uint8Array(await storage.get("board"));
+  const raceRecord = await storage.get("protection:cell:2:1");
+  const placeFinishedFirst = racePlace.response.status === 200
+    && raceProtection.response.status === 200
+    && raceRecord?.colorIndex != null
+    && raceBoard[10] === raceRecord.colorIndex + 1;
+  const protectionFinishedFirst = raceProtection.response.status === 200
+    && racePlace.response.status === 409
+    && racePlace.data.error === "protected_tile";
+  check(
+    "protection and ordinary placement cannot race into an unprotected overwrite",
+    placeFinishedFirst || protectionFinishedFirst,
+    JSON.stringify({ protection: raceProtection.data, place: racePlace.data, board: raceBoard[10], record: raceRecord })
+  );
+
+  result = await place({ agent: "overwriter", goal: "replace protected tile", x: 3, y: 1, color: 9 });
+  check(
+    "ordinary placement returns the stable protected_tile error without a debit",
+    result.response.status === 409
+      && result.data.error === "protected_tile"
+      && result.data.reason === "active_protection"
+      && (await storage.get("turn:overwriter")).left === 5,
+    JSON.stringify({ response: result.data, turn: await storage.get("turn:overwriter") })
+  );
+
+  result = await protect({ agent: "overwriter", x: 3, y: 1, action: "overwrite", color: 9, clientRequestId: "paid-overwrite" });
+  const boardAfterOverwrite = new Uint8Array(await storage.get("board"));
+  check(
+    "the documented paid overwrite is the only early replacement path and costs three credits",
+    result.response.status === 200
+      && result.data.spentCredits === 3
+      && (await storage.get("turn:overwriter")).left === 2
+      && boardAfterOverwrite[11] === 10
+      && (await storage.get("protection:cell:3:1")) === undefined,
+    JSON.stringify({ response: result.data, turn: await storage.get("turn:overwriter"), board: boardAfterOverwrite[11] })
+  );
+
+  result = await protect({ agent: "after-expiry", x: 4, y: 1, action: "protect", clientRequestId: "expiry-protection" });
+  const expiresAt = result.data.protection?.expiresAt;
+  now = Number(expiresAt) + 1;
+  result = await place({ agent: "after-expiry", goal: "after expiry", x: 4, y: 1, color: 10 });
+  check(
+    "expired protection is cleared lazily and ordinary placement succeeds after expiry",
+    result.response.status === 200
+      && (await storage.get("protection:cell:4:1")) === undefined
+      && new Uint8Array(await storage.get("board"))[12] === 11,
+    JSON.stringify({ response: result.data, protection: await storage.get("protection:cell:4:1") })
+  );
+
+  let boundedOk = true;
+  for (let index = 0; index < 34; index++) {
+    await storage.put("turn:bounded", { left: 5, nextTurnAt: 0 });
+    now += 1;
+    const action = index % 2 === 0 ? "protect" : "overwrite";
+    const attempt = await protect({
+      agent: "bounded",
+      x: 4,
+      y: 1,
+      action,
+      ...(action === "overwrite" ? { color: (index % 15) + 1 } : {}),
+      clientRequestId: `bounded-${String(index).padStart(3, "0")}`,
+    });
+    if (attempt.response.status !== 200) boundedOk = false;
+  }
+  const replayLog = await storage.get("protection:requests:bounded");
+  check(
+    "protection idempotency uses one bounded replay ring per agent",
+    boundedOk
+      && Array.isArray(replayLog)
+      && replayLog.length === 32
+      && replayLog[0]?.clientRequestId === "bounded-033"
+      && !replayLog.some((record) => record.clientRequestId === "bounded-000"),
+    JSON.stringify(replayLog)
+  );
+
+  const capacitySize = 16;
+  const capacityBoard = new Uint8Array(capacitySize * capacitySize).fill(2);
+  const capacityValues = {
+    board: capacityBoard.buffer,
+    scores: new Int16Array(capacitySize * capacitySize).buffer,
+    size: capacitySize,
+    schema: 4,
+    meta: { version: 0, totalPlacements: 256, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: now },
+    feed: [],
+    history: [],
+    leaders: [],
+    "turn:capacity": { left: 5, nextTurnAt: 0 },
+  };
+  for (let index = 0; index < 120; index++) {
+    const x = index % capacitySize;
+    const y = Math.floor(index / capacitySize);
+    capacityValues[`protection:cell:${x}:${y}`] = {
+      version: 1,
+      x,
+      y,
+      colorIndex: 1,
+      color: "#E4E4E4",
+      protector: "capacity",
+      protectedAt: now,
+      expiresAt: now + 60_000,
+    };
+  }
+  const capacityStorage = new TransactionalMemoryStorage(capacityValues);
+  const capacityCanvas = new GrokPlaceCanvas({ storage: capacityStorage, getWebSockets() { return []; } }, {});
+  capacityCanvas.rateLimit = async () => ({ ok: true });
+  capacityCanvas.consumeProof = async () => ({ ok: true });
+  capacityCanvas.requireAgentCapability = async () => ({ ok: true });
+  const capacityResponse = await capacityCanvas.handleProtect(new Request("https://test/internal/protect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: "capacity", x: 15, y: 15, action: "protect", clientRequestId: "capacity-full" }),
+  }), capacitySize, 60_000, "*", "test-ip");
+  const capacityData = await capacityResponse.json();
+  check(
+    "the active protection cap rejects new records before spending credits",
+    capacityResponse.status === 429
+      && capacityData.error === "protection_capacity"
+      && (await capacityStorage.get("turn:capacity")).left === 5
+      && (await capacityStorage.get("protection:cell:15:15")) === undefined,
+    JSON.stringify({ response: capacityData, turn: await capacityStorage.get("turn:capacity") })
+  );
+
+  const growthBoard = new Uint8Array(size * size);
+  growthBoard[1 * size + 1] = 6;
+  const growthStorage = new TransactionalMemoryStorage({
+    board: growthBoard.buffer,
+    scores: new Int16Array(size * size).buffer,
+    size,
+    schema: 4,
+    meta: { version: 1, totalPlacements: 1, totalVotes: 0, uniqueAgents: 1, lastPlaceAt: now },
+    feed: [],
+    history: [],
+    leaders: [],
+    "turn:growth-overwriter": { left: 5, nextTurnAt: 0 },
+    "protection:cell:1:1": {
+      version: 1,
+      x: 1,
+      y: 1,
+      colorIndex: 5,
+      color: "#E50000",
+      protector: "protector",
+      protectedAt: now,
+      expiresAt: now + 60_000,
+    },
+  });
+  const growthCanvas = new GrokPlaceCanvas({ storage: growthStorage, getWebSockets() { return []; } }, {});
+  growthCanvas.rateLimit = async () => ({ ok: true });
+  growthCanvas.consumeProof = async () => ({ ok: true });
+  growthCanvas.requireAgentCapability = async () => ({ ok: true });
+  await growthCanvas.handleCanvas(new URL("https://test/internal/canvas"), 16, "*");
+  const growthResponse = await growthCanvas.handlePlace(new Request("https://test/internal/place", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: "growth-overwriter", goal: "try protected growth tile", x: 1, y: 1, color: 9 }),
+  }), 16, 60_000, "*", "test-ip");
+  const growthData = await growthResponse.json();
+  check(
+    "coordinate-keyed protection remains enforceable after canvas growth",
+    growthResponse.status === 409
+      && growthData.error === "protected_tile"
+      && (await growthStorage.get("protection:cell:1:1"))?.colorIndex === 5
+      && new Uint8Array(await growthStorage.get("board"))[17] === 6,
+    JSON.stringify({ response: growthData, protection: await growthStorage.get("protection:cell:1:1") })
+  );
+} finally {
+  Date.now = realNow;
+}
+
+process.exitCode = failed ? 1 : 0;

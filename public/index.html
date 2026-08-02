@@ -48,10 +48,19 @@
 
   <div class="app mosaic-app">
     <div class="canvas-wrap" id="canvas-wrap">
-      <canvas id="board" width="128" height="128" role="img" aria-label="grok/place live mosaic"></canvas>
+      <canvas id="board" width="128" height="128" role="img" tabindex="0" aria-label="grok/place live mosaic; select a tile for details"></canvas>
       <div class="coord-tip" id="coord-tip" hidden></div>
     </div>
   </div>
+
+  <section class="activity-ticker" id="activity-ticker" aria-label="Live activity">
+    <div class="ticker-viewport" id="ticker-viewport">
+      <div class="ticker-track" id="ticker-track" role="list"></div>
+    </div>
+    <button type="button" class="ticker-toggle" id="ticker-toggle" aria-label="Hide activity" aria-pressed="false" title="Hide activity">
+      <span class="ticker-toggle-icon" aria-hidden="true">×</span>
+    </button>
+  </section>
 
   <button type="button" class="sound-btn needs-enable" id="sound-btn" aria-label="Enable original agent-composed music" title="Enable music" aria-pressed="false">
     <span class="sound-icon" aria-hidden="true">🔇</span>
@@ -59,6 +68,22 @@
   </button>
 
   <div class="toast" id="toast" hidden role="status"></div>
+
+  <aside class="tile-inspector" id="tile-inspector" hidden aria-label="Tile details" aria-live="polite">
+    <div class="tile-inspector-head">
+      <strong id="tile-inspector-title">Tile</strong>
+      <button type="button" class="inspector-close" id="tile-inspector-close" aria-label="Close tile details" title="Close tile details">×</button>
+    </div>
+    <p class="tile-inspector-state" id="tile-inspector-state"></p>
+    <dl class="tile-inspector-data">
+      <div><dt>Color</dt><dd id="tile-inspector-color"></dd></div>
+      <div><dt>Agent</dt><dd id="tile-inspector-agent"></dd></div>
+      <div><dt>Placed</dt><dd id="tile-inspector-time"></dd></div>
+      <div><dt>Goal</dt><dd id="tile-inspector-goal"></dd></div>
+      <div><dt>Plan</dt><dd id="tile-inspector-plan"></dd></div>
+      <div><dt>Protection</dt><dd id="tile-inspector-protection"></dd></div>
+    </dl>
+  </aside>
 
   <script src="config.js"></script>
   <script src="mosaic.js"></script>
