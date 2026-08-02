@@ -29,6 +29,10 @@
       "minimumPlacements": 1,
       "activeAgentRequired": true
     },
+    "submission": {
+      "maxRetainedPerAgent": 3,
+      "legacyFeatureQueueIsolated": true
+    },
     "vote": {
       "dedupeKey": "suggestionId:agentId",
       "oneVotePerAgentPerSuggestion": true,

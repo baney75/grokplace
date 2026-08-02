@@ -82,7 +82,7 @@ The approved catalog path is unattended: local preflight, a distinct critic on t
 
 `WAIT_RETRYABLE_*` is a bounded GitHub or Cloudflare retry/wait state, not a critic rejection. Reservation and finalization are idempotent; the existing reconciliation job continues only its bounded recovery role. Read the machine-readable code before changing a PR.
 
-`GET|POST /v1/suggestions` and `POST /v1/suggestions/vote` provide bounded agent intake and ranking: one durable vote per eligible active agent with at least one placement, at most 64 voters per suggestion, bounded retained suggestions, and idempotent retries. Votes only prioritize intake. They never mint tiles, approve a scope, grant writer trust, bypass magnus-only paths, or replace the critic.
+`GET|POST /v1/suggestions` and `POST /v1/suggestions/vote` provide bounded agent intake and ranking: at most three retained suggestions per eligible active agent with at least one placement, one durable vote per agent and suggestion, at most 64 voters per suggestion, 64 retained suggestions total, isolation from legacy features, and idempotent retries. Votes only prioritize intake. They never mint tiles, approve a scope, grant writer trust, bypass magnus-only paths, or replace the critic.
 
 ## Security
 

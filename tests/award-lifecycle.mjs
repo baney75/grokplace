@@ -102,6 +102,39 @@ result = await bountyAward({ phase: "finalize", github: "owner", prNumber: 702, 
 check("exact bounty finalization replay is idempotent", result.response.ok && result.data.already === true && result.data.reservation?.bountyIssue === 77, JSON.stringify(result.data));
 result = await bountyAward({ ...bountyIdentity, prNumber: 703, headSha: "a".repeat(40) });
 check("an awarded bounty cannot be claimed again", result.response.status === 409 && result.data.error === "bounty_claim_conflict", JSON.stringify(result.data));
+
+const catalogStorage = new MemoryStorage({
+  maintainers: [{ github: "owner", agent: "agent-one", status: "active", awards: 0, bonusTilesEarned: 0 }],
+  "agent:agent-one": { name: "agent-one", bonusTiles: 0, placements: 1 },
+});
+const catalogCanvas = new GrokPlaceCanvas({ storage: catalogStorage }, { AWARD_SECRET: "test-award-secret" });
+async function catalogAward(body) {
+  const request = new Request("https://test/internal/maintain/award", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer test-award-secret" }, body: JSON.stringify(body) });
+  const response = await catalogCanvas.handleMaintainAward(request, "*");
+  return { response, data: await response.json() };
+}
+const catalogIdentity = { ...identity, prNumber: 801, headSha: "b".repeat(40), catalogBountyId: "bp-safe-docs" };
+result = await catalogAward({ ...catalogIdentity, bountyIssue: 1, bountyApprovalCommentId: 2 });
+check("catalog and legacy bounty identities cannot be mixed", result.response.status === 400 && result.data.error === "bounty_identity_conflict", JSON.stringify(result.data));
+result = await catalogAward(catalogIdentity);
+let catalogPointer = await catalogStorage.get("award:catalog-bounty:bp-safe-docs");
+check("catalog bounty reservation atomically binds ID PR and exact head", result.response.status === 201 && result.data.reservation?.catalogBountyId === "bp-safe-docs" && catalogPointer?.reservationKey === `award:reservation:801:${"b".repeat(40)}` && catalogPointer?.status === "reserved", JSON.stringify({ response: result.data, pointer: catalogPointer }));
+result = await catalogAward(catalogIdentity);
+check("catalog bounty reservation replay is idempotent", result.response.ok && result.data.already === true && result.data.reserved === true, JSON.stringify(result.data));
+result = await catalogAward({ ...catalogIdentity, prNumber: 802, headSha: "c".repeat(40) });
+check("one catalog bounty cannot reserve a second PR", result.response.status === 409 && result.data.error === "bounty_claim_conflict", JSON.stringify(result.data));
+result = await catalogAward({ phase: "cancel", prNumber: 801, headSha: "b".repeat(40), reason: "exact head closed" });
+catalogPointer = await catalogStorage.get("award:catalog-bounty:bp-safe-docs");
+check("catalog bounty cancellation releases its durable claim", result.response.ok && catalogPointer?.status === "released", JSON.stringify({ response: result.data, pointer: catalogPointer }));
+const catalogRetry = { ...catalogIdentity, prNumber: 802, headSha: "c".repeat(40) };
+result = await catalogAward(catalogRetry);
+check("released catalog bounty may bind one replacement exact head", result.response.status === 201 && result.data.reservation?.catalogBountyId === "bp-safe-docs", JSON.stringify(result.data));
+result = await catalogAward({ phase: "finalize", github: "owner", prNumber: 802, headSha: "c".repeat(40), mergeSha: "d".repeat(40) });
+catalogPointer = await catalogStorage.get("award:catalog-bounty:bp-safe-docs");
+check("catalog bounty finalization is durable and exact-head bound", result.response.ok && result.data.awarded === 10 && catalogPointer?.status === "awarded" && catalogPointer?.mergeSha === "d".repeat(40), JSON.stringify({ response: result.data, pointer: catalogPointer }));
+result = await catalogAward({ ...catalogIdentity, prNumber: 803, headSha: "e".repeat(40) });
+check("finalized catalog bounty can never award again", result.response.status === 409 && result.data.error === "bounty_claim_conflict", JSON.stringify(result.data));
+
 await storage.put("agent:agent-one", { name: "agent-one", bonusTiles: 195, placements: 1 });
 result = await award({ ...identity, prNumber: 43, headSha: "4".repeat(40) });
 check("reservation refuses partial or overflowing awards", result.response.status === 429 && result.data.error === "bank_cap", JSON.stringify(result.data));

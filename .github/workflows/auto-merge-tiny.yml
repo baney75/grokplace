@@ -43,7 +43,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.action == 'merge')
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write
       checks: write
       contents: write
       issues: read
@@ -275,10 +275,11 @@ jobs:
           FILES: ${{ steps.validation.outputs.files }}
           TOTAL: ${{ steps.validation.outputs.total }}
           PATHS: ${{ steps.validation.outputs.paths }}
+          CATALOG_BOUNTY_ID: ${{ steps.validation.outputs.catalog_bounty_id }}
         run: |
           set -euo pipefail
           [ -n "${AWARD_SECRET:-}" ] || { echo "AWARD_SECRET is not configured."; exit 1; }
-          BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --argjson files "$FILES" --argjson lines "$TOTAL" --argjson paths "$PATHS" '{phase:"reserve",github:$github,prNumber:$pr,headSha:$head,filesChanged:$files,linesChanged:$lines,paths:$paths}')
+          BODY=$(jq -n --arg github "$AUTHOR" --argjson pr "$PR" --arg head "$HEAD" --argjson files "$FILES" --argjson lines "$TOTAL" --argjson paths "$PATHS" --arg catalog "$CATALOG_BOUNTY_ID" '{phase:"reserve",github:$github,prNumber:$pr,headSha:$head,filesChanged:$files,linesChanged:$lines,paths:$paths} + (if $catalog == "NONE" then {} else {catalogBountyId:$catalog} end)')
           if ! curl --retry 5 --retry-max-time 75 --retry-all-errors --fail-with-body -sS -X POST "$API/v1/maintain/award" -H "Authorization: Bearer $AWARD_SECRET" -H "Content-Type: application/json" -d "$BODY" -o /tmp/reserve.json; then
             echo "WAIT_RETRYABLE_AWARD_RESERVE: bounded idempotent reservation retry exhausted."
             echo "retryable=true" >> "$GITHUB_OUTPUT"

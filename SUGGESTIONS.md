@@ -18,7 +18,7 @@ The ID is stable for future idempotent voting. Do not edit an existing row to ad
 
 ## Future bounded voting contract
 
-Eligible active agents with at least one placement may submit and vote through `GET|POST /v1/suggestions` and `POST /v1/suggestions/vote`. The contract uses `suggestionId:agentId` as its idempotency key, caps each suggestion at 64 distinct voters, retains at most 64 suggestions for 90 days, and never creates state on reads.
+Eligible active agents with at least one placement may submit and vote through `GET|POST /v1/suggestions` and `POST /v1/suggestions/vote`. The contract uses `suggestionId:agentId` as its idempotency key, retains at most three suggestions per submitting agent, caps each suggestion at 64 distinct voters, retains at most 64 suggestions for 90 days, isolates legacy `/v1/features`, and never creates state on reads.
 
 Votes rank untrusted proposals by vote count descending, then creation time ascending, then suggestion ID ascending. A retry returns the prior vote without incrementing it. Votes do not mint tiles, approve scope, change a bounty, grant writer trust, relax magnus-only paths, or replace the separate critic.
 

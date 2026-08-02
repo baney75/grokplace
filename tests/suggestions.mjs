@@ -45,6 +45,7 @@ function post(path, name, body) {
 
 const now = Date.now();
 const storage = new MemoryStorage({
+  features: [{ id: "ft_aaaaaaaaaaaaaaaa", title: "Legacy feature", summary: "Legacy feature queue record.", submittedBy: "proposer", votes: 1, voters: ["proposer"], status: "proposed", createdAt: now }],
   "agent:proposer": agent("proposer", now),
   "agent:voter-two": agent("voter-two", now),
   "agent:voter-three": agent("voter-three", now),
@@ -66,6 +67,7 @@ const writesBeforeRead = storage.writes;
 response = await canvas.handleFeatures("*", true);
 data = await response.json();
 check("suggestion read is cached and creates no Durable Object writes", response.status === 200 && response.headers.get("Cache-Control") === "public, max-age=5" && storage.writes === writesBeforeRead && data.authority === "priority_only" && data.suggestions[0].id === suggestionId, JSON.stringify(data));
+check("legacy feature intake cannot appear in the suggestion queue", data.suggestions.every((suggestion) => suggestion.id !== "ft_aaaaaaaaaaaaaaaa"), JSON.stringify(data));
 
 const writesBeforeDuplicate = storage.writes;
 response = await canvas.handleFeatureSubmit(post("/internal/suggestions", "proposer", { title: "Improve map labels", summary: "A retry with equivalent title must not duplicate state." }), "*", "test-ip", true);
@@ -86,13 +88,28 @@ data = await response.json();
 check("inactive agent cannot vote", response.status === 403 && data.error === "active_agent_required", JSON.stringify(data));
 
 const voters = Array.from({ length: 64 }, (_, index) => `voter-${index}`);
-storage.values.set("features", [{ ...(await storage.get("features"))[0], votes: voters.length, voters }]);
+storage.values.set("suggestions", [{ ...(await storage.get("suggestions"))[0], votes: voters.length, voters }]);
 response = await canvas.handleFeatureVote(post("/internal/suggestions/vote", "voter-three", { suggestionId }), "*", "test-ip", true);
 data = await response.json();
 check("per-suggestion voter cap fails closed without unbounded growth", response.status === 409 && data.error === "voter_cap" && data.maxVoters === 64, JSON.stringify(data));
 
-const old = { ...(await storage.get("features"))[0], id: "sg_1111111111111111", createdAt: now - 91 * 24 * 60 * 60_000 };
-storage.values.set("features", [old]);
+storage.values.set("suggestions", []);
+for (const [title, summary] of [["Improve palette", "Clarify palette roles for planned art."], ["Improve previews", "Show a clearer deterministic preview state."], ["Improve regions", "Make regional coordination bounds easier to inspect."]]) {
+  response = await canvas.handleFeatureSubmit(post("/internal/suggestions", "proposer", { title, summary }), "*", "test-ip", true);
+  check(`same agent may retain bounded suggestion ${title}`, response.status === 201, await response.text());
+}
+response = await canvas.handleFeatureSubmit(post("/internal/suggestions", "proposer", { title: "Fourth proposal", summary: "This proposal must hit the retained per-agent cap." }), "*", "test-ip", true);
+data = await response.json();
+check("one agent cannot monopolize suggestion retention", response.status === 429 && data.error === "agent_suggestion_cap" && data.maxRetainedPerAgent === 3, JSON.stringify(data));
+
+const fullQueue = Array.from({ length: 64 }, (_, index) => ({ id: `sg_${index.toString(16).padStart(16, "0")}`, title: `Queue item ${index}`, summary: "Bounded queue capacity fixture.", submittedBy: `agent-${index}`, votes: 1, voters: [`agent-${index}`], status: "proposed", createdAt: now + index }));
+storage.values.set("suggestions", fullQueue);
+response = await canvas.handleFeatureSubmit(post("/internal/suggestions", "proposer", { title: "Queue overflow", summary: "A full queue must reject additional retained state." }), "*", "test-ip", true);
+data = await response.json();
+check("full suggestion queue fails closed without evicting another agent", response.status === 429 && data.error === "queue_full" && (await storage.get("suggestions")).length === 64, JSON.stringify(data));
+
+const old = { ...fullQueue[0], id: "sg_1111111111111111", createdAt: now - 91 * 24 * 60 * 60_000 };
+storage.values.set("suggestions", [old]);
 const writesBeforeExpiredRead = storage.writes;
 response = await canvas.handleFeatures("*", true);
 data = await response.json();

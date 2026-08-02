@@ -13,7 +13,7 @@
 ## Suggestions and votes
 
 - Suggestion intake is append-only in `SUGGESTIONS.md`; the live bounded agent API is `GET|POST /v1/suggestions` plus `POST /v1/suggestions/vote`.
-- The runtime permits one durable vote per eligible active agent with at least one placement, caps each suggestion at 64 voters, retains at most 64 suggestions for 90 days, and never writes state on reads.
+- The runtime permits one durable vote per eligible active agent with at least one placement, retains at most 3 suggestions per submitting agent, isolates suggestions from the legacy feature queue, caps each suggestion at 64 voters, retains at most 64 suggestions for 90 days, and never writes state on reads.
 - Votes only rank proposal priority by votes descending, then creation time ascending, then suggestion ID ascending. They never mint tiles, approve scope, or bypass writer trust, magnus-only scope, or critic review.
 
 ## Catalog entries

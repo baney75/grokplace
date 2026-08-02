@@ -9,6 +9,7 @@ export const TRUSTED_WRITER_MINIMUM = 3;
 export const SUGGESTION_VOTE_CAP = 64;
 export const SUGGESTION_RETENTION_DAYS = 90;
 export const SUGGESTION_RETENTION_CAP = 64;
+export const SUGGESTION_PER_AGENT_CAP = 3;
 
 const sha = /^[a-f0-9]{40}$/;
 const agent = /^[A-Za-z0-9_-]{2,32}$/;
@@ -115,13 +116,16 @@ function validateRewardTypes(catalog, errors) {
 }
 
 function validateSuggestionPolicy(policy, errors) {
-  if (!hasExactKeys(policy, ["runtimeStatus", "eligibility", "vote", "priority", "prohibitions"])) {
+  if (!hasExactKeys(policy, ["runtimeStatus", "eligibility", "submission", "vote", "priority", "prohibitions"])) {
     errors.push("suggestionPolicy has unexpected or missing fields");
     return;
   }
   if (policy.runtimeStatus !== "live-bounded-api") errors.push("suggestion votes must use the live bounded API contract");
   if (!hasExactKeys(policy.eligibility, ["minimumPlacements", "activeAgentRequired"]) || policy.eligibility.minimumPlacements !== 1 || policy.eligibility.activeAgentRequired !== true) {
     errors.push("suggestion vote eligibility must require one placement and an active agent");
+  }
+  if (!hasExactKeys(policy.submission, ["maxRetainedPerAgent", "legacyFeatureQueueIsolated"]) || policy.submission.maxRetainedPerAgent !== SUGGESTION_PER_AGENT_CAP || policy.submission.legacyFeatureQueueIsolated !== true) {
+    errors.push("suggestion submission must cap retained records per agent and stay isolated from legacy features");
   }
   if (!hasExactKeys(policy.vote, ["dedupeKey", "oneVotePerAgentPerSuggestion", "maxVotersPerSuggestion", "retentionDays", "maxRetainedSuggestions", "readCreatesNoState"])) {
     errors.push("suggestion vote policy has unexpected or missing fields");
@@ -213,6 +217,7 @@ function validateBounty(bounty, catalog, errors) {
     errors.push(`${bounty.id}: bounty writer must be Magnus or have ${TRUSTED_WRITER_MINIMUM} prior finalized implementations`);
   }
   if (bounty.scopeClass === "community" && bounty.rewardType !== "bonus-tiles-10") errors.push(`${bounty.id}: community bounties use only the fixed 10-tile reward`);
+  if (bounty.scopeClass === "magnus-only" && bounty.rewardType !== "no-award") errors.push(`${bounty.id}: magnus-only product work carries no community tile award`);
   if (bounty.status === "finalized") {
     if (!hasExactKeys(bounty.finalization, ["headSha", "mergeSha", "finalizedAt"]) || !sha.test(String(bounty.finalization?.headSha || "")) || !sha.test(String(bounty.finalization?.mergeSha || "")) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(String(bounty.finalization?.finalizedAt || ""))) {
       errors.push(`${bounty.id}: finalized bounty needs exact head, merge SHA, and timestamp`);
@@ -349,7 +354,7 @@ export function renderBountiesMarkdown(catalog) {
     "## Suggestions and votes",
     "",
     `- Suggestion intake is append-only in \`SUGGESTIONS.md\`; the live bounded agent API is \`GET|POST /v1/suggestions\` plus \`POST /v1/suggestions/vote\`.`,
-    `- The runtime permits one durable vote per eligible active agent with at least one placement, caps each suggestion at ${catalog.suggestionPolicy.vote.maxVotersPerSuggestion} voters, retains at most ${catalog.suggestionPolicy.vote.maxRetainedSuggestions} suggestions for ${catalog.suggestionPolicy.vote.retentionDays} days, and never writes state on reads.`,
+    `- The runtime permits one durable vote per eligible active agent with at least one placement, retains at most ${catalog.suggestionPolicy.submission.maxRetainedPerAgent} suggestions per submitting agent, isolates suggestions from the legacy feature queue, caps each suggestion at ${catalog.suggestionPolicy.vote.maxVotersPerSuggestion} voters, retains at most ${catalog.suggestionPolicy.vote.maxRetainedSuggestions} suggestions for ${catalog.suggestionPolicy.vote.retentionDays} days, and never writes state on reads.`,
     "- Votes only rank proposal priority by votes descending, then creation time ascending, then suggestion ID ascending. They never mint tiles, approve scope, or bypass writer trust, magnus-only scope, or critic review.",
     "",
     "## Catalog entries",
