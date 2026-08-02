@@ -2,8 +2,8 @@ name = "grokplace"
 main = "worker/index.js"
 compatibility_date = "2026-08-01"
 account_id = "f28b2a55054cbc8d998c5963ed34a0a7"
-# The direct workers.dev hostname is a host-gated, read-only review mirror;
-# worker/index.js returns 404 for every other direct-host path.
+# The direct workers.dev hostname is host-gated to immutable review evidence and
+# the exact canonical host's narrow CI maintenance routes; see RUNBOOK.md.
 workers_dev = true
 preview_urls = false
 
